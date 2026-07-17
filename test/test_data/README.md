@@ -1,85 +1,84 @@
-# Training Data Quality Tests
+# Training Data Quality Tests 
+## Overview
 
-## Übersicht
+This test suite validates the quality of the training CSV before the model is trained. It prevents common errors caused by poor data quality, missing columns, or inconsistent features.
 
-Diese Test-Suite validiert die Qualität der Training-CSV **bevor** das Model trainiert wird. Sie verhindert häufige Fehler durch schlechte Datenqualität, fehlende Spalten oder inkonsistente Features.
-
-**Datei:** `data/summary_output_task_1_2_training.csv`  
-**Anzahl Tests:** 37 Tests in 9 Kategorien
-
----
-
-## 🎯 Warum diese Tests?
-
-Da deine Daten aus einer Datenbank kommen, können folgende Probleme auftreten:
-- ✅ **CSV-Import** kann Datentypen ändern
-- ✅ **Query-Logik** kann fehlerhafte Features produzieren
-- ✅ **Neue Daten** können andere Verteilungen haben
-- ✅ **Schema-Änderungen** können Spalten entfernen
-
-Diese Tests fangen solche Probleme **früh** ab, bevor das Training startet.
+**File:** `data/summary_output_task_1_2_training.csv`  
+**Total Tests:** 37 Tests in 9 categories
 
 ---
 
-## 📊 Test-Kategorien
+## 🎯 Why These Tests?
 
-### **Kategorie 1: Data Quality Tests** (6 Tests) ⭐⭐⭐
+Since your data originates from a database, the following issues can occur:
+- ✅ **CSV-Import** can change data types.
+- ✅ **Query logic** can produce faulty features.
+- ✅ **New Data** can have different distributions.
+- ✅ **Schema changes** can remove columns.
+
+These tests catch such issues early before the training starts.
+
+---
+
+## 📊 Test Categories
+
+### Category 1: Data Quality Tests (6 Tests) ⭐⭐⭐
 
 #### `TestSchemaValidation`
-- ✅ CSV existiert
-- ✅ CSV ist nicht leer (mindestens 100 Zeilen)
-- ✅ Alle erforderlichen Spalten vorhanden
-- ✅ Keine unerwarteten Extra-Spalten
-- ✅ Identifier-Spalten vorhanden
-- ✅ Target-Spalten vorhanden
+- ✅ CSV exists.
+- ✅ CSV is not empty (minimum 100 rows).
+- ✅ All required columns are present.
+- ✅ No unexpected extra columns.
+- ✅ Identifier columns are present.
+- ✅ Target columns are present.
 
-**Verhindert:** Training-Crashes durch fehlende Spalten
+**Prevents:** Training crashes due to missing columns.
 
 ---
 
 #### `TestDataTypeValidation` (4 Tests)
-- ✅ Numerische Features sind numerisch
-- ✅ Target-Spalten sind binär (0 oder 1)
-- ✅ Boolean-ähnliche Spalten sind 0 oder 1
-- ✅ `column_type` ist String
+- ✅ Numerical features are numerical.
+- ✅ Target columns are binary (0 or 1).
+- ✅ Boolean-like columns are 0 or 1.
+- ✅ column_type is a string.
 
-**Verhindert:** Type Errors während Training
+**Prevents:**  Type errors during training.
 
 ---
 
 #### `TestNoMissingValuesInCriticalColumns` (3 Tests)
-- ✅ Identifier haben keine NULLs
-- ✅ Targets haben keine NULLs
-- ✅ Kritische Features haben <50% NULLs
+- ✅ Identifiers have no NULL values.
+- ✅ Targets have no NULL values.
+- ✅ Critical features have less than 50% NULL values.
 
-**Verhindert:** Training-Fehler durch fehlende Werte
+**Prevents:** Training errors due to missing values.
 
 ---
 
-### **Kategorie 2: Data Distribution Tests** (9 Tests) ⭐⭐
+### **Category 2: Data Distribution Tests** (9 Tests)  ⭐⭐
 
 #### `TestTargetDistribution`
-- ✅ `pk_target` ist nicht extrem unbalanced (<1% oder >99%)
-- ✅ `pk_target` hat beide Klassen (0 und 1)
-- ✅ Alle Targets haben beide Klassen
-- ✅ Print Target Distribution Summary
+- ✅ `pk_target` is not extremely unbalanced (<1% or >99%).
+- ✅ `pk_target` contains both classes (0 and 1).
+- ✅ All targets contain both classes.
+- ✅ Print target distribution summary.
 
-**Verhindert:** Schlechte Models durch extreme Class Imbalance
+**Prevents:** Poor models caused by extreme class imbalance.
 
 ---
 
 #### `TestUniqueRatioBounds` (5 Tests)
-- ✅ `unique_ratio` zwischen 0 und 1
-- ✅ `unique_ratio_relative_to_max` zwischen 0 und 1
-- ✅ `table_max_unique_ratio` zwischen 0 und 1
-- ✅ `null_ratio` zwischen 0 und 1
-- ✅ `relative_ordinal_position` zwischen 0 und 1
+- ✅ `unique_ratio` is between 0 and 1.
+- ✅ `unique_ratio_relative_to_max` is between 0 and 1.
+- ✅ `table_max_unique_ratio` is between 0 and 1.
+- ✅ `null_ratio` is between 0 and 1.
+- ✅ `relative_ordinal_position` is between 0 and 1.
 
-**Verhindert:** Fehlerhafte Feature-Berechnungen
+**Prevents:** Faulty feature calculations.
 
 ---
 
-### **Kategorie 3: Business Logic Tests** (9 Tests) ⭐⭐
+### **Category 3: Business Logic Tests** (9 Tests) ⭐⭐
 
 #### `TestConsistencyChecks` (5 Tests)
 - ✅ `is_unique=1` → `unique_ratio=1.0`
@@ -88,68 +87,68 @@ Diese Tests fangen solche Probleme **früh** ab, bevor das Training startet.
 - ✅ `ordinal_position` >= 1
 - ✅ `count` >= 0
 
-**Verhindert:** Inkonsistente Features (Data Leakage)
+**Prevents:** Inconsistent features (Data Leakage)
 
 ---
 
 #### `TestGroupConsistency` (4 Tests)
-- ✅ `table_column_count` ist gleich für alle Spalten derselben Tabelle
-- ✅ `table_row_count` ist gleich für alle Spalten derselben Tabelle
-- ✅ `table_has_unique_column` ist gleich für alle Spalten
-- ✅ `table_max_unique_ratio` ist gleich für alle Spalten
+- ✅ `table_column_count` is identical for all columns of the same table.
+- ✅ `table_row_count` is identical for all columns of the same table.
+- ✅ `table_has_unique_column` is identical for all columns of the same table.
+- ✅ `table_max_unique_ratio` is identical for all columns of the same table.
 
-**Verhindert:** Fehlerhafte Aggregationen (Data Leakage)
+**Prevents:** Faulty aggregations (Data Leakage)
 
 ---
 
-### **Kategorie 4: Pipeline Integration Tests** (6 Tests) ⭐
+### **Category 4: Pipeline Integration Tests** (6 Tests) ⭐
 
 #### `TestOneHotEncoding` (2 Tests)
-- ✅ `column_type` hat erwartete Werte
-- ✅ `pd.get_dummies()` funktioniert
+- ✅ `column_type` contains expected values.
+- ✅ `pd.get_dummies()` works correctly.
 
-**Verhindert:** Crashes bei One-Hot Encoding
+**Prevents:** Crashes during one-hot encoding.
 
 ---
 
 #### `TestTrainTestSplit` (4 Tests)
-- ✅ Mindestens 5 Datenbanken (für 5-fold split)
-- ✅ Jede Datenbank hat mehrere Samples
-- ✅ Stratifikation ist möglich (beide Klassen pro DB)
-- ✅ `StratifiedGroupKFold` funktioniert (keine DB-Überlappung)
+- ✅ At least 5 databases available (for 5-fold split).
+- ✅ Each database contains multiple samples.
+- ✅ `Stratification` is possible (both classes present per DB).
+- ✅ `StratifiedGroupKFold` works correctly (no DB overlap).
 
-**Verhindert:** Crashes bei Train-Test-Split
+**Prevents:** Crashes during train-test split.
 
 ---
 
-## 🚀 Tests ausführen
+## 🚀 Tests execution
 
-### Alle Data Quality Tests
+### All Data Quality Tests
 ```bash
 pytest tests/test_data/test_training_data_quality.py -v
 ```
 
-### Nur Schema Tests (schnell)
+### Only Schema Tests (schnell)
 ```bash
 pytest tests/test_data/test_training_data_quality.py::TestSchemaValidation -v
 ```
 
-### Nur Distribution Tests
+### Only Distribution Tests
 ```bash
 pytest tests/test_data/test_training_data_quality.py::TestTargetDistribution -v
 ```
 
-### Mit detailliertem Output
+### With detailed Output
 ```bash
 pytest tests/test_data/test_training_data_quality.py -v -s
 ```
-(Der `-s` Flag zeigt Print-Statements wie Target Distribution Summary)
+(The `-s` flag shows Print-Statements like Target Distribution Summary)
 
 ---
 
-## 📈 Beispiel-Output
+## 📈 Example Output
 
-### Erfolgreicher Testlauf
+### Successful Test Run
 ```
 tests/test_data/test_training_data_quality.py::TestSchemaValidation::test_training_csv_exists PASSED
 tests/test_data/test_training_data_quality.py::TestSchemaValidation::test_training_csv_is_not_empty PASSED
@@ -159,19 +158,19 @@ tests/test_data/test_training_data_quality.py::TestTargetDistribution::test_targ
 === Target Distribution Summary ===
 
 pk_target:
-  Positive (1): 1234 (11.9%)
-  Negative (0): 9136 (88.1%)
+  Positiv (1): 1234 (11.9%)
+  Negativ (0): 9136 (88.1%)
 
 composite_pk_target:
-  Positive (1): 456 (4.4%)
-  Negative (0): 9914 (95.6%)
+  Positiv (1): 456 (4.4%)
+  Negativ (0): 9914 (95.6%)
 
 ...
 
 ============================== 37 passed in 2.45s ===============================
 ```
 
-### Fehlgeschlagener Test (Beispiel)
+### Aborted Test (Example)
 ```
 FAILED tests/test_data/test_training_data_quality.py::TestSchemaValidation::test_training_csv_has_all_required_columns
 
@@ -180,36 +179,36 @@ AssertionError: Missing required columns: ['ordinal_position', 'pk_target']
 
 ---
 
-## 🐛 Häufige Fehler und Lösungen
+## 🐛 Common Errors and Solutions
 
 ### "Training data not found"
-**Problem:** CSV existiert nicht  
-**Lösung:** Daten-Pipeline ausführen
+**Problem:** CSV file does not exist 
+**Solution:** Run the data pipeline
 ```bash
 python src/get_trino_summaries_task_1_2_training.py
 ```
 
 ### "pk_target is extremely imbalanced: 0.2% positive"
-**Problem:** Zu wenige positive Beispiele  
-**Lösung:** Mehr Daten sammeln oder Sampling-Strategie anpassen
+**Problem:** Too few positive examples  
+**Solution:** Collect more data or adjust the sampling strategy
 
 ### "Missing required columns: ['unique_ratio']"
-**Problem:** Spalte fehlt in CSV  
-**Lösung:** Query in Data Pipeline überprüfen und neu ausführen
+**Problem:** Column is missing from the CSV
+**Solution:** Check the query in the data pipeline and rerun it
 
 ### "is_unique=1 but unique_ratio<1.0"
-**Problem:** Inkonsistente Feature-Berechnung  
-**Lösung:** Logik in `get_trino_summaries` überprüfen
+**Problem:** Inconsistent feature calculation 
+**Solution:** Verify the logic in `get_trino_summaries`
 
 ### "StratifiedGroupKFold split failed"
-**Problem:** Nicht genug Datenbanken oder zu unbalanced  
-**Lösung:** Mehr Datenbanken hinzufügen oder Split-Strategie ändern
+**Problem:** Not enough databases or data is too unbalanced
+**Solution:** Not enough databases or data is too unbalanced
 
 ---
 
 ## 🔄 Integration in CI/CD
 
-Diese Tests sollten in deiner CI/CD Pipeline laufen **vor** dem Model Training:
+These tests should run in your CI/CD pipeline **before** the model training starts:
 
 ```yaml
 # .github/workflows/train-model.yml
@@ -232,7 +231,7 @@ jobs:
 
 ## 🔄 Integration in Prefect Pipeline
 
-Füge einen Data Quality Check als ersten Task hinzu:
+Add a data quality check as the first task:
 
 ```python
 from prefect import flow, task
@@ -261,10 +260,10 @@ def training_pipeline():
 
 ---
 
-## 📝 Erweitern der Tests
+## 📝 Extend The Tests
 
-### Neue Features hinzufügen
-Wenn du neue Features zur CSV hinzufügst:
+### Add NewFeatures 
+When adding new features to the CSV:
 
 1. **Aktualisiere `EXPECTED_FEATURE_COLUMNS`** (Zeile 27)
 ```python
@@ -274,7 +273,7 @@ EXPECTED_FEATURE_COLUMNS = [
 ]
 ```
 
-2. **Optional: Füge spezifische Tests hinzu**
+2. **Optional: Add specific Tests**
 ```python
 def test_new_feature_is_valid(self, training_df: pd.DataFrame):
     """Test that new_feature has valid range."""
@@ -282,10 +281,10 @@ def test_new_feature_is_valid(self, training_df: pd.DataFrame):
     assert training_df["new_feature"].max() <= 100
 ```
 
-### Neue Targets hinzufügen
-Für neue Target-Spalten (z.B. Task 3):
+### Add New Targets
+For new Target columns (z.B. Task 3):
 
-1. **Aktualisiere `EXPECTED_TARGET_COLUMNS`** (Zeile 67)
+1. **Update `EXPECTED_TARGET_COLUMNS`** (rows 67)
 ```python
 EXPECTED_TARGET_COLUMNS = [
     "pk_target",
@@ -296,40 +295,40 @@ EXPECTED_TARGET_COLUMNS = [
 ]
 ```
 
-Tests laufen automatisch für alle Targets!
+Tests run automatically for all targets!
 
 ---
 
 ## 🎯 Best Practices
 
-### Wann diese Tests laufen sollten:
-1. ✅ **Vor jedem Training** - Lokale Checks
-2. ✅ **In CI/CD** - Automatische Validierung
-3. ✅ **Nach Data Pipeline Updates** - Regression Tests
-4. ✅ **Bei neuen Datenquellen** - Integration Tests
+### When these tests should run:
+1. ✅ **Before every training run** - Local checks
+2. ✅ **In CI/CD** - Automated validation
+3. ✅ **After data pipeline updates** - Regression Tests
+4. ✅ **For new data sources** - Integration Tests
 
-### Was tun wenn Tests fehlschlagen:
-1. **Nicht überspringen!** - Fehler früh beheben spart Zeit
-2. **Root Cause finden** - Ist es die DB-Query oder CSV-Import?
-3. **Test anpassen** - Nur wenn die Anforderung sich geändert hat
-4. **Daten fixen** - Meist ist es ein Data Quality Issue
-
----
-
-## 📚 Zusätzliche Ressourcen
-
-- **Great Expectations:** Für Production-Grade Data Testing
-- **Pandera:** Schema Validation für Pandas DataFrames
-- **dbt Tests:** Für Tests direkt in der Datenbank
+### What to do if tests fail:
+1. **Do not skip!** - Fixing errors early saves time
+2. **Find the root cause** - Is it the DB query or the CSV import?
+3. **Adjust the test** - Only if the requirements have changed
+4. **Fix the data** - Usually, it is a data quality issue
 
 ---
 
-## 🔗 Verwandte Tests
+## 📚 Additional Resources
+
+- **Great Expectations:** For production-grade data testing
+- **Pandera:** Schema validation for Pandas DataFrames
+- **dbt Tests:** For testing directly inside the database
+
+---
+
+## 🔗 Related Tests
 
 - `tests/test_api/` - API Endpoint Tests
 - `tests/test_models/` - Model Loading Tests
-- `tests/README.md` - Allgemeine Test-Übersicht
+- `tests/README.md` - General Test Overview
 
 ---
 
-**Viel Erfolg mit Data Quality! 🚀**
+**Success with your data quality endeavors! 🚀**

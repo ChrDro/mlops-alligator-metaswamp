@@ -2,15 +2,11 @@ import os
 import pandas as pd
 import pytest
 
-# Path to the training CSV file (adjust if necessary)
-CSV_FILE_PATH = "../../data/nf_test_analyse.csv"
-
-
 @pytest.fixture(scope="module")
-def df():
-    """Loads the CSV file and performs basic data integrity checks."""
-    assert os.path.exists(CSV_FILE_PATH), f"File not found: {CSV_FILE_PATH}"
-    data = pd.read_csv(CSV_FILE_PATH)
+def df(csv_path_nf):  
+    """Loads the Normal Form CSV file dynamically."""
+    assert os.path.exists(csv_path_nf), f"File not found at path: {csv_path_nf}"
+    data = pd.read_csv(csv_path_nf)
     assert len(data) >= 100, f"CSV is too small or empty ({len(data)} rows)"
     return data
 
