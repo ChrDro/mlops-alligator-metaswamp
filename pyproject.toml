@@ -4,4 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11.3"
-dependencies = []
+dependencies = [
+    "python-dotenv>=1.2.2",
+    "ruff>=0.15.22",
+    "sqlalchemy>=2.0.51",
+    "trino[sqlalchemy]>=0.338.0",
+    "urllib3>=2.7.0",
+]

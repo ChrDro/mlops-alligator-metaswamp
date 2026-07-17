@@ -166,9 +166,9 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 ## 2. DETAILLIERTE TODO-LISTE
 
 ### Phase 1: Clean, Structured Code (Woche 1)
-- [ ] **1.1** Ruff Installation und Konfiguration
-  - [ ] Ruff zu `pyproject.toml` hinzufügen
-  - [ ] Ruff-Konfiguration erstellen (line-length, rules, excludes)
+- [x] **1.1** Ruff Installation und Konfiguration
+  - [x] Ruff zu `pyproject.toml` hinzufügen
+  - [x] Ruff-Konfiguration erstellen (line-length, rules, excludes)
   - [ ] Pre-commit Hooks einrichten
   
 - [ ] **1.2** Code-Quality-Verbesserungen
