@@ -169,14 +169,14 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - [x] **1.1** Ruff Installation und Konfiguration
   - [x] Ruff zu `pyproject.toml` hinzufügen
   - [x] Ruff-Konfiguration erstellen (line-length, rules, excludes)
-  - [ ] Pre-commit Hooks einrichten
-  
+  - [x] Pre-commit Hooks einrichten
+
 - [ ] **1.2** Code-Quality-Verbesserungen
   - [ ] Bestehenden Code mit Ruff formatieren
   - [ ] Type Hints zu allen Funktionen hinzufügen
   - [ ] Docstrings im Google/NumPy-Style ergänzen
   - [ ] Code-Duplikationen eliminieren
-  
+
 - [ ] **1.3** Projektstruktur-Refactoring
   - [ ] Klare Module-Trennung (data/, models/, api/, pipelines/)
   - [ ] Config-Management mit Pydantic Settings
@@ -190,21 +190,21 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] `tests/` Verzeichnis-Struktur erstellen
   - [ ] `conftest.py` für Fixtures einrichten
   - [ ] pytest.ini/pyproject.toml Konfiguration
-  
+
 - [ ] **2.2** Unit Tests schreiben
   - [ ] Tests für Data Processing Funktionen
   - [ ] Tests für Model Prediction Logik
   - [ ] Tests für FastAPI Endpoints (mit TestClient)
   - [ ] Tests für Daten-Validierung
   - [ ] Mindestens 70% Code Coverage
-  
+
 - [ ] **2.3** GitHub Actions CI Pipeline
   - [ ] `.github/workflows/ci.yml` erstellen
   - [ ] Lint Job (Ruff Check)
   - [ ] Test Job (pytest mit Coverage Report)
   - [ ] Matrix Testing (Python 3.11+)
   - [ ] Coverage Badge zu README hinzufügen
-  
+
 - [ ] **2.4** Docker Build & GHCR Pipeline
   - [ ] `.github/workflows/docker-build.yml` erstellen
   - [ ] Multi-stage Dockerfile optimieren
@@ -223,13 +223,13 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] API Versioning (/api/v1/)
   - [ ] Health-Check Endpoint erweitern (readiness/liveness)
   - [ ] OpenAPI Schema dokumentieren
-  
+
 - [ ] **3.2** Model Loading Optimization
   - [ ] MLflow Model Loading beim Startup
   - [ ] Model Caching Strategie
   - [ ] Graceful Model Reload ohne Downtime
   - [ ] Model Version als Env Variable
-  
+
 - [ ] **3.3** Dockerfile Optimierung
   - [ ] Multi-stage Build (builder + runtime)
   - [ ] Layer Caching optimieren
@@ -247,27 +247,27 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Profiles.yml für DuckDB konfigurieren
   - [ ] Seeds für Test-Daten erstellen
   - [ ] Models für Data Transformation
-  
+
 - [ ] **4.2** Test Data Generation
   - [ ] dbt Seed-Dateien für synthetische Daten
   - [ ] Python-Script zur erweiterten Datengenerierung
   - [ ] Datenqualitäts-Tests mit dbt tests
   - [ ] Schema-Dokumentation
-  
+
 - [ ] **4.3** Prefect Orchestration Setup
   - [ ] Prefect installieren (`prefect>=2.0`)
   - [ ] Prefect Server lokal starten
   - [ ] Flow für Batch Training erstellen
   - [ ] Flow für Batch Prediction erstellen
   - [ ] Flow für dbt Run orchestrieren
-  
+
 - [ ] **4.4** Batch Pipeline
   - [ ] CSV Batch Prediction Flow
   - [ ] CSV Input Validation
   - [ ] Batch Training Flow mit MLflow Logging
   - [ ] Error Handling und Retry Logic
   - [ ] Ergebnis-Export (CSV/Database)
-  
+
 - [ ] **4.5** Streaming Pipeline
   - [ ] Message Queue Setup (RabbitMQ/Kafka/Redis)
   - [ ] Prefect Flow für Event Processing
@@ -285,20 +285,20 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Metrics Logging (Precision, Recall, F1)
   - [ ] Artifacts Logging (Confusion Matrix, Feature Importance)
   - [ ] Dataset Tracking mit MLflow Datasets
-  
+
 - [ ] **5.2** MLflow Model Registry
   - [ ] Model Registration nach Training
   - [ ] Model Stages (None → Staging → Production → Archived)
   - [ ] Model Versioning
   - [ ] Model Metadata (Description, Tags)
   - [ ] Model Signature und Input Example
-  
+
 - [ ] **5.3** Deployment Pattern
   - [ ] FastAPI lädt Model aus MLflow Registry
   - [ ] Environment Variable für Model Stage/Version
   - [ ] Model Loading Funktion mit Fallback
   - [ ] Blue-Green Deployment Vorbereitung
-  
+
 - [ ] **5.4** Retraining Path
   - [ ] Manueller Retraining Trigger (API Endpoint)
   - [ ] Prefect Flow für Retraining
@@ -306,7 +306,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Auto-Register zu MLflow nach Retraining
   - [ ] Model Comparison (Old vs New)
   - [ ] Manual Promotion zu Production
-  
+
 - [ ] **5.5** CI/CD für Modelle
   - [ ] GitHub Action für Model Training
   - [ ] Model Testing (Performance Thresholds)
@@ -323,20 +323,20 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
     - [ ] Error Counter
     - [ ] Model Version Gauge
   - [ ] Prometheus Konfiguration erweitern
-  
+
 - [ ] **6.2** Golden Signals implementieren
   - [ ] **Latency**: Request Duration (p50, p95, p99)
   - [ ] **Traffic**: Requests per Second
   - [ ] **Errors**: Error Rate (4xx, 5xx)
   - [ ] **Saturation**: CPU, Memory, Disk Usage
-  
+
 - [ ] **6.3** Grafana Dashboards
   - [ ] Dashboard für Golden Signals
   - [ ] Dashboard für Model Performance
   - [ ] Dashboard für Data Pipeline
   - [ ] Dashboard für MLflow Experiments
   - [ ] Grafana Provisioning (automatisches Dashboard-Setup)
-  
+
 - [ ] **6.4** Alerting
   - [ ] Prometheus Alerting Rules definieren:
     - [ ] High Error Rate (>5% in 5min)
@@ -345,7 +345,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
     - [ ] High Memory Usage (>80%)
   - [ ] Alertmanager konfigurieren
   - [ ] Notification Channels (Slack/Email)
-  
+
 - [ ] **6.5** Evidently Model Monitoring
   - [ ] Evidently Service erweitern
   - [ ] Input Drift Detection
@@ -353,7 +353,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Data Quality Metrics
   - [ ] Evidently Reports zu Grafana
   - [ ] Scheduled Reports mit Prefect
-  
+
 - [ ] **6.6** Logging & Tracing
   - [ ] Structured Logging (JSON Format)
   - [ ] Log Aggregation (optional: Loki)
@@ -415,7 +415,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
      WORKDIR /app
      COPY requirements.txt .
      RUN pip install --no-cache-dir -r requirements.txt
-     
+
      FROM python:3.11-slim
      WORKDIR /app
      COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
