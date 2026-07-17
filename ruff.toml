@@ -1,0 +1,197 @@
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "__pycache__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+    # Project-specific excludes
+    "mlflow-data",
+    "data",
+    "models",
+    "gen_data",
+    "htmlcov",
+    ".DS_Store",
+]
+
+# Line length - use 100 for better readability with modern screens
+# (88 is Black default, but 100 is also common and allows more code per line)
+line-length = 100
+indent-width = 4
+
+# Target Python version
+target-version = "py311"
+
+[lint]
+# Enable comprehensive rule sets for production-quality Python code
+# This is more extensive than the default Ruff configuration
+select = [
+    # Core Python errors and warnings
+    "E",     # pycodestyle errors (all, not just E4/E7/E9)
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes (undefined names, unused imports, etc.)
+    
+    # Import and naming
+    "I",     # isort (import sorting)
+    "N",     # pep8-naming (proper naming conventions)
+    
+    # Code quality
+    "B",     # flake8-bugbear (common bugs and anti-patterns)
+    "Q",     # flake8-quotes (consistent quote usage)
+    "C90",   # mccabe complexity (avoid overly complex functions)
+    "UP",    # pyupgrade (modernize Python syntax)
+    
+    # Type hints and documentation
+    "ANN",   # flake8-annotations (enforce type hints)
+    
+    # Security and best practices
+    "S",     # flake8-bandit (security issues)
+    "BLE",   # flake8-blind-except (avoid bare except)
+    "A",     # flake8-builtins (avoid shadowing builtins)
+    
+    # Code style
+    "COM",   # flake8-commas (trailing commas)
+    "C4",    # flake8-comprehensions (better list/dict comprehensions)
+    "DTZ",   # flake8-datetimez (timezone-aware datetimes)
+    "T10",   # flake8-debugger (no debugger statements)
+    "EM",    # flake8-errmsg (better error messages)
+    "ISC",   # flake8-implicit-str-concat (explicit string concat)
+    "ICN",   # flake8-import-conventions (standard import aliases)
+    "G",     # flake8-logging-format (proper logging)
+    "PIE",   # flake8-pie (miscellaneous lints)
+    "T20",   # flake8-print (avoid print statements in production)
+    "PT",    # flake8-pytest-style (better pytest code)
+    "RET",   # flake8-return (better return statements)
+    "SIM",   # flake8-simplify (simplify code)
+    "TCH",   # flake8-type-checking (optimize type checking imports)
+    "ARG",   # flake8-unused-arguments (catch unused args)
+    "PTH",   # flake8-use-pathlib (use pathlib instead of os.path)
+    
+    # Framework-specific
+    "PD",    # pandas-vet (pandas best practices)
+    
+    # Comprehensive linting
+    "PL",    # pylint (many additional checks)
+    "TRY",   # tryceratops (better exception handling)
+    "RUF",   # ruff-specific rules
+]
+
+# Ignore specific rules that are too strict or not applicable
+ignore = [
+    # Type annotation rules that can be too strict
+    "ANN401",  # Dynamically typed expressions (Any) - sometimes needed
+    
+    # Test-related
+    "S101",    # Use of assert - OK in tests, handled by per-file-ignores
+    
+    # Complexity rules (be pragmatic)
+    "PLR0913", # Too many arguments to function - sometimes necessary
+    "PLR2004", # Magic value used in comparison - OK with clear context
+    
+    # Output rules (OK for scripts and debugging)
+    "T201",    # print found - OK in scripts, handled by per-file-ignores
+    
+    # Logging rules (f-strings in logging are fine in modern Python)
+    "G004",    # Logging statement uses f-string
+    
+    # Additional pragmatic ignores
+    "PLR0912", # Too many branches - sometimes complex logic is needed
+    "PLR0915", # Too many statements - OK for initialization code
+]
+
+# Allow autofix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[lint.per-file-ignores]
+# Test files: Allow asserts, missing annotations, and magic values
+"tests/**/*.py" = [
+    "S101",     # assert is the standard in pytest
+    "ANN201",   # Missing return type annotation
+    "ANN001",   # Missing type annotation for function argument
+    "ARG001",   # Unused function argument (fixtures)
+    "PLR2004",  # Magic values are OK in test data
+    "PLR0913",  # Many arguments OK in test parametrization
+]
+
+# Script files: Allow print statements and less strict checks
+"src/**/*.py" = [
+    "T201",     # print allowed in scripts
+    "PLR0913",  # Many arguments sometimes needed in data scripts
+]
+
+# Task files: Similar to scripts
+"task_*/**/*.py" = [
+    "T201",     # print allowed
+    "PLR0913",  # Many arguments OK
+]
+
+# Training scripts: Allow prints and complex functions
+"*train*.py" = [
+    "T201",     # print for progress tracking
+    "PLR0912",  # Complex training logic OK
+    "PLR0915",  # Many statements in training pipeline OK
+]
+
+[lint.mccabe]
+# Maximum McCabe complexity
+# 10 is default and reasonable - functions over this should be refactored
+max-complexity = 10
+
+[lint.isort]
+# Configure import sorting
+known-first-party = ["src", "webservice", "evidently_service"]
+force-single-line = false
+lines-after-imports = 2
+
+[format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+# Enable auto-formatting of code examples in docstrings. Markdown,
+# reStructuredText code/literal blocks and doctests are all supported.
+#
+# This is currently disabled by default, but it is planned for this
+# to be opt-out in the future.
+docstring-code-format = false
+
+# Set the line length limit used when formatting code snippets in
+# docstrings.
+#
+# This only has an effect when the `docstring-code-format` setting is
+# enabled.
+docstring-code-line-length = "dynamic"
