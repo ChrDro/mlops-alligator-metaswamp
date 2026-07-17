@@ -89,7 +89,7 @@ jobs:
       
       - name: Run pytest
         run: |
-          pytest --cov=src --cov=webservice --cov-report=xml --cov-report=html --cov-report=term-missing -v
+          pytest
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
