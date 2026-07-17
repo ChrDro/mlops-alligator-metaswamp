@@ -34,7 +34,9 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -69,17 +71,21 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
+          cache-dependency-glob: |
+            uv.lock
+            pyproject.toml
       
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       
-      - name: Install dependencies with uv
+      - name: Install dependencies from pyproject.toml
         run: |
-          uv pip install --system -r requirements.txt
-          uv pip install --system pytest pytest-cov pytest-asyncio pytest-mock
+          # Install project with all dependencies
+          uv pip install --system -e .
+          # Install dev dependencies (includes pytest, ruff, etc.)
+          uv pip install --system -e ".[dev]"
       
       - name: Run pytest
         run: |
