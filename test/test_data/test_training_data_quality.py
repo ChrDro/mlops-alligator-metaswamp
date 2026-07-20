@@ -236,7 +236,7 @@ class TestDataTypeValidation:
         """Test that column_type is a string column."""
         if "column_type" in df.columns:
             assert pd.api.types.is_string_dtype(df["column_type"]) or pd.api.types.is_object_dtype(
-                df["column_type"]
+                df["column_type"],
             ), f"column_type should be string but is {df['column_type'].dtype}"
 
 
