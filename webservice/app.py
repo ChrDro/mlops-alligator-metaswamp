@@ -6,7 +6,6 @@ This module owns the public API surface used in the monitoring tutorial:
 - /metrics through prometheus-fastapi-instrumentator for service telemetry
 """
 
-
 import traceback
 
 import pandas as pd
@@ -14,7 +13,7 @@ from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from fastapi import FastAPI, HTTPException
 
-#from prometheus_fastapi_instrumentator import Instrumentator
+# from prometheus_fastapi_instrumentator import Instrumentator
 from predict import predict
 
 
@@ -28,7 +27,7 @@ from predict import predict
 app = FastAPI()
 
 # Expose default FastAPI request metrics on /metrics for Prometheus.
-#Instrumentator().instrument(app).expose(app)
+# Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/")
@@ -70,10 +69,11 @@ def index() -> dict:
 #     # compare what the client sees with what Evidently receives.
 #     return PrimaryKeyPrediction(**data.model_dump(), prediction=prediction)
 
+
 @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
 def predict_pk_key_candidate(data: PrimaryKey) -> PrimaryKeyPrediction:
     try:
-        data_dict = data.model_dump() # Nutze .dict() bei Pydantic v1
+        data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
         input_df = pd.DataFrame([data_dict])
 
@@ -88,10 +88,11 @@ def predict_pk_key_candidate(data: PrimaryKey) -> PrimaryKeyPrediction:
         else:
             prediction_value = int(prediction)
 
-        return PrimaryKeyPrediction(**data_dict,
-                                    prediction=prediction_value,
-                                    probability=probability,
-                                   )
+        return PrimaryKeyPrediction(
+            **data_dict,
+            prediction=prediction_value,
+            probability=probability,
+        )
 
     except HTTPException:
         raise
@@ -103,10 +104,11 @@ def predict_pk_key_candidate(data: PrimaryKey) -> PrimaryKeyPrediction:
             detail=f"Fehler im Modell-Input oder der Predict-Logik: {error!s}",
         ) from error
 
+
 @app.post("/predict_fk", response_model=ForeignKeyPrediction)
 def predict_fk_key_candidate(data: ForeignKey) -> ForeignKeyPrediction:
     try:
-        data_dict = data.model_dump() # Nutze .dict() bei Pydantic v1
+        data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
         input_df = pd.DataFrame([data_dict])
 
@@ -121,10 +123,11 @@ def predict_fk_key_candidate(data: ForeignKey) -> ForeignKeyPrediction:
         else:
             prediction_value = int(prediction)
 
-        return ForeignKeyPrediction(**data_dict,
-                                    prediction=prediction_value,
-                                    probability=probability,
-                                   )
+        return ForeignKeyPrediction(
+            **data_dict,
+            prediction=prediction_value,
+            probability=probability,
+        )
 
     except HTTPException:
         raise

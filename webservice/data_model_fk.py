@@ -28,10 +28,10 @@ class ForeignKey(BaseModel):
     table_max_unique_ratio: float
     unique_ratio_rank: int
     null_ratio_rank: int
-    is_least_null_in_table:int
+    is_least_null_in_table: int
     unique_ratio_relative_to_max: float
     name_ends_with_id: int
-    name_contains_table_name : int
+    name_contains_table_name: int
     name_is_singular_table_id: int
     name_length: int
     column_type_boolean: bool
@@ -40,6 +40,7 @@ class ForeignKey(BaseModel):
     column_type_double: bool
     column_type_integer: bool
     column_type_varchar: bool
+
 
 # The response reuses every request feature and appends the model output.
 # The same shape is also forwarded to Evidently for monitoring.

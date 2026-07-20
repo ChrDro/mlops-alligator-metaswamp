@@ -49,4 +49,3 @@ def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
     probabilities = raw_sklearn_model.predict_proba(model_input)
 
     return float(prediction[0]), float(probabilities[0][1])
-

@@ -28,10 +28,11 @@ from sklearn.model_selection import StratifiedGroupKFold
 df = pd.DataFrame()
 RSEED = 42
 
-#DEFAULT_INPUT_PATH = Path("evidently_service/green_taxi_data/reference.csv")
-#DEFAULT_MODEL_NAME = "green-taxi-ride-duration"
-#DEFAULT_ALIAS = "production"
+# DEFAULT_INPUT_PATH = Path("evidently_service/green_taxi_data/reference.csv")
+# DEFAULT_MODEL_NAME = "green-taxi-ride-duration"
+# DEFAULT_ALIAS = "production"
 DEFAULT_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+
 
 def wait_for_model_version(
     client: MlflowClient,
@@ -61,6 +62,7 @@ def wait_for_model_version(
         msg_waiting_model,
     )
 
+
 def load_data() -> tuple[str, pd.DataFrame]:
     print("\n------Data Loading------")
     current_pwd = Path.resolve(Path.cwd())
@@ -70,11 +72,13 @@ def load_data() -> tuple[str, pd.DataFrame]:
     print(df.head())
     return input_path, df
 
+
 def one_hot_encode_column_type(df: pd.DataFrame) -> pd.DataFrame:
     print("\n------Column Preview and One-Hot Encoding of 'column_type'------")
     df = pd.get_dummies(df, columns=["column_type"], drop_first=True)
     print(df.columns)
     return df
+
 
 def train_data_train_test_split(
     df: pd.DataFrame,
@@ -106,10 +110,15 @@ def train_data_train_test_split(
 
     groups = df["database"]
 
-    X = df.drop(columns=[
-        "pk_target", "composite_pk_target", "fk_target", "composite_fk_target",
-        *columns_to_drop,
-    ])
+    X = df.drop(
+        columns=[
+            "pk_target",
+            "composite_pk_target",
+            "fk_target",
+            "composite_fk_target",
+            *columns_to_drop,
+        ]
+    )
 
     print(f"Feature count: {X.shape[1]}")
 
@@ -121,22 +130,23 @@ def train_data_train_test_split(
     train_idx, test_idx = next(sgkf.split(X, y, groups=groups))
 
     X_train = X.iloc[train_idx]
-    X_test  = X.iloc[test_idx]
+    X_test = X.iloc[test_idx]
 
     y_train = y.iloc[train_idx]
     y_test = y.iloc[test_idx]
 
-    #df_train = pd.concat([X_train, y_train], axis=1)
-    #df_test = pd.concat([X_test, y_test], axis=1)
+    # df_train = pd.concat([X_train, y_train], axis=1)
+    # df_test = pd.concat([X_test, y_test], axis=1)
 
     print(f"Total groups (tables): {groups.nunique()}")
     print(f"Train: {X_train.shape[0]} rows | Test: {X_test.shape[0]} rows")
-    print(f"Train single fk rate: {round(y_train.mean()*100, 1)}%")
-    print(f"Test single fk rate: {round(y_test.mean()*100, 1)}%")
+    print(f"Train single fk rate: {round(y_train.mean() * 100, 1)}%")
+    print(f"Test single fk rate: {round(y_test.mean() * 100, 1)}%")
     print(f"Tables in train: {groups.iloc[train_idx].nunique()}")
     print(f"Tables in test: {groups.iloc[test_idx].nunique()}")
 
     return X, y, X_train, X_test, y_train, y_test
+
 
 def print_x_y_shape(
     X_train: pd.DataFrame,
@@ -150,17 +160,19 @@ def print_x_y_shape(
     print(y_train.shape)
     print(y_test.shape)
 
+
 def print_fk_target_distribution(y_train: pd.DataFrame, y_test: pd.DataFrame) -> None:
     print("\n------Target Distribution------")
     print(y_train.value_counts())
     print(y_test.value_counts())
+
 
 def predict_random_forest(
     RSEED: int,
     X_train: pd.DataFrame,
     y_train: pd.DataFrame,
     X_test: pd.DataFrame,
-    ) -> tuple[RandomForestClassifier,np.ndarry,np.ndarry,np.ndarry]:
+) -> tuple[RandomForestClassifier, np.ndarry, np.ndarry, np.ndarry]:
     model_rf = RandomForestClassifier(
         random_state=RSEED,
         class_weight="balanced",
@@ -180,11 +192,12 @@ def predict_random_forest(
         y_pred_proba_rf_test,
     )
 
+
 def create_summary_train_set(
     y_train: pd.DataFrame,
     y_pred_rf_train: np.ndarray,
     y_pred_proba_rf_train: np.ndarray,
-    ) -> pd.DataFrame:
+) -> pd.DataFrame:
     """
     This function creates a pandas dataframe with the following score for each model trained
     on the train set:
@@ -218,15 +231,16 @@ def create_summary_train_set(
     df_metrics_train = pd.DataFrame(
         metrics_data_train,
         index=["Random_Forest_Train"],
-        )
+    )
 
     return df_metrics_train
+
 
 def create_summary_test_set(
     y_test: pd.DataFrame,
     y_pred_rf_test: np.ndarray,
     y_pred_proba_rf_test: np.ndarray,
-    ) -> pd.DataFrame:
+) -> pd.DataFrame:
     """
     This function creates a pandas dataframe with the following score for each model trained
     on the test set:
@@ -260,15 +274,16 @@ def create_summary_test_set(
     df_metrics_test = pd.DataFrame(
         metrics_data_test,
         index=["Random_Forest_Test"],
-        )
+    )
 
     return df_metrics_test
+
 
 def print_evaluation_train_set(
     df_metrics_train: pd.DataFrame,
     y_train: pd.DataFrame,
     y_pred_rf_train: np.ndarray,
-    ) -> None:
+) -> None:
 
     print("------Evaluation Table Train Set------\n")
     print(df_metrics_train.head(10))
@@ -278,11 +293,12 @@ def print_evaluation_train_set(
     print("Random_Forest_Train:")
     print(confusion_matrix(y_train, y_pred_rf_train))
 
+
 def print_evaluation_test_set(
     df_metrics_test: pd.DataFrame,
     y_test: pd.DataFrame,
     y_pred_rf_test: np.ndarray,
-    ) -> None:
+) -> None:
 
     print("\n------Evaluation Table Test Set------\n")
     print(df_metrics_test.head(10))
@@ -291,6 +307,7 @@ def print_evaluation_test_set(
 
     print("Random_Forest_Test:")
     print(confusion_matrix(y_test, y_pred_rf_test))
+
 
 def register_model_to_mlflow(
     model_rf: RandomForestClassifier,
@@ -351,14 +368,16 @@ def register_model_to_mlflow(
         mlflow.log_metric("test_f1_score", test_f1_score)
 
         # Log metadata as tags
-        mlflow.set_tags({
-            "model_type": "random_forest_classifier",
-            "developer": "test",
-            "dataset": "trino-train-metadata-statistics",
-            "target_column": y.name,  # Uses the Series name
-            "n_features": len(X.columns),
-            "n_samples": len(X),
-        })
+        mlflow.set_tags(
+            {
+                "model_type": "random_forest_classifier",
+                "developer": "test",
+                "dataset": "trino-train-metadata-statistics",
+                "target_column": y.name,  # Uses the Series name
+                "n_features": len(X.columns),
+                "n_samples": len(X),
+            }
+        )
 
         # Log feature names as a dict parameter (better for programmatic access)
         mlflow.log_dict(
@@ -388,12 +407,13 @@ def register_model_to_mlflow(
         timeout_seconds=60,
     )
     client.set_registered_model_alias(
-        name=model_name, alias=alias, version=model_version.version,
+        name=model_name,
+        alias=alias,
+        version=model_version.version,
     )
 
     print(
-        f"Registered {model_name} version {model_version.version} "
-        f"and assigned alias '{alias}'.",
+        f"Registered {model_name} version {model_version.version} and assigned alias '{alias}'.",
     )
     print(
         "The FastAPI service can now resolve models:/"
@@ -421,7 +441,7 @@ def main() -> None:
     print_fk_target_distribution(y_train, y_test)
 
     # Predict Random Forest Model without hyperparameter search
-    #print("\n------Predict Random Forest without hyperparameter search------\n")
+    # print("\n------Predict Random Forest without hyperparameter search------\n")
     (
         model_rf,
         y_pred_rf_train,
@@ -479,6 +499,7 @@ def main() -> None:
         model_name=model_name,
         alias=alias,
     )
+
 
 if __name__ == "__main__":
     main()
