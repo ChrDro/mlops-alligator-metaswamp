@@ -1,7 +1,9 @@
 
 # conftest.py
-import pytest
 from pathlib import Path
+
+import pytest
+
 
 CONFTEST_DIR = Path(__file__).parent
 
@@ -15,32 +17,32 @@ def pytest_addoption(parser):
         "--csv-path-nf",
         action="store",
         default=str(DEFAULT_NF_ANALYSE_CSV_PATH),  # Default for Normal Form
-        help="Path to the CSV file for Normal Form validation"
+        help="Path to the CSV file for Normal Form validation",
     )
     parser.addoption(
         "--csv-path-subject",
         action="store",
         default=str(DEFAULT_RAW_METADATA_CSV_PATH),  # Default for Subject Area
-        help="Path to the CSV file for Subject Area validation"
+        help="Path to the CSV file for Subject Area validation",
     )
     parser.addoption(
         "--csv-path-keys",
         action="store",
         default=str(DEFAULT_TASK_1_2_CSV_PATH),  # Default for Keys
-        help="Path to the CSV file for the Keys"
+        help="Path to the CSV file for the Keys",
     )
 
 @pytest.fixture(scope="module")
-def csv_path_nf(request):
+def csv_path_nf(request: pytest.FixtureRequest) -> Path:
     """Fixture returning the Normal Form CSV path."""
-    return request.config.getoption("--csv-path-nf")
+    return Path(request.config.getoption("--csv-path-nf"))
 
 @pytest.fixture(scope="module")
-def csv_path_subject(request):
+def csv_path_subject(request: pytest.FixtureRequest) -> Path:
     """Fixture returning the Subject Area CSV path."""
-    return request.config.getoption("--csv-path-subject")
+    return Path(request.config.getoption("--csv-path-subject"))
 
 @pytest.fixture(scope="module")
-def csv_path_keys(request):
+def csv_path_keys(request: pytest.FixtureRequest) -> Path:
     """Fixture returning the Keys CSV path."""
-    return request.config.getoption("--csv-path-keys")
+    return Path(request.config.getoption("--csv-path-keys"))

@@ -1,11 +1,14 @@
-import os
+
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
+
 @pytest.fixture(scope="module")
-def df(csv_path_nf):  
+def df(csv_path_nf: Path) -> pd.DataFrame:
     """Loads the Normal Form CSV file dynamically."""
-    assert os.path.exists(csv_path_nf), f"File not found at path: {csv_path_nf}"
+    assert csv_path_nf.exists(), f"File not found at path: {csv_path_nf}"
     data = pd.read_csv(csv_path_nf)
     assert len(data) >= 100, f"CSV is too small or empty ({len(data)} rows)"
     return data
@@ -16,7 +19,7 @@ def df(csv_path_nf):
 # =====================================================================
 
 
-def test_required_columns_present(df):
+def test_required_columns_present(df: pd.DataFrame) -> None:
     """Verifies that all 50 features exist exactly as specified in the schema."""
     expected_columns = {
         "database", "schema", "table_name", "column_name", "column_type",
@@ -34,7 +37,7 @@ def test_required_columns_present(df):
         "table_avg_null_ratio", "table_ratio_of_pk_candidates", "is_this_col_violating_1nf",
         "is_composite_key_part", "table_contains_1nf_violation", "table_has_composite_pk",
         "target_normal_form", "is_this_col_partial_dependency", "table_ratio_composite_key_cols",
-        "table_ratio_1nf_violations", "table_std_unique_ratio", "table_has_partial_dependency"
+        "table_ratio_1nf_violations", "table_std_unique_ratio", "table_has_partial_dependency",
     }
     missing = expected_columns - set(df.columns)
     assert not missing, f"Missing columns in the CSV: {missing}"
@@ -45,7 +48,7 @@ def test_required_columns_present(df):
 # =====================================================================
 
 
-def test_binary_and_ratio_bounds(df):
+def test_binary_and_ratio_bounds(df: pd.DataFrame) -> None:
     """Validates that boolean flags are strictly binary (0/1) and ratios stay within [0, 1]."""
     binary_flags = [
         "is_unique", "is_non_null", "is_first_column", "is_first_unique_column",
@@ -53,7 +56,7 @@ def test_binary_and_ratio_bounds(df):
         "name_ends_with_id", "name_contains_key", "name_contains_table_name",
         "name_is_singular_table_id", "is_this_col_violating_1nf", "is_composite_key_part",
         "table_contains_1nf_violation", "table_has_composite_pk",
-        "is_this_col_partial_dependency", "table_has_partial_dependency"
+        "is_this_col_partial_dependency", "table_has_partial_dependency",
     ]
     for flag in binary_flags:
         assert df[flag].isin([0, 1]).all(), f"Flag '{flag}' contains invalid values (not 0 or 1)."
@@ -61,7 +64,7 @@ def test_binary_and_ratio_bounds(df):
     ratios = [
         "null_ratio", "unique_ratio", "relative_ordinal_position", "table_max_unique_ratio",
         "unique_ratio_relative_to_max", "table_avg_unique_ratio", "table_avg_null_ratio",
-        "table_ratio_of_pk_candidates", "table_ratio_composite_key_cols", "table_ratio_1nf_violations"
+        "table_ratio_of_pk_candidates", "table_ratio_composite_key_cols", "table_ratio_1nf_violations",
     ]
     for ratio in ratios:
         assert df[ratio].between(0.0, 1.0).all(), f"Ratio '{ratio}' out of bounds (must be between 0 and 1)."
@@ -72,7 +75,7 @@ def test_binary_and_ratio_bounds(df):
 # =====================================================================
 
 
-def test_column_level_consistency(df):
+def test_column_level_consistency(df: pd.DataFrame) -> None:
     """Checks logical mathematical dependencies on a column level."""
     # If is_unique=1, unique_ratio MUST be 1.0 (and vice versa)
     assert df[(df["is_unique"] == 1) & (df["unique_ratio"] < 1.0)].empty, "Inconsistency: is_unique=1 but unique_ratio < 1.0"
@@ -80,7 +83,7 @@ def test_column_level_consistency(df):
 
     # If is_non_null=1, null_count and null_ratio MUST be 0
     assert df[(df["is_non_null"] == 1) & (df["null_count"] > 0)].empty, "Inconsistency: is_non_null=1 but null_count > 0"
-    
+
     # Mathematical validity of unique_values and total count
     # unique_ratio should match number_unique_values / count
     valid_counts = df[df["count"] > 0]
@@ -88,12 +91,12 @@ def test_column_level_consistency(df):
     assert (valid_counts["unique_ratio"].round(4) == calculated_ratio).all(), "Mathematical mismatch: unique_ratio does not equal number_unique_values / count"
 
 
-def test_table_level_group_consistency(df):
+def test_table_level_group_consistency(df: pd.DataFrame) -> None:
     """Ensures that table-level aggregated metrics are identical for all columns of the same table (prevents data leakage)."""
     table_group_cols = [
         "table_column_count", "table_unique_column_count", "table_row_count",
         "table_has_unique_column", "table_has_no_single_pk_candidate",
-        "table_max_unique_ratio", "table_contains_1nf_violation", "table_has_composite_pk"
+        "table_max_unique_ratio", "table_contains_1nf_violation", "table_has_composite_pk",
     ]
     for col in table_group_cols:
         inconsistent = df.groupby(["database", "schema", "table_name"])[col].nunique()
@@ -105,7 +108,7 @@ def test_table_level_group_consistency(df):
 # =====================================================================
 
 
-def test_normal_form_logic_constraints(df):
+def test_normal_form_logic_constraints(df: pd.DataFrame) -> None:
     """Validates strict relational database theory constraints for Normal Forms."""
     # 1NF Violation: If a column violates 1NF, the entire table must be flagged as containing a 1NF violation
     nf1_violators = df[(df["is_this_col_violating_1nf"] == 1) & (df["table_contains_1nf_violation"] == 0)]
@@ -122,10 +125,10 @@ def test_normal_form_logic_constraints(df):
         assert (has_violating_col == 1).all(), "Table reports a partial dependency, but no individual column is flagged as a partial dependency"
 
 
-def test_target_variable(df):
+def test_target_variable(df: pd.DataFrame) -> None:
     """Ensures that the target label (target_normal_form) is completely defined and valid."""
-    assert df["target_normal_form"].notnull().all(), "target_normal_form contains illegal NULL values!"
-    
+    assert df["target_normal_form"].notna().all(), "target_normal_form contains illegal NULL values!"
+
     # Adjust the allowed target classes below based on your dataset labels (e.g., [1, 2, 3] or ['1NF', '2NF', '3NF'])
-    allowed_targets = [0, 1, 2, 3]  
+    allowed_targets = [0, 1, 2, 3]
     assert df["target_normal_form"].isin(allowed_targets).all(), f"Unexpected Normal Form class in target: {df['target_normal_form'].unique()}"
