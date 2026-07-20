@@ -1,4 +1,3 @@
-
 # conftest.py
 from pathlib import Path
 
@@ -8,8 +7,11 @@ import pytest
 CONFTEST_DIR = Path(__file__).parent
 
 DEFAULT_NF_ANALYSE_CSV_PATH = (CONFTEST_DIR / "../../data/nf_test_analyse.csv").resolve()
-DEFAULT_TASK_1_2_CSV_PATH = (CONFTEST_DIR / "../../data/summary_output_task_1_2_training.csv").resolve()
+DEFAULT_TASK_1_2_CSV_PATH = (
+    CONFTEST_DIR / "../../data/summary_output_task_1_2_training.csv"
+).resolve()
 DEFAULT_RAW_METADATA_CSV_PATH = (CONFTEST_DIR / "../../data/raw_metadata.csv").resolve()
+
 
 def pytest_addoption(parser):
     """Registers separate command-line options for both test types."""
@@ -32,15 +34,18 @@ def pytest_addoption(parser):
         help="Path to the CSV file for the Keys",
     )
 
+
 @pytest.fixture(scope="module")
 def csv_path_nf(request: pytest.FixtureRequest) -> Path:
     """Fixture returning the Normal Form CSV path."""
     return Path(request.config.getoption("--csv-path-nf"))
 
+
 @pytest.fixture(scope="module")
 def csv_path_subject(request: pytest.FixtureRequest) -> Path:
     """Fixture returning the Subject Area CSV path."""
     return Path(request.config.getoption("--csv-path-subject"))
+
 
 @pytest.fixture(scope="module")
 def csv_path_keys(request: pytest.FixtureRequest) -> Path:

@@ -65,10 +65,9 @@ EXPECTED_TARGET_COLUMNS = [
 ]
 
 EXPECTED_ALL_COLUMNS = (
-    EXPECTED_IDENTIFIER_COLUMNS
-    + EXPECTED_FEATURE_COLUMNS
-    + EXPECTED_TARGET_COLUMNS
+    EXPECTED_IDENTIFIER_COLUMNS + EXPECTED_FEATURE_COLUMNS + EXPECTED_TARGET_COLUMNS
 )
+
 
 @pytest.fixture(scope="module")
 def df(csv_path_keys: Path) -> pd.DataFrame:
@@ -82,6 +81,7 @@ def df(csv_path_keys: Path) -> pd.DataFrame:
 # ============================================================================
 # CATEGORY 1: DATA QUALITY TESTS
 # ============================================================================
+
 
 class TestSchemaValidation:
     """Test 1: Schema Validation - Critical for preventing training crashes."""
@@ -110,9 +110,7 @@ class TestSchemaValidation:
         expected_columns = set(EXPECTED_ALL_COLUMNS)
 
         missing_columns = expected_columns - actual_columns
-        assert not missing_columns, (
-            f"Missing required columns: {sorted(missing_columns)}"
-        )
+        assert not missing_columns, f"Missing required columns: {sorted(missing_columns)}"
 
     def test_training_csv_has_no_unexpected_columns(self, df: pd.DataFrame) -> None:
         """
@@ -134,9 +132,7 @@ class TestSchemaValidation:
     def test_identifier_columns_are_present(self, df: pd.DataFrame) -> None:
         """Test that identifier columns are present."""
         for col in EXPECTED_IDENTIFIER_COLUMNS:
-            assert col in df.columns, (
-                f"Identifier column '{col}' is missing"
-            )
+            assert col in df.columns, f"Identifier column '{col}' is missing"
 
     def test_target_columns_are_present(self, df: pd.DataFrame) -> None:
         """Test that all target columns are present."""
@@ -239,10 +235,9 @@ class TestDataTypeValidation:
     def test_column_type_is_string(self, df: pd.DataFrame):
         """Test that column_type is a string column."""
         if "column_type" in df.columns:
-            assert pd.api.types.is_string_dtype(df["column_type"]) or \
-                   pd.api.types.is_object_dtype(df["column_type"]), (
-                f"column_type should be string but is {df['column_type'].dtype}"
-            )
+            assert pd.api.types.is_string_dtype(df["column_type"]) or pd.api.types.is_object_dtype(
+                df["column_type"]
+            ), f"column_type should be string but is {df['column_type'].dtype}"
 
 
 class TestNoMissingValuesInCriticalColumns:
@@ -275,7 +270,8 @@ class TestNoMissingValuesInCriticalColumns:
                 )
 
     def test_critical_feature_columns_have_reasonable_nulls(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ) -> None:
         """
         Test that critical feature columns don't have too many nulls.
@@ -293,7 +289,7 @@ class TestNoMissingValuesInCriticalColumns:
             if col in df.columns:
                 null_ratio = df[col].isna().sum() / len(df)
                 assert null_ratio < 0.5, (
-                    f"Critical feature '{col}' has {null_ratio*100:.1f}% nulls. "
+                    f"Critical feature '{col}' has {null_ratio * 100:.1f}% nulls. "
                     "Expected less than 50%."
                 )
 
@@ -301,6 +297,7 @@ class TestNoMissingValuesInCriticalColumns:
 # ============================================================================
 # CATEGORY 2: DATA DISTRIBUTION TESTS
 # ============================================================================
+
 
 class TestTargetDistribution:
     """Test 4: Target Distribution - Checks for extreme class imbalance."""
@@ -316,7 +313,7 @@ class TestTargetDistribution:
         positive_ratio = df["pk_target"].mean()
 
         assert 0.01 < positive_ratio < 0.99, (
-            f"pk_target is extremely imbalanced: {positive_ratio*100:.1f}% positive. "
+            f"pk_target is extremely imbalanced: {positive_ratio * 100:.1f}% positive. "
             "Expected between 1% and 99%."
         )
 
@@ -324,7 +321,7 @@ class TestTargetDistribution:
         if positive_ratio < 0.05 or positive_ratio > 0.95:
             pytest.warns(
                 UserWarning,
-                match=f"pk_target is imbalanced: {positive_ratio*100:.1f}% positive",
+                match=f"pk_target is imbalanced: {positive_ratio * 100:.1f}% positive",
             )
 
     def test_pk_target_has_both_classes(self, df: pd.DataFrame):
@@ -350,12 +347,10 @@ class TestTargetDistribution:
                 has_one = 1 in unique_values or 1.0 in unique_values
 
                 assert has_zero, (
-                    f"Target '{target_col}' is missing class 0 (or 0.0). "
-                    f"Found: {unique_values}"
+                    f"Target '{target_col}' is missing class 0 (or 0.0). Found: {unique_values}"
                 )
                 assert has_one, (
-                    f"Target '{target_col}' is missing class 1 (or 1.0). "
-                    f"Found: {unique_values}"
+                    f"Target '{target_col}' is missing class 1 (or 1.0). Found: {unique_values}"
                 )
 
     def test_target_distribution_summary(self, df: pd.DataFrame):
@@ -366,8 +361,8 @@ class TestTargetDistribution:
                 counts = df[target_col].value_counts()
                 ratio = df[target_col].mean()
                 print(f"\n{target_col}:")
-                print(f"  Positive (1): {counts.get(1, 0)} ({ratio*100:.1f}%)")
-                print(f"  Negative (0): {counts.get(0, 0)} ({(1-ratio)*100:.1f}%)")
+                print(f"  Positive (1): {counts.get(1, 0)} ({ratio * 100:.1f}%)")
+                print(f"  Negative (0): {counts.get(0, 0)} ({(1 - ratio) * 100:.1f}%)")
 
 
 class TestUniqueRatioBounds:
@@ -381,15 +376,12 @@ class TestUniqueRatioBounds:
         min_val = df["unique_ratio"].min()
         max_val = df["unique_ratio"].max()
 
-        assert min_val >= 0.0, (
-            f"unique_ratio has value < 0: {min_val}"
-        )
-        assert max_val <= 1.0, (
-            f"unique_ratio has value > 1: {max_val}"
-        )
+        assert min_val >= 0.0, f"unique_ratio has value < 0: {min_val}"
+        assert max_val <= 1.0, f"unique_ratio has value > 1: {max_val}"
 
     def test_unique_ratio_relative_to_max_is_between_0_and_1(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ) -> None:
         """Test that unique_ratio_relative_to_max is in valid range [0, 1]."""
         if "unique_ratio_relative_to_max" not in df.columns:
@@ -398,15 +390,12 @@ class TestUniqueRatioBounds:
         min_val = df["unique_ratio_relative_to_max"].min()
         max_val = df["unique_ratio_relative_to_max"].max()
 
-        assert min_val >= 0.0, (
-            f"unique_ratio_relative_to_max has value < 0: {min_val}"
-        )
-        assert max_val <= 1.0, (
-            f"unique_ratio_relative_to_max has value > 1: {max_val}"
-        )
+        assert min_val >= 0.0, f"unique_ratio_relative_to_max has value < 0: {min_val}"
+        assert max_val <= 1.0, f"unique_ratio_relative_to_max has value > 1: {max_val}"
 
     def test_table_max_unique_ratio_is_between_0_and_1(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ):
         """Test that table_max_unique_ratio is in valid range [0, 1]."""
         if "table_max_unique_ratio" not in df.columns:
@@ -415,12 +404,8 @@ class TestUniqueRatioBounds:
         min_val = df["table_max_unique_ratio"].min()
         max_val = df["table_max_unique_ratio"].max()
 
-        assert min_val >= 0.0, (
-            f"table_max_unique_ratio has value < 0: {min_val}"
-        )
-        assert max_val <= 1.0, (
-            f"table_max_unique_ratio has value > 1: {max_val}"
-        )
+        assert min_val >= 0.0, f"table_max_unique_ratio has value < 0: {min_val}"
+        assert max_val <= 1.0, f"table_max_unique_ratio has value > 1: {max_val}"
 
     def test_null_ratio_is_between_0_and_1(self, df: pd.DataFrame) -> None:
         """Test that null_ratio is in valid range [0, 1]."""
@@ -430,15 +415,12 @@ class TestUniqueRatioBounds:
         min_val = df["null_ratio"].min()
         max_val = df["null_ratio"].max()
 
-        assert min_val >= 0.0, (
-            f"null_ratio has value < 0: {min_val}"
-        )
-        assert max_val <= 1.0, (
-            f"null_ratio has value > 1: {max_val}"
-        )
+        assert min_val >= 0.0, f"null_ratio has value < 0: {min_val}"
+        assert max_val <= 1.0, f"null_ratio has value > 1: {max_val}"
 
     def test_relative_ordinal_position_is_between_0_and_1(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ) -> None:
         """Test that relative_ordinal_position is in valid range [0, 1]."""
         if "relative_ordinal_position" not in df.columns:
@@ -448,17 +430,14 @@ class TestUniqueRatioBounds:
         max_val = df["relative_ordinal_position"].max()
 
         # Allow slight tolerance for rounding
-        assert min_val >= -0.01, (
-            f"relative_ordinal_position has value < 0: {min_val}"
-        )
-        assert max_val <= 1.01, (
-            f"relative_ordinal_position has value > 1: {max_val}"
-        )
+        assert min_val >= -0.01, f"relative_ordinal_position has value < 0: {min_val}"
+        assert max_val <= 1.01, f"relative_ordinal_position has value > 1: {max_val}"
 
 
 # ============================================================================
 # CATEGORY 3: BUSINESS LOGIC TESTS
 # ============================================================================
+
 
 class TestConsistencyChecks:
     """Test 6: Consistency Checks - Ensures feature consistency."""
@@ -468,16 +447,15 @@ class TestConsistencyChecks:
         Test that is_unique=1 implies unique_ratio=1.0.
         If a column is unique, its unique_ratio should be 1.0.
         """
-        if "is_unique" not in df.columns or \
-           "unique_ratio" not in df.columns:
+        if "is_unique" not in df.columns or "unique_ratio" not in df.columns:
             pytest.skip("Required columns not found")
 
         # Check: is_unique=1 → unique_ratio=1.0 (allow small floating point error)
         unique_rows = df[df["is_unique"] == 1]
         if len(unique_rows) > 0:
             invalid = unique_rows[
-                (unique_rows["unique_ratio"] < 0.99) &
-                (unique_rows["count"] > 0)  # Exclude empty tables
+                (unique_rows["unique_ratio"] < 0.99)
+                & (unique_rows["count"] > 0)  # Exclude empty tables
             ]
 
             assert len(invalid) == 0, (
@@ -490,15 +468,11 @@ class TestConsistencyChecks:
         Test that unique_ratio=1.0 implies is_unique=1.
         If unique_ratio is 1.0, the column should be marked as unique.
         """
-        if "is_unique" not in df.columns or \
-           "unique_ratio" not in df.columns:
+        if "is_unique" not in df.columns or "unique_ratio" not in df.columns:
             pytest.skip("Required columns not found")
 
         # Check: unique_ratio=1.0 → is_unique=1
-        fully_unique_rows = df[
-            (df["unique_ratio"] >= 0.99) &
-            (df["count"] > 0)
-        ]
+        fully_unique_rows = df[(df["unique_ratio"] >= 0.99) & (df["count"] > 0)]
         if len(fully_unique_rows) > 0:
             invalid = fully_unique_rows[fully_unique_rows["is_unique"] != 1]
 
@@ -509,8 +483,7 @@ class TestConsistencyChecks:
 
     def test_is_non_null_matches_null_ratio(self, df: pd.DataFrame) -> None:
         """Test that is_non_null=1 implies null_ratio=0.0."""
-        if "is_non_null" not in df.columns or \
-           "null_ratio" not in df.columns:
+        if "is_non_null" not in df.columns or "null_ratio" not in df.columns:
             pytest.skip("Required columns not found")
 
         non_null_rows = df[df["is_non_null"] == 1]
@@ -532,8 +505,7 @@ class TestConsistencyChecks:
 
         min_position = df["ordinal_position"].min()
         assert min_position >= 1, (
-            f"ordinal_position has value < 1: {min_position}. "
-            "Column positions should start at 1."
+            f"ordinal_position has value < 1: {min_position}. Column positions should start at 1."
         )
 
     def test_count_is_non_negative(self, df: pd.DataFrame) -> None:
@@ -542,9 +514,7 @@ class TestConsistencyChecks:
             pytest.skip("count column not found")
 
         min_count = df["count"].min()
-        assert min_count >= 0, (
-            f"count has negative value: {min_count}"
-        )
+        assert min_count >= 0, f"count has negative value: {min_count}"
 
 
 class TestGroupConsistency:
@@ -589,7 +559,8 @@ class TestGroupConsistency:
         )
 
     def test_table_has_unique_column_consistent_per_table(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ):
         """Test that table_has_unique_column is the same for all columns in a table."""
         if "table_has_unique_column" not in df.columns:
@@ -608,7 +579,8 @@ class TestGroupConsistency:
         )
 
     def test_table_max_unique_ratio_consistent_per_table(
-        self, df: pd.DataFrame,
+        self,
+        df: pd.DataFrame,
     ):
         """Test that table_max_unique_ratio is the same for all columns in a table."""
         if "table_max_unique_ratio" not in df.columns:
@@ -630,6 +602,7 @@ class TestGroupConsistency:
 # ============================================================================
 # CATEGORY 4: PIPELINE INTEGRATION TESTS
 # ============================================================================
+
 
 class TestOneHotEncoding:
     """Test 8: One-Hot Encoding - Ensures column_type can be encoded."""
@@ -673,9 +646,7 @@ class TestOneHotEncoding:
             drop_first=True,
         )
 
-        assert len(encoded.columns) > len(df.columns), (
-            "One-hot encoding did not create new columns"
-        )
+        assert len(encoded.columns) > len(df.columns), "One-hot encoding did not create new columns"
 
 
 class TestTrainTestSplit:
@@ -717,8 +688,7 @@ class TestTrainTestSplit:
         Test that each group has both positive and negative examples.
         Stratified split requires both classes in each split.
         """
-        if "database" not in df.columns or \
-           "pk_target" not in df.columns:
+        if "database" not in df.columns or "pk_target" not in df.columns:
             pytest.skip("Required columns not found")
 
         # Check each database has both classes
@@ -738,8 +708,7 @@ class TestTrainTestSplit:
         Test that group split logic works correctly.
         This mimics the actual split logic from the training script.
         """
-        if "database" not in df.columns or \
-           "pk_target" not in df.columns:
+        if "database" not in df.columns or "pk_target" not in df.columns:
             pytest.skip("Required columns not found")
 
         groups = df["database"]
