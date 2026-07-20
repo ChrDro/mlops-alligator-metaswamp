@@ -119,7 +119,7 @@ def train_data_train_test_split(
             "fk_target",
             "composite_fk_target",
             *columns_to_drop,
-        ]
+        ],
     )
 
     print(f"Feature count: {X.shape[1]}")
@@ -382,7 +382,7 @@ def register_model_to_mlflow(
                 "target_column": y.name,  # Uses the Series name
                 "n_features": len(X.columns),
                 "n_samples": len(X),
-            }
+            },
         )
 
         # Log feature names as a dict parameter (better for programmatic access)
