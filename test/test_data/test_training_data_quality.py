@@ -472,7 +472,7 @@ class TestConsistencyChecks:
             pytest.skip("Required columns not found")
 
         # Check: unique_ratio=1.0 → is_unique=1
-        fully_unique_rows = df[(df["unique_ratio"] >= 0.99) & (df["count"] > 0)]
+        fully_unique_rows = df[(df["unique_ratio"] == 1.0) & (df["count"] > 0)]
         if len(fully_unique_rows) > 0:
             invalid = fully_unique_rows[fully_unique_rows["is_unique"] != 1]
 
