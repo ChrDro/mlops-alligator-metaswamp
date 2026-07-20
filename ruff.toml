@@ -130,13 +130,14 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [lint.per-file-ignores]
 # Test files: Allow asserts, missing annotations, and magic values
-"tests/**/*.py" = [
+"test/**/*.py" = [
     "S101",     # assert is the standard in pytest
     "ANN201",   # Missing return type annotation
     "ANN001",   # Missing type annotation for function argument
     "ARG001",   # Unused function argument (fixtures)
     "PLR2004",  # Magic values are OK in test data
     "PLR0913",  # Many arguments OK in test parametrization
+    "E501",     # Many asserts are just that long (100 line-length unrealistic)
 ]
 
 # Script files: Allow print statements and less strict checks
@@ -157,6 +158,9 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
     "PLR0912",  # Complex training logic OK
     "PLR0915",  # Many statements in training pipeline OK
 ]
+
+[lint.pep8-naming]
+ignore-names = ["X", "y"]
 
 [lint.mccabe]
 # Maximum McCabe complexity
