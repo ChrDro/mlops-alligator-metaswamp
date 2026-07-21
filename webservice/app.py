@@ -9,6 +9,7 @@ This module owns the public API surface used in the monitoring tutorial:
 import traceback
 
 import pandas as pd
+from data_model_denormalization import NormalForm, NormalFormPrediction
 from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from fastapi import FastAPI, HTTPException
@@ -77,7 +78,7 @@ def predict_pk_key_candidate(data: PrimaryKey) -> PrimaryKeyPrediction:
 
         input_df = pd.DataFrame([data_dict])
 
-        print("Sende folgende Spalten an das Modell:", input_df.columns.tolist())
+        print("Sending the following columns as features to the model:", input_df.columns.tolist())
 
         prediction, probability = predict("pk_model", input_df)
 
@@ -101,7 +102,7 @@ def predict_pk_key_candidate(data: PrimaryKey) -> PrimaryKeyPrediction:
 
         raise HTTPException(
             status_code=400,
-            detail=f"Fehler im Modell-Input oder der Predict-Logik: {error!s}",
+            detail=f"Error in model input or predict logic: {error!s}",
         ) from error
 
 
@@ -112,7 +113,7 @@ def predict_fk_key_candidate(data: ForeignKey) -> ForeignKeyPrediction:
 
         input_df = pd.DataFrame([data_dict])
 
-        print("Sende folgende Spalten an das Modell:", input_df.columns.tolist())
+        print("Sending the following columns as features to the model:", input_df.columns.tolist())
 
         prediction, probability = predict("fk_model", input_df)
 
@@ -136,5 +137,40 @@ def predict_fk_key_candidate(data: ForeignKey) -> ForeignKeyPrediction:
 
         raise HTTPException(
             status_code=400,
-            detail=f"Fehler im Modell-Input oder der Predict-Logik: {error!s}",
+            detail=f"Error in model input or predict logic: {error!s}",
+        ) from error
+
+
+@app.post("/predict_normalform", response_model=NormalFormPrediction)
+def predict_normalform_key_candidate(data: NormalForm) -> NormalFormPrediction:
+    try:
+        data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
+
+        input_df = pd.DataFrame([data_dict])
+
+        print("Sending the following columns as features to the model:", input_df.columns.tolist())
+
+        prediction, probability = predict("denormalization_model", input_df)
+
+        if hasattr(prediction, "item"):
+            prediction_value = int(prediction.item())
+        elif isinstance(prediction, (list, tuple)) or hasattr(prediction, "__len__"):
+            prediction_value = int(prediction[0])
+        else:
+            prediction_value = int(prediction)
+
+        return NormalFormPrediction(
+            **data_dict,
+            prediction=prediction_value,
+            probability=probability,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error in model input or predict logic: {error!s}",
         ) from error

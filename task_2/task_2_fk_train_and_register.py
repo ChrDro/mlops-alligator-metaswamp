@@ -1,6 +1,6 @@
 """
-In this notebook the prediction of the primary key will be done.
-We start with a base model and move on with xgboost and random forest.
+In this notebook the prediction of the foreign key will be done.
+We start with a random forest model.
 """
 
 import os
@@ -10,7 +10,7 @@ from pathlib import Path
 import mlflow
 import numpy as np
 import pandas as pd
-from mlflow.entities import ModelVersion
+from mlflow.entities.model_registry import ModelVersion
 from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 from sklearn.ensemble import RandomForestClassifier
@@ -67,7 +67,7 @@ def load_data() -> tuple[str, pd.DataFrame]:
     print("\n------Data Loading------")
     current_pwd = Path.resolve(Path.cwd())
     train_data_path = "data/summary_output_task_1_2_training.csv"
-    input_path = Path.join(current_pwd, train_data_path)
+    input_path = Path(current_pwd, train_data_path)
     df = pd.read_csv(input_path)
     print(df.head())
     return input_path, df
@@ -172,7 +172,7 @@ def predict_random_forest(
     X_train: pd.DataFrame,
     y_train: pd.DataFrame,
     X_test: pd.DataFrame,
-) -> tuple[RandomForestClassifier, np.ndarry, np.ndarry, np.ndarry]:
+) -> tuple[RandomForestClassifier, np.ndarray, np.ndarray, np.ndarray]:
     model_rf = RandomForestClassifier(
         random_state=RSEED,
         class_weight="balanced",
@@ -388,7 +388,7 @@ def register_model_to_mlflow(
         mlflow.sklearn.log_model(
             model_rf,
             name="fk_model",
-            serialization_format="skops",
+            serialization_format="pickle",
             signature=signature,
             input_example=input_example,
         )
@@ -478,9 +478,9 @@ def main() -> None:
     train_f1_score = df_metrics_train.loc["Random_Forest_Train", "f1_score"]
     test_f1_score = df_metrics_test.loc["Random_Forest_Test", "f1_score"]
 
-    print(type(train_f1_score))
+    # print(type(train_f1_score))
     print(train_f1_score)
-    print(type(test_f1_score))
+    # print(type(test_f1_score))
     print(test_f1_score)
 
     model_name = "fk_model"

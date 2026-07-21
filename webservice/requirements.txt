@@ -1,5 +1,6 @@
 fastapi==0.139.2
-mlflow==3.5.0
+lightgbm==4.7.0
+mlflow==3.14.0
 numpy==2.4.6
 pandas==2.3.3
 prometheus-fastapi-instrumentator==7.1.0
