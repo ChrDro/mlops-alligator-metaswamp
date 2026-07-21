@@ -67,9 +67,9 @@ def wait_for_model_version(
 
 def load_data() -> tuple[Path, pd.DataFrame]:
     print("\n------Data Loading------")
-    current_pwd = Path.resolve(Path.cwd())
+    current_pwd = Path.cwd().resolve()
     train_data_path = "data/summary_output_task_1_2_training.csv"
-    input_path = Path(current_pwd, train_data_path)
+    input_path = current_pwd / train_data_path
     df = pd.read_csv(input_path)
     print(df.head())
     return input_path, df

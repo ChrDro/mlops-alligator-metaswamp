@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from mlflow.pyfunc import PyFuncModel
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=5)
 def load_model(model_name: str) -> PyFuncModel:
     alias = "dev"
     model_uri = f"models:/{model_name}@{alias}"

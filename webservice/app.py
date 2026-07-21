@@ -9,6 +9,8 @@ This module owns the public API surface used in the monitoring tutorial:
 import traceback
 
 import pandas as pd
+from data_model_cfk import CompositeForeignKey, CompositeForeignKeyPrediction
+from data_model_cpk import CompositePrimaryKey, CompositePrimaryKeyPrediction
 from data_model_denormalization import NormalForm, NormalFormPrediction
 from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
@@ -35,7 +37,7 @@ app = FastAPI()
 def index() -> dict:
     # Keep the root route simple so users can tell the container is alive
     # before testing the full prediction path.
-    return {"message": "PK Candidate Prediction"}
+    return {"message": "PK, FK Candidate and Normalform Prediction"}
 
 
 # @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
@@ -72,7 +74,7 @@ def index() -> dict:
 
 
 @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
-def predict_pk_key_candidate(data: PrimaryKey) -> PrimaryKeyPrediction:
+def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -106,8 +108,43 @@ def predict_pk_key_candidate(data: PrimaryKey) -> PrimaryKeyPrediction:
         ) from error
 
 
+@app.post("/predict_cpk", response_model=CompositePrimaryKeyPrediction)
+def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimaryKeyPrediction:
+    try:
+        data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
+
+        input_df = pd.DataFrame([data_dict])
+
+        print("Sending the following columns as features to the model:", input_df.columns.tolist())
+
+        prediction, probability = predict("composite_pk_model", input_df)
+
+        if hasattr(prediction, "item"):
+            prediction_value = int(prediction.item())
+        elif isinstance(prediction, (list, tuple)) or hasattr(prediction, "__len__"):
+            prediction_value = int(prediction[0])
+        else:
+            prediction_value = int(prediction)
+
+        return CompositePrimaryKeyPrediction(
+            **data_dict,
+            prediction=prediction_value,
+            probability=probability,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error in model input or predict logic: {error!s}",
+        ) from error
+
+
 @app.post("/predict_fk", response_model=ForeignKeyPrediction)
-def predict_fk_key_candidate(data: ForeignKey) -> ForeignKeyPrediction:
+def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -125,6 +162,41 @@ def predict_fk_key_candidate(data: ForeignKey) -> ForeignKeyPrediction:
             prediction_value = int(prediction)
 
         return ForeignKeyPrediction(
+            **data_dict,
+            prediction=prediction_value,
+            probability=probability,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error in model input or predict logic: {error!s}",
+        ) from error
+
+
+@app.post("/predict_cfk", response_model=CompositeForeignKeyPrediction)
+def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeignKeyPrediction:
+    try:
+        data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
+
+        input_df = pd.DataFrame([data_dict])
+
+        print("Sending the following columns as features to the model:", input_df.columns.tolist())
+
+        prediction, probability = predict("composite_fk_model", input_df)
+
+        if hasattr(prediction, "item"):
+            prediction_value = int(prediction.item())
+        elif isinstance(prediction, (list, tuple)) or hasattr(prediction, "__len__"):
+            prediction_value = int(prediction[0])
+        else:
+            prediction_value = int(prediction)
+
+        return CompositeForeignKeyPrediction(
             **data_dict,
             prediction=prediction_value,
             probability=probability,
