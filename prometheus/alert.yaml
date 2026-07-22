@@ -1,0 +1,11 @@
+groups:
+  - name: service-health
+    rules:
+      - alert: InstanceDown
+        expr: up{job="services"} < 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is down"
+          description: "Prometheus has been unable to scrape {{ $labels.instance }} for 5 minutes."

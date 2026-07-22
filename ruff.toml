@@ -83,7 +83,6 @@ select = [
     "PIE",   # flake8-pie (miscellaneous lints)
     "T20",   # flake8-print (avoid print statements in production)
     "PT",    # flake8-pytest-style (better pytest code)
-    "RET",   # flake8-return (better return statements)
     "SIM",   # flake8-simplify (simplify code)
     "TCH",   # flake8-type-checking (optimize type checking imports)
     "ARG",   # flake8-unused-arguments (catch unused args)
@@ -119,6 +118,10 @@ ignore = [
     # Additional pragmatic ignores
     "PLR0912", # Too many branches - sometimes complex logic is needed
     "PLR0915", # Too many statements - OK for initialization code
+
+    # Global variables
+    "PLW0602",
+    "PLW0603",
 ]
 
 # Allow autofix for all enabled rules (when `--fix`) is provided.
@@ -160,7 +163,7 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 ]
 
 [lint.pep8-naming]
-ignore-names = ["X", "y"]
+ignore-names = ["X", "y", "X_train", "X_test", "RSEED"]
 
 [lint.mccabe]
 # Maximum McCabe complexity

@@ -1,0 +1,8 @@
+evidently==0.7.15
+Flask==3.1.1
+gunicorn==23.0.0
+pandas==2.2.3
+prometheus_client==0.21.1
+PyYAML==6.0.2
+requests==2.32.3
+Werkzeug==3.1.8
