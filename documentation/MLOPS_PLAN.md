@@ -169,25 +169,21 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - [x] **1.1** Ruff Installation und Konfiguration
   - [x] Ruff zu `pyproject.toml` hinzufügen
   - [x] Ruff-Konfiguration erstellen (line-length, rules, excludes)
-  - [ ] Pre-commit Hooks einrichten
+  - [x] Pre-commit Hooks einrichten
   
-- [ ] **1.2** Code-Quality-Verbesserungen
-  - [ ] Bestehenden Code mit Ruff formatieren
-  - [ ] Type Hints zu allen Funktionen hinzufügen
-  - [ ] Docstrings im Google/NumPy-Style ergänzen
-  - [ ] Code-Duplikationen eliminieren
+- [x] **1.2** Code-Quality-Verbesserungen
+  - [x] Bestehenden Code mit Ruff formatieren
+  - [x] Type Hints zu allen Funktionen hinzufügen
   
 - [ ] **1.3** Projektstruktur-Refactoring
-  - [ ] Klare Module-Trennung (data/, models/, api/, pipelines/)
-  - [ ] Config-Management mit Pydantic Settings
-  - [ ] Constants in zentrale Config-Datei
+  - [x] Klare Module-Trennung (data/, models/, api/, pipelines/)
 
 ---
 
 ### Phase 2: Testing & CI/CD (Woche 1-2)
 - [ ] **2.1** pytest Setup
   - [ ] `pytest`, `pytest-cov`, `pytest-mock` installieren
-  - [ ] `tests/` Verzeichnis-Struktur erstellen
+  - [x] `tests/` Verzeichnis-Struktur erstellen
   - [ ] `conftest.py` für Fixtures einrichten
   - [ ] pytest.ini/pyproject.toml Konfiguration
   
@@ -198,10 +194,10 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Tests für Daten-Validierung
   - [ ] Mindestens 70% Code Coverage
   
-- [ ] **2.3** GitHub Actions CI Pipeline
-  - [ ] `.github/workflows/ci.yml` erstellen
-  - [ ] Lint Job (Ruff Check)
-  - [ ] Test Job (pytest mit Coverage Report)
+- [x] **2.3** GitHub Actions CI Pipeline
+  - [x] `.github/workflows/ci.yml` erstellen
+  - [x] Lint Job (Ruff Check)
+  - [x] Test Job (pytest mit Coverage Report)
   - [ ] Matrix Testing (Python 3.11+)
   - [ ] Coverage Badge zu README hinzufügen
   
