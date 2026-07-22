@@ -1,0 +1,6 @@
+version: 2
+seeds:
+  - name: queue
+    config:
+      column_types:
+        processed_at: VARCHAR

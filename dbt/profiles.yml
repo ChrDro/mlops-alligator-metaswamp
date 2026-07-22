@@ -1,0 +1,14 @@
+dbt_trino_example:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      method: ldap 
+      user: "{{ env_var('TRINO_USERNAME')}}"
+      password: "{{ env_var('TRINO_PASSWORD')}}"
+      host: "{{ env_var('TRINO_IP_ADDRESS')}}"
+      database: duckdb
+      schema: predictions
+      port: 8443
+      threads: 4
+      http_scheme: https
