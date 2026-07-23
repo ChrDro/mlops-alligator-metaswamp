@@ -122,6 +122,7 @@ ignore = [
     # Global variables
     "PLW0602",
     "PLW0603",
+    "C901",
 ]
 
 # Allow autofix for all enabled rules (when `--fix`) is provided.

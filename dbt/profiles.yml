@@ -1,4 +1,4 @@
-dbt_trino_example:
+dbt_trino_capstone_2:
   target: dev
   outputs:
     dev:
