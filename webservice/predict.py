@@ -48,4 +48,8 @@ def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
     raw_sklearn_model = model._model_impl.get_raw_model()
     probabilities = raw_sklearn_model.predict_proba(model_input)
 
-    return float(prediction[0]), float(probabilities[0][1])
+    # Confidence = probability of the PREDICTED class. Since the models predict via
+    # argmax, this is max(probabilities). Works for both binary (pk/fk/cpk/cfk) and
+    # the multiclass normalform model. Previously this returned probabilities[0][1]
+    # (hardcoded class index 1), which is meaningless for a >2-class model.
+    return float(prediction[0]), float(probabilities[0].max())
