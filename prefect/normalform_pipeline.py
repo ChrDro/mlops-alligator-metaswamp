@@ -8,22 +8,22 @@ documentation/NORMALFORM_PREDICTION.md):
 - it uses a different, larger (50) feature set.
 
 This flow:
-1. Discovers + profiles columns in the target schema(s) and builds the exact 50
-   features the registered model expects (feature logic ported verbatim from
-   get_trino_summaries_task_3_training.py so inference matches training).
-2. Calls POST /predict_normalform per column via the model API.
-3. Aggregates per table by MAJORITY VOTE -> one normal-form class per table.
-4. Stores ONE row per table in duckdb.normalform_predictions.results.
+1. Skips tables already present in nf_results (each table is processed only once).
+2. Discovers + profiles the remaining columns and builds the exact 50 features the
+   registered model expects (feature logic ported verbatim from
+   get_trino_summaries_task_3_training.py so inference matches training), writing them
+   to duckdb.staging.stg_normalform_features for inspection.
+3. Calls POST /predict_normalform per column via the model API.
+4. Aggregates per table by MAJORITY VOTE -> one normal-form class per table.
+5. Stores ONE row per table in duckdb.prediction_results.nf_results.
 
 Retraining is intentionally out of scope: the training data is frozen and was
 mostly hand-labeled (no label generator exists in the repo).
 """
 
-import json
 import os
 import re
 from collections.abc import Iterator
-from pathlib import Path
 
 import pandas as pd
 import requests
@@ -58,12 +58,62 @@ EXPECTED_TYPE_COLS = [
     "column_type_varchar",
 ]
 
-# The 50 features the registered model / NormalForm pydantic schema expect.
-_FEATURES_JSON = (
-    Path(__file__).resolve().parent / ".." / ".." / "features_normalform.json"
-).resolve()
-with _FEATURES_JSON.open() as f:
-    MODEL_FEATURES: list[str] = json.load(f)["features"]
+# The 50 features the registered model / NormalForm pydantic schema expect, in order.
+# Kept inline (like pk_fk_pipeline's feature set) so the pipeline has no runtime dependency
+# on features_normalform.json. If the model is retrained with a different feature set, this
+# list and the extraction logic below must be updated to match.
+MODEL_FEATURES: list[str] = [
+    "number_unique_values",
+    "count",
+    "null_count",
+    "null_ratio",
+    "is_unique",
+    "ordinal_position",
+    "unique_ratio",
+    "is_non_null",
+    "is_first_column",
+    "relative_ordinal_position",
+    "is_first_unique_column",
+    "table_column_count",
+    "table_unique_column_count",
+    "table_row_count",
+    "other_unique_columns_in_table",
+    "table_has_unique_column",
+    "table_has_no_single_pk_candidate",
+    "table_near_unique_column_count",
+    "table_id_named_column_count",
+    "table_non_null_column_count",
+    "table_max_unique_ratio",
+    "table_integer_column_count",
+    "unique_ratio_rank",
+    "null_ratio_rank",
+    "is_least_null_in_table",
+    "unique_ratio_relative_to_max",
+    "other_near_unique_columns_in_table",
+    "name_ends_with_id",
+    "name_contains_key",
+    "name_contains_table_name",
+    "name_is_singular_table_id",
+    "name_length",
+    "table_avg_unique_ratio",
+    "table_avg_null_ratio",
+    "table_ratio_of_pk_candidates",
+    "is_this_col_violating_1nf",
+    "is_composite_key_part",
+    "table_has_composite_pk",
+    "is_this_col_partial_dependency",
+    "table_ratio_composite_key_cols",
+    "table_ratio_1nf_violations",
+    "table_std_unique_ratio",
+    "table_has_partial_dependency",
+    "column_type_char",
+    "column_type_date",
+    "column_type_decimal",
+    "column_type_double",
+    "column_type_integer",
+    "column_type_timestamp",
+    "column_type_varchar",
+]
 
 # Features the API expects as float (NormalForm pydantic); everything else numeric
 # is int, and column_type_* are bool.
@@ -372,13 +422,21 @@ def _encode_type_dummies(df_table: pd.DataFrame) -> pd.DataFrame:
 def extract_normalform_features(
     target_schemas: list[str],
     batch_size: int = 30,
+    skip_tables: set[tuple[str, str, str]] | None = None,
 ) -> pd.DataFrame:
     """
     Profile all columns in the target schema(s) and produce the 50 model features
     (plus id columns database/schema/table_name/column_name for aggregation).
 
+    Args:
+        target_schemas: Schemas to scan for tables/columns.
+        batch_size: Number of columns to profile per Trino query.
+        skip_tables: (database, schema, table_name) triples to skip entirely (already
+            processed in a previous run) so each table is only profiled/predicted once.
+
     Returns a DataFrame with one row per column.
     """
+    skip_tables = skip_tables or set()
     engine = get_trino_engine()
 
     schema_filter = "', '".join(target_schemas)
@@ -404,6 +462,11 @@ def extract_normalform_features(
         grouped.setdefault((database, schema, table), []).append(
             (column, data_type, ordinal_position),
         )
+
+    if skip_tables:
+        before = len(grouped)
+        grouped = {k: v for k, v in grouped.items() if k not in skip_tables}
+        print(f"Skipping {before - len(grouped)} already-processed tables")
 
     print(f"Processing {len(grouped)} tables")
 
@@ -480,7 +543,25 @@ def extract_normalform_features(
 
     df_final = df_final[id_cols + MODEL_FEATURES]
     n_tables = df_final["table_name"].nunique()
-    print(f"Extracted features for {len(df_final)} columns across {n_tables} tables")
+
+    # Persist the extracted features (rebuilt each run) so they can be inspected without
+    # running prediction, mirroring pk_fk_pipeline's stg_column_features. This is its OWN
+    # table: the normalform feature set (50 cols) differs from the pk/fk one, so the two
+    # must never share a staging table.
+    with engine.begin() as connection:
+        connection.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.staging"))
+        df_final.to_sql(
+            "stg_normalform_features",
+            connection,
+            schema="staging",
+            if_exists="replace",
+            index=False,
+        )
+
+    print(
+        f"Extracted features for {len(df_final)} columns across {n_tables} tables "
+        "(written to duckdb.staging.stg_normalform_features)",
+    )
     return df_final
 
 
@@ -562,7 +643,7 @@ def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
 
 @task(name="store-normalform-results", cache_policy=NO_CACHE)
 def store_results(results: pd.DataFrame) -> int:
-    """Append one row per table to duckdb.normalform_predictions.results."""
+    """Append one row per table to duckdb.prediction_results.nf_results."""
     if results.empty:
         print("No normalform results to store.")
         return 0
@@ -572,16 +653,42 @@ def store_results(results: pd.DataFrame) -> int:
 
     engine = get_trino_engine()
     with engine.begin() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.normalform_predictions"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.prediction_results"))
         results.to_sql(
-            "results",
+            "nf_results",
             conn,
-            schema="normalform_predictions",
+            schema="prediction_results",
             if_exists="append",
             index=False,
         )
     print(f"Stored {len(results)} table-level normalform predictions")
     return len(results)
+
+
+@task(name="get-processed-tables", cache_policy=NO_CACHE)
+def get_processed_tables() -> set[tuple[str, str, str]]:
+    """
+    Return the (database, schema, table_name) triples already stored in nf_results, so a
+    table is only ever profiled/predicted once across runs. This mirrors the pk/fk queue's
+    processed-row dedup, at table grain (normalform stores one row per table).
+    """
+    engine = get_trino_engine()
+    with engine.connect() as conn:
+        table_exists = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM duckdb.information_schema.tables "
+                "WHERE table_schema = 'prediction_results' AND table_name = 'nf_results'",
+            ),
+        ).scalar()
+        if not table_exists:
+            return set()
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT database, schema, table_name "
+                "FROM duckdb.prediction_results.nf_results",
+            ),
+        ).fetchall()
+    return {(r[0], r[1], r[2]) for r in rows}
 
 
 @flow(name="normalform-prediction-pipeline")
@@ -590,25 +697,34 @@ def normalform_prediction_pipeline(
     batch_size: int = 30,
 ) -> dict:
     """
-    Complete normalform track: extract 50 features -> predict per column ->
-    majority-vote aggregate to one NF class per table -> store.
+    Complete normalform track: skip already-processed tables -> extract 50 features ->
+    predict per column -> majority-vote aggregate to one NF class per table -> store.
+    Each table is processed only once (results are not duplicated across runs).
     """
     if target_schemas is None:
         target_schemas = ["new_predict_data"]
 
-    print("\n📊 Step 1: Extracting normalform features...")
-    features = extract_normalform_features(target_schemas=target_schemas, batch_size=batch_size)
+    print("\n🔎 Step 1: Checking which tables were already processed...")
+    processed_tables = get_processed_tables()
+    print(f"{len(processed_tables)} tables already have results")
+
+    print("\n📊 Step 2: Extracting normalform features for new tables...")
+    features = extract_normalform_features(
+        target_schemas=target_schemas,
+        batch_size=batch_size,
+        skip_tables=processed_tables,
+    )
     if features.empty:
-        print("⚠️  No features extracted - stopping.")
+        print("✅ No new tables to process - stopping.")
         return {"tables": 0}
 
-    print("\n🤖 Step 2: Predicting normal form per column...")
+    print("\n🤖 Step 3: Predicting normal form per column...")
     predicted = predict_normalform(features)
 
-    print("\n📊 Step 3: Aggregating to one row per table...")
+    print("\n📊 Step 4: Aggregating to one row per table...")
     table_results = aggregate_to_table(predicted)
 
-    print("\n📥 Step 4: Storing table-level results...")
+    print("\n📥 Step 5: Storing table-level results...")
     stored = store_results(table_results)
 
     print("\n✅ Normalform pipeline complete!")
