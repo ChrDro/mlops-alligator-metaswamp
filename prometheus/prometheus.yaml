@@ -2,6 +2,14 @@ global:
   scrape_interval: 30s
   scrape_timeout: 10s
 
+# Send alerts that reach the "firing" state to Alertmanager, which handles
+# grouping, deduplication and routing to receivers (see alertmanager/alertmanager.yml).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093'
+
 rule_files:
   - alert.yaml
 
