@@ -237,6 +237,7 @@ Add a data quality check as the first task:
 from prefect import flow, task
 import pytest
 
+
 @task
 def validate_training_data():
     """Run data quality tests before training."""
@@ -244,10 +245,12 @@ def validate_training_data():
     if exit_code != 0:
         raise ValueError("Data quality tests failed!")
 
+
 @task
 def train_model():
     # ... existing training code
     pass
+
 
 @flow
 def training_pipeline():
