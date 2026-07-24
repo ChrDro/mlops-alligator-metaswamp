@@ -850,7 +850,7 @@ def feature_engineering_pipeline(
     if queue_stats["unprocessed"] > 0:
         print(
             f"\n🤖 Step 3: Predicting up to {prediction_batch_size} of "
-            f"{queue_stats['unprocessed']} unprocessed rows..."
+            f"{queue_stats['unprocessed']} unprocessed rows...",
         )
         start_time = time.time()
         rows = fetch_new_rows(prediction_batch_size)
@@ -859,7 +859,7 @@ def feature_engineering_pipeline(
             store_predictions_to_trino(predictions)
             predictions_made = len(predictions)
             print(
-                f"Processed {predictions_made} predictions in {round(time.time() - start_time, 1)}s"
+                f"Processed {predictions_made} predicts in {round(time.time() - start_time, 1)}s",
             )
     else:
         print("All rows in queue already processed, skipping predictions")
