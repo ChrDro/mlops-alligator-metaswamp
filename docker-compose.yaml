@@ -7,6 +7,14 @@ services:
       - "8080:8080"
     env_file:
       - .env
+    environment:
+      # boto3 needs these to download model artifacts from MinIO when resolving
+      # models:/...@dev. Inside the Docker network the endpoint is minio:9000.
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_DEFAULT_REGION=eu-central-1
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - MLFLOW_S3_IGNORE_TLS=true
     volumes:
       - ./mlruns:${PWD}/mlruns
     networks:
@@ -68,28 +76,29 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - minio_data:/data
-    command: server /data --console-address ":9001"
+    # Start the server in the background, wait until it responds, create the
+    # buckets (idempotent), then hand control back to the server process so it
+    # stays the container's long-running process. mc ships inside minio/minio,
+    # so no separate bootstrap container is needed.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        minio server /data --console-address ":9001" &
+        minio_pid=$$!
+        until mc alias set myminio http://localhost:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" 2>/dev/null; do
+          echo "Waiting for MinIO to accept connections...";
+          sleep 1;
+        done
+        mc mb --ignore-existing myminio/mlflow
+        mc mb --ignore-existing myminio/postgres-backups
+        echo "MinIO buckets ready."
+        wait "$$minio_pid"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
       timeout: 5s
       retries: 3
-    networks:
-      - ml-services-monitoring
-
-  mc:
-    image: minio/mc:latest
-    container_name: mlflow_init_bucket
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
-      /usr/bin/mc mb --ignore-existing myminio/mlflow;
-      /usr/bin/mc mb --ignore-existing myminio/postgres-backups;
-      exit 0;
-      "
     networks:
       - ml-services-monitoring
 
@@ -147,6 +156,11 @@ services:
       - AWS_DEFAULT_REGION=eu-central-1
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - MLFLOW_S3_IGNORE_TLS=true
+      # MLflow 3.x rejects Host headers not in its allowlist (DNS-rebinding protection).
+      # Setting this REPLACES the defaults, so list every host the server is reached by:
+      # "mlflow:5000" from other containers (e.g. model-service), and localhost from the
+      # host browser/CLI. Patterns use fnmatch, so ":*" covers any port.
+      - MLFLOW_SERVER_ALLOWED_HOSTS=mlflow:*,localhost:*,127.0.0.1:*
     depends_on:
       minio:
         condition: service_healthy

@@ -11,6 +11,7 @@ import lightgbm as lgb
 import mlflow
 import numpy as np
 import pandas as pd
+from dotenv import dotenv_values
 from mlflow.entities.model_registry import ModelVersion
 from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
@@ -31,7 +32,27 @@ RSEED = 42
 # DEFAULT_INPUT_PATH = Path("evidently_service/green_taxi_data/reference.csv")
 # DEFAULT_MODEL_NAME = "green-taxi-ride-duration"
 # DEFAULT_ALIAS = "production"
+# Read .env into a dict WITHOUT mutating os.environ. Its values target the Docker network
+# (e.g. MLFLOW_TRACKING_URI=http://mlflow:5000, endpoints at minio:9000) and are wrong for
+# a host-run script — we only want the MinIO credentials out of it.
+_env = dotenv_values()
+
+# The server is published on the host at localhost:5000 (the Docker name "mlflow" does not
+# resolve here). Honor an explicit shell override, otherwise default to localhost.
 DEFAULT_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+mlflow.set_tracking_uri(DEFAULT_TRACKING_URI)
+
+# MLflow logs run artifacts (features.json, the model) directly to MinIO because the run's
+# artifact root is s3://mlflow/. On the host this client must carry the MinIO endpoint +
+# credentials itself, or boto3 falls back to real AWS S3 and fails with InvalidAccessKeyId.
+# Endpoint is localhost:9000 (published port), NOT minio:9000 (Docker-network only).
+_minio_user = _env.get("MINIO_ROOT_USER")
+_minio_password = _env.get("MINIO_ROOT_PASSWORD")
+if _minio_user and _minio_password:
+    os.environ["AWS_ACCESS_KEY_ID"] = _minio_user
+    os.environ["AWS_SECRET_ACCESS_KEY"] = _minio_password
+os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+os.environ.setdefault("AWS_DEFAULT_REGION", "eu-central-1")
 
 
 def wait_for_model_version(

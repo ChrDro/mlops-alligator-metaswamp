@@ -22,4 +22,5 @@ dependencies = [
     "prefect>=3.7.8,<4.0.0",
     "prefect-sqlalchemy>=0.6.0",
     "prefect-dbt[trino]>=0.4.3",
+    "boto3>=1.43.55",
 ]
