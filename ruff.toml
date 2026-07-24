@@ -34,6 +34,8 @@ exclude = [
     "gen_data",
     "htmlcov",
     ".DS_Store",
+    "README.md",
+    "test/test_data/README.md",
 ]
 
 # Line length - use 100 for better readability with modern screens
