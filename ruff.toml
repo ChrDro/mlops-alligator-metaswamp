@@ -123,6 +123,7 @@ ignore = [
     "PLW0602",
     "PLW0603",
     "C901",
+    "PLR0917",
 ]
 
 # Allow autofix for all enabled rules (when `--fix`) is provided.

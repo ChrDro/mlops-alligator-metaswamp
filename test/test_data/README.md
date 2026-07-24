@@ -240,10 +240,7 @@ import pytest
 @task
 def validate_training_data():
     """Run data quality tests before training."""
-    exit_code = pytest.main([
-        "tests/test_data/test_training_data_quality.py",
-        "-v"
-    ])
+    exit_code = pytest.main(["tests/test_data/test_training_data_quality.py", "-v"])
     if exit_code != 0:
         raise ValueError("Data quality tests failed!")
 
@@ -255,7 +252,7 @@ def train_model():
 @flow
 def training_pipeline():
     validate_training_data()  # Runs first
-    train_model()             # Only runs if validation passes
+    train_model()  # Only runs if validation passes
 ```
 
 ---
