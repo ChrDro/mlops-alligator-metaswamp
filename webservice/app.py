@@ -15,9 +15,8 @@ from data_model_denormalization import NormalForm, NormalFormPrediction
 from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from fastapi import FastAPI, HTTPException
-
-# from prometheus_fastapi_instrumentator import Instrumentator
 from predict import predict
+from prometheus_fastapi_instrumentator import Instrumentator
 
 
 # Inside Docker Compose this points to the Evidently service name.
@@ -30,7 +29,7 @@ from predict import predict
 app = FastAPI()
 
 # Expose default FastAPI request metrics on /metrics for Prometheus.
-# Instrumentator().instrument(app).expose(app)
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/")
