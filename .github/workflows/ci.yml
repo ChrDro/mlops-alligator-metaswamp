@@ -42,7 +42,10 @@ jobs:
       
       - name: Install Ruff with uv
         run: |
-          uv pip install --system ruff
+          # Pin the exact version so a ruff release can't silently change
+          # formatting/lint rules and turn CI red on unrelated files.
+          # Keep this in sync with the ruff pin in pyproject.toml.
+          uv pip install --system ruff==0.16.0
       
       - name: Run Ruff check
         run: |
