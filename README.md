@@ -201,36 +201,92 @@ targets are imbalanced — **accuracy is meaningless here; we track F1 and PR-AU
 Task 3 data is synthetically generated to keep the four classes balanced — a luxury the
 key tasks do not have.
 
+<details>
+<summary><b>Source databases</b> (click to expand)</summary>
+
+Public datasets, sample databases, and Python/LLM-generated synthetic schemas. "Number of
+tables" is the size of each source database, not the number of feature rows.
+
+| Dataset | Where to find | Tables | Topic |
+| :--- | :--- | ---: | :--- |
+| Willibald DWA Challenge | https://dwa-compare.info/en/start-2/ | 10 | E-Commerce |
+| Synthetic E-Commerce Dataset — Free Sample | https://www.kaggle.com/datasets/oreomonsta123/synthetic-e-commerce-dataset10-tables-8-countries | 10 | E-Commerce |
+| Multitable Ecommerce European Fashion | https://www.kaggle.com/datasets/joycemara/european-fashion-store-multitable-dataset | 7 | E-Commerce |
+| TPC-H | https://www.tpc.org/tpch/ | 8 | E-Commerce |
+| Formula 1 World Championship 2000–2026 | https://www.kaggle.com/datasets/mkaur1141/formula-1-world-championship-dataset-20002026 | 5 | Sports |
+| USDA Nutrition Data: Flattened (SR Legacy) | https://www.kaggle.com/datasets/ericfornow/usda-nutrition-data-flattened-sr-legacy | 7 | Science |
+| Solstice Residential Energy Pack (Sample) | https://www.kaggle.com/datasets/justinsolstice/solstice-residential-energy-pack | 16 | Energy |
+| Northwind | https://github.com/microsoft/sql-server-samples/tree/master/samples/databases/northwind-pubs | 11 | E-Commerce |
+| House Sales in King County, USA | https://www.kaggle.com/datasets/harlfoxem/housesalesprediction | 2 | Finance |
+| Take me home | neue-fische database | 1 | unknown |
+| Petsowners | neue-fische database | 4 | Veterinary |
+| Monalisa | neue-fische database | 6 | Aviation |
+| Heart | neue-fische database | 5 | Medicine |
+| Gapminder | neue-fische database | 5 | Medicine |
+| Bike Store relational database | https://www.kaggle.com/datasets/dillonmyrick/bike-store-sample-database | 9 | E-Commerce |
+| LifeAlly (career, health, relationship, finance) | https://www.kaggle.com/datasets/karanshelar6/lifeallycarrer-health-relationship-finance | 7 | Various |
+| Sales, customers, products | https://www.kaggle.com/datasets/arkhepacis/sales-customers-products-and-customers | 5 | E-Commerce |
+| F1 Grand Prix Dataset | https://www.kaggle.com/datasets/harshitstark/f1-grandprix-datavault | 14 | Sports |
+| FIFA World Cup Database | https://www.kaggle.com/datasets/joshfjelstul/world-cup-database | 27 | Sports |
+| Northwind Datavault | Microsoft Northwind Database | 120 | E-Commerce |
+| Euroleague & Eurocup Datasets | https://www.kaggle.com/datasets/babissamothrakis/euroleague-datasets | 14 | Sports |
+| mimic-iv-clinical-database-demo-2.2 | https://www.kaggle.com/datasets/montassarba/mimic-iv-clinical-database-demo-2-2 | 31 | Medicine |
+| Academic Records | Python-generated synthetic | 10 | Education |
+| Aviation Operations | Python-generated synthetic | 6 | Aviation |
+| Banking System | Python-generated synthetic | 9 | Finance |
+| Calculated Field Examples | Python-generated synthetic | 4 | Various |
+| Clinical Trials | Python-generated synthetic | 10 | Medicine |
+| Content Management Platform | Python-generated synthetic | 10 | Entertainment |
+| Diabetes Dataset | Python-generated synthetic | 4 | Medicine |
+| E-Commerce Operations | Python-generated synthetic | 9 | E-Commerce |
+| Event Management | Python-generated synthetic | 11 | Entertainment |
+| Fleet Management | Python-generated synthetic | 10 | Transportation |
+| Food Delivery | Python-generated synthetic | 10 | Food & Beverage |
+| Government Database | Python-generated synthetic | 6 | Government |
+| Healthcare Database | Python-generated synthetic | 7 | Healthcare |
+| Hospitality Database | Python-generated synthetic | 10 | Hospitality |
+| HR System | Python-generated synthetic | 9 | Human Resources |
+| Insurance Database | Python-generated synthetic | 10 | Finance |
+| Introduction Database | Python-generated synthetic | 3 | Various |
+| Inventory Management | Python-generated synthetic | 9 | Logistics |
+| IoT Platform | Python-generated synthetic | 10 | Technology |
+| Library Database | Python-generated synthetic | 9 | Education |
+| Manufacturing Database | Python-generated synthetic | 10 | Manufacturing |
+| Media Streaming Platform | Python-generated synthetic | 10 | Entertainment |
+| Project Management | Python-generated synthetic | 9 | Various |
+| Railway Database | Python-generated synthetic | 6 | Transportation |
+| Real Estate Database | Python-generated synthetic | 10 | Finance |
+| Retail Data Warehouse | Python-generated synthetic | 6 | Retail |
+| Retail Point of Sale | Python-generated synthetic | 10 | Retail |
+| Shipping Database | Python-generated synthetic | 6 | Logistics |
+| Social Platform | Python-generated synthetic | 8 | Technology |
+| Sports League Database | Python-generated synthetic | 10 | Sports |
+| Supply Chain | Python-generated synthetic | 10 | Logistics |
+| Telecom Billing | Python-generated synthetic | 9 | Telecommunications |
+| Telehealth Platform | Python-generated synthetic | 10 | Healthcare |
+| Traffic Management | Python-generated synthetic | 6 | Transportation |
+| University Database | Python-generated synthetic | 6 | Education |
+| Synthetic Multi-Domain Collection | Python-generated synthetic | 87 | Various |
+| FreeSQL.com Sample Databases | https://freesql.com | 62 | Various |
+| Spider Text-to-SQL Benchmark | https://yale-lily.github.io/spider | ~1,020 (~190 DBs) | Various (138 domains) |
+| Chinook Sample Database | https://github.com/lerocha/chinook-database | 11 | Music |
+| Sakila Sample Database | https://github.com/jOOQ/sakila | 16 | Video rental |
+
+</details>
+
 ---
 
 ## Features
 
-Features are engineered per column and per table and split into two sets, generated
+Features are engineered per column and per table. There are two feature sets, generated
 directly from the training scripts:
 
-**Tasks 1 & 2 — 31 features** (identical feature set; only the target differs)
+- **Tasks 1 & 2 — 31 features** (identical set; only the target differs)
+- **Task 3 — 50 features** (adds normalization-specific signals and a few columns Tasks 1
+  & 2 drop)
 
-Column-level: `number_unique_values`, `count`, `is_unique`, `ordinal_position`,
-`unique_ratio`, `is_first_column`, `relative_ordinal_position`, `is_first_unique_column`,
-`unique_ratio_rank`, `null_ratio_rank`, `is_least_null_in_table`,
-`unique_ratio_relative_to_max`, `name_ends_with_id`, `name_contains_table_name`,
-`name_is_singular_table_id`, `name_length`, and one-hot `column_type_{boolean, date,
-decimal, double, integer, varchar}`.
-
-Table-level: `table_column_count`, `table_unique_column_count`, `table_row_count`,
-`table_has_unique_column`, `table_has_no_single_pk_candidate`,
-`table_near_unique_column_count`, `table_id_named_column_count`,
-`table_non_null_column_count`, `table_max_unique_ratio`.
-
-**Task 3 — 50 features**
-
-Everything above (with `char`/`timestamp` one-hot types added), plus normalization-specific
-features: `is_this_col_violating_1nf`, `is_composite_key_part`,
-`is_this_col_partial_dependency`, `table_has_composite_pk`, `table_has_partial_dependency`,
-`table_avg_unique_ratio`, `table_avg_null_ratio`, `table_std_unique_ratio`,
-`table_ratio_of_pk_candidates`, `table_ratio_composite_key_cols`,
-`table_ratio_1nf_violations`, plus `null_count`, `null_ratio`, `is_non_null` and the
-`other_*` counts (which Tasks 1 & 2 drop).
+Identifier columns (`database`, `schema`, `table_name`, `column_name`) and raw
+`min_value` / `max_value` are never used as features — only for grouping and traceability.
 
 > **Note on Task 3 features.** `is_this_col_violating_1nf`, `is_composite_key_part` and
 > `is_this_col_partial_dependency` are close to the *definitions* of 1NF/2NF, so the model
@@ -238,8 +294,86 @@ features: `is_this_col_violating_1nf`, `is_composite_key_part`,
 > `table_contains_1nf_violation` are dropped from the features to avoid direct leakage.
 > This is a known limitation we call out rather than hide.
 
-Identifier columns (`database`, `schema`, `table_name`, `column_name`) and raw
-`min_value` / `max_value` are never used as features — only for grouping and traceability.
+<details>
+<summary><b>Full metadata &amp; statistics dictionary</b> (click to expand)</summary>
+
+`T1` = single/composite primary key · `T2` = single/composite foreign key ·
+`T3` = normal form · `identifier` = used for grouping only · `—` = present in the data
+but not used as a training feature.
+
+| Variable | Description | Example | Used in |
+| :--- | :--- | :--- | :--- |
+| `database` | Name of the database the table lives in | "Formula 1" | identifier |
+| `schema` | Name of the schema the table lives in | "Season 2025" | identifier |
+| `table_name` | Name of the table | "Drivers" | identifier |
+| `column_name` | Name of the column | "Age" | identifier |
+| `column_type` | Raw data type (one-hot encoded for training) | "int" | — |
+| `min_value` | Minimum value of the column | "18" | — |
+| `max_value` | Maximum value of the column | "44" | — |
+| `number_unique_values` | Count of distinct values in the column | "23" | T1, T2, T3 |
+| `count` | Number of rows in the table | "25" | T1, T2, T3 |
+| `null_count` | Raw count of null values in the column | "0" | T3 |
+| `null_ratio` | `null_count / count` | "0.0" | T3 |
+| `is_unique` | Column values are fully unique | 0 or 1 | T1, T2, T3 |
+| `ordinal_position` | Position of the column in the table (1-based) | "2" | T1, T2, T3 |
+| `unique_ratio` | `number_unique_values / count` | "0.177" | T1, T2, T3 |
+| `is_non_null` | Column has no null values | 0 or 1 | T3 |
+| `is_first_column` | Column is the first in the table | 0 or 1 | T1, T2, T3 |
+| `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | T1, T2, T3 |
+| `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | T1, T2, T3 |
+| `table_column_count` | Total columns in the table | "9" | T1, T2, T3 |
+| `table_unique_column_count` | Number of fully unique columns in the table | "0" | T1, T2, T3 |
+| `table_row_count` | Number of rows in the table | "768" | T1, T2, T3 |
+| `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | T3 |
+| `table_has_unique_column` | Table has at least one unique column | 0 or 1 | T1, T2, T3 |
+| `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | T1, T2, T3 |
+| `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | T1, T2, T3 |
+| `table_id_named_column_count` | Number of ID-named columns in the table | "0" | T1, T2, T3 |
+| `table_non_null_column_count` | Number of non-null columns in the table | "9" | T1, T2, T3 |
+| `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | T1, T2, T3 |
+| `table_integer_column_count` | Number of integer-typed columns in the table | "7" | T3 |
+| `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | T1, T2, T3 |
+| `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | T1, T2, T3 |
+| `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | T1, T2, T3 |
+| `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | T1, T2, T3 |
+| `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | T3 |
+| `name_ends_with_id` | Column name ends with "id" | 0 or 1 | T1, T2, T3 |
+| `name_contains_key` | Column name contains "key" | 0 or 1 | T3 |
+| `name_contains_table_name` | Column name contains the table name | 0 or 1 | T1, T2, T3 |
+| `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | T1, T2, T3 |
+| `name_length` | Length of the column name | "7" | T1, T2, T3 |
+| `column_type_boolean` | One-hot: boolean | 0 or 1 | T1, T2 |
+| `column_type_char` | One-hot: char | 0 or 1 | T3 |
+| `column_type_date` | One-hot: date | 0 or 1 | T1, T2, T3 |
+| `column_type_decimal` | One-hot: decimal | 0 or 1 | T1, T2, T3 |
+| `column_type_double` | One-hot: double | 0 or 1 | T1, T2, T3 |
+| `column_type_integer` | One-hot: integer | 0 or 1 | T1, T2, T3 |
+| `column_type_timestamp` | One-hot: timestamp | 0 or 1 | T3 |
+| `column_type_varchar` | One-hot: varchar | 0 or 1 | T1, T2, T3 |
+| `is_this_col_violating_1nf` | Column has non-atomic / multi-valued entries | 0 or 1 | T3 |
+| `is_composite_key_part` | Column is part of a composite primary key | 0 or 1 | T3 |
+| `is_this_col_partial_dependency` | Column partially depends on the composite PK | 0 or 1 | T3 |
+| `table_avg_unique_ratio` | Mean `unique_ratio` across the table's columns | "0.312" | T3 |
+| `table_avg_null_ratio` | Mean `null_ratio` across the table's columns | "0.05" | T3 |
+| `table_std_unique_ratio` | Std dev of `unique_ratio` across the table | "0.21" | T3 |
+| `table_ratio_of_pk_candidates` | Ratio of PK-candidate columns to total columns | "0.11" | T3 |
+| `table_has_composite_pk` | Table uses a composite primary key | 0 or 1 | T3 |
+| `table_ratio_composite_key_cols` | Ratio of composite-key columns to total | "0.22" | T3 |
+| `table_ratio_1nf_violations` | Ratio of 1NF-violating columns to total | "0.0" | T3 |
+| `table_has_partial_dependency` | Any column in the table is a partial dependency | 0 or 1 | T3 |
+| `table_contains_1nf_violation` | Table has a 1NF violation | 0 or 1 | — (dropped, leakage guard) |
+| `pk_target` | Is the column a single primary key? | 0 or 1 | **target: T1** |
+| `composite_pk_target` | Is the column part of a composite PK? | 0 or 1 | **target: T1** |
+| `fk_target` | Is the column a foreign key? | 0 or 1 | **target: T2** |
+| `composite_fk_target` | Is the column part of a composite FK? | 0 or 1 | **target: T2** |
+| `target_normal_form` | Highest normal form the table satisfies (0–3) | 0, 1, 2, 3 | **target: T3** |
+
+</details>
+
+### Data types
+
+The current pipeline covers standard scalar types. Future work should add types like
+`blob`, while intentionally leaving out semi-structured data such as `json` and `xml`.
 
 ---
 
