@@ -77,9 +77,6 @@ def wait_for_model_version(
     timeout_seconds: int,
 ) -> ModelVersion:
     """Wait until the registered model version is ready to serve."""
-    # MLflow registration can finish asynchronously depending on the backend.
-    # Polling here keeps the local workflow predictable before the API tries
-    # to resolve the production alias.
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         model_version = client.get_model_version(model_name, version)

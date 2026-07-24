@@ -763,9 +763,19 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
 
     # Reorder columns for readability, keeping only those present.
     column_order = [
-        "queue_id", "database", "schema", "table_name", "column_name",
-        "pk_prediction", "pk_confidence", "fk_prediction", "fk_confidence",
-        "cpk_prediction", "cpk_confidence", "cfk_prediction", "cfk_confidence",
+        "queue_id",
+        "database",
+        "schema",
+        "table_name",
+        "column_name",
+        "pk_prediction",
+        "pk_confidence",
+        "fk_prediction",
+        "fk_confidence",
+        "cpk_prediction",
+        "cpk_confidence",
+        "cfk_prediction",
+        "cfk_confidence",
         "predicted_at",
     ]
     df = df[[c for c in column_order if c in df.columns]]
@@ -838,16 +848,19 @@ def feature_engineering_pipeline(
     # Step 3: Predict a batch of unprocessed rows and store the results.
     predictions_made = 0
     if queue_stats["unprocessed"] > 0:
-        print(f"\n🤖 Step 3: Predicting up to {prediction_batch_size} of "
-              f"{queue_stats['unprocessed']} unprocessed rows...")
+        print(
+            f"\n🤖 Step 3: Predicting up to {prediction_batch_size} of "
+            f"{queue_stats['unprocessed']} unprocessed rows..."
+        )
         start_time = time.time()
         rows = fetch_new_rows(prediction_batch_size)
         if not rows.empty:
             predictions = predict_batch(rows)
             store_predictions_to_trino(predictions)
             predictions_made = len(predictions)
-            print(f"Processed {predictions_made} predictions in "
-                  f"{round(time.time() - start_time, 1)}s")
+            print(
+                f"Processed {predictions_made} predictions in {round(time.time() - start_time, 1)}s"
+            )
     else:
         print("All rows in queue already processed, skipping predictions")
 
