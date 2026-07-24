@@ -31,6 +31,16 @@ services:
     networks:
       - ml-services-monitoring
 
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager:/etc/alertmanager
+    command: --config.file=/etc/alertmanager/alertmanager.yml
+    networks:
+      - ml-services-monitoring
+
   grafana:
     image: grafana/grafana:13.0.1
     ports:
