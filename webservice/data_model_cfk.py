@@ -3,12 +3,8 @@
 from pydantic import BaseModel
 
 
-# This model describes the JSON body accepted by POST /predict.
-# Each field is one feature used by the registered MLflow model.
+# This model describes the JSON body accepted by POST /predict_cfk.
 class CompositeForeignKey(BaseModel):
-    # These fields mirror the training features used by the demo model.
-    # Keeping the schema small makes it easier to inspect payloads in curl,
-    # send_data.py, and the Evidently report.
     number_unique_values: int
     count: int
     null_count: int
@@ -30,7 +26,6 @@ class CompositeForeignKey(BaseModel):
     table_id_named_column_count: int
     table_non_null_column_count: int
     table_max_unique_ratio: float
-    table_integer_column_count: int
     unique_ratio_rank: int
     null_ratio_rank: int
     is_least_null_in_table: int
@@ -41,6 +36,7 @@ class CompositeForeignKey(BaseModel):
     name_contains_table_name: int
     name_is_singular_table_id: int
     name_length: int
+    table_integer_column_count: int
     column_type_boolean: bool
     column_type_date: bool
     column_type_decimal: bool
