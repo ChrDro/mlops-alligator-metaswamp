@@ -28,8 +28,16 @@ from collections.abc import Iterator
 import pandas as pd
 import requests
 import urllib3
+from change_events import (
+    TRACK_NF,
+    TableRef,
+    claim_pending_changes,
+    complete_pending_changes,
+    release_pending_changes,
+)
 from dotenv import load_dotenv
 from prefect.cache_policies import NONE as NO_CACHE
+from prefect.runtime import flow_run
 from sqlalchemy import Engine, create_engine, text
 
 from prefect import flow, task
@@ -423,6 +431,7 @@ def extract_normalform_features(
     target_schemas: list[str],
     batch_size: int = 30,
     skip_tables: set[tuple[str, str, str]] | None = None,
+    only_tables: list[TableRef] | None = None,
 ) -> pd.DataFrame:
     """
     Profile all columns in the target schema(s) and produce the 50 model features
@@ -433,6 +442,8 @@ def extract_normalform_features(
         batch_size: Number of columns to profile per Trino query.
         skip_tables: (database, schema, table_name) triples to skip entirely (already
             processed in a previous run) so each table is only profiled/predicted once.
+        only_tables: Restrict profiling to exactly these tables (streaming mode).
+            Takes precedence over skip_tables - see the filter below for why.
 
     Returns a DataFrame with one row per column.
     """
@@ -463,7 +474,14 @@ def extract_normalform_features(
             (column, data_type, ordinal_position),
         )
 
-    if skip_tables:
+    if only_tables is not None:
+        # Streaming mode: the change detector already decided what needs work, so the
+        # already-processed filter must NOT apply - a reloaded table is meant to be
+        # profiled again even though nf_results holds an older row for it.
+        wanted = {tuple(ref) for ref in only_tables}
+        grouped = {k: v for k, v in grouped.items() if k in wanted}
+        print(f"Restricted to {len(grouped)} changed tables")
+    elif skip_tables:
         before = len(grouped)
         grouped = {k: v for k, v in grouped.items() if k not in skip_tables}
         print(f"Skipping {before - len(grouped)} already-processed tables")
@@ -691,41 +709,105 @@ def get_processed_tables() -> set[tuple[str, str, str]]:
     return {(r[0], r[1], r[2]) for r in rows}
 
 
+@task(name="claim-nf-changes", cache_policy=NO_CACHE)
+def claim_nf_changes(run_id: str) -> list[TableRef]:
+    """Claim the tables the change detector flagged for the normalform track."""
+    with get_trino_engine().begin() as conn:
+        return claim_pending_changes(conn, TRACK_NF, run_id)
+
+
+@task(name="close-nf-changes", cache_policy=NO_CACHE)
+def close_nf_changes(run_id: str, *, succeeded: bool) -> int:
+    """Complete the claim on success, release it on failure so the next run retries."""
+    with get_trino_engine().begin() as conn:
+        if succeeded:
+            return complete_pending_changes(conn, TRACK_NF, run_id)
+        return release_pending_changes(conn, TRACK_NF, run_id)
+
+
 @flow(name="normalform-prediction-pipeline")
 def normalform_prediction_pipeline(
     target_schemas: list[str] | None = None,
     batch_size: int = 30,
+    use_pending_changes: bool = False,
 ) -> dict:
     """
-    Complete normalform track: skip already-processed tables -> extract 50 features ->
+    Complete normalform track: pick the tables to process -> extract 50 features ->
     predict per column -> majority-vote aggregate to one NF class per table -> store.
-    Each table is processed only once (results are not duplicated across runs).
+
+    Args:
+        target_schemas: Schemas to scan (default: ['new_predict_data']).
+        batch_size: Column batch size for the profiling queries.
+        use_pending_changes: Streaming mode. Process exactly the tables the change
+            detector flagged, including ones that already have a result - a reloaded
+            table gets a fresh prediction. Results are appended, so nf_results keeps
+            the full history per table rather than overwriting it.
+            False (default) keeps the original "each table only once" behaviour.
     """
     if target_schemas is None:
         target_schemas = ["new_predict_data"]
 
-    print("\n🔎 Step 1: Checking which tables were already processed...")
-    processed_tables = get_processed_tables()
-    print(f"{len(processed_tables)} tables already have results")
+    only_tables: list[TableRef] | None = None
+    processed_tables: set[tuple[str, str, str]] | None = None
+    run_id = str(flow_run.get_id())
 
-    print("\n📊 Step 2: Extracting normalform features for new tables...")
-    features = extract_normalform_features(
-        target_schemas=target_schemas,
-        batch_size=batch_size,
-        skip_tables=processed_tables,
-    )
-    if features.empty:
-        print("✅ No new tables to process - stopping.")
-        return {"tables": 0}
+    if use_pending_changes:
+        print("\n📋 Step 0: Claiming pending changes for the normalform track...")
+        only_tables = claim_nf_changes(run_id)
+        if not only_tables:
+            print("No pending changes to process - nothing to do.")
+            return {"tables": 0}
+        print(f"Claimed {len(only_tables)} changed tables")
+    else:
+        print("\n🔎 Step 1: Checking which tables were already processed...")
+        processed_tables = get_processed_tables()
+        print(f"{len(processed_tables)} tables already have results")
 
-    print("\n🤖 Step 3: Predicting normal form per column...")
-    predicted = predict_normalform(features)
+    succeeded = False
+    stored = 0
+    try:
+        print("\n📊 Step 2: Extracting normalform features...")
+        features = extract_normalform_features(
+            target_schemas=target_schemas,
+            batch_size=batch_size,
+            skip_tables=processed_tables,
+            only_tables=only_tables,
+        )
+        if features.empty:
+            print("✅ No tables to process - stopping.")
+            # Claim is handled: the flagged tables are unreadable or gone, so
+            # retrying them would loop forever.
+            succeeded = True
+            return {"tables": 0}
 
-    print("\n📊 Step 4: Aggregating to one row per table...")
-    table_results = aggregate_to_table(predicted)
+        print("\n🤖 Step 3: Predicting normal form per column...")
+        predicted = predict_normalform(features)
 
-    print("\n📥 Step 5: Storing table-level results...")
-    stored = store_results(table_results)
+        print("\n📊 Step 4: Aggregating to one row per table...")
+        table_results = aggregate_to_table(predicted)
+
+        print("\n📥 Step 5: Storing table-level results...")
+        stored = store_results(table_results)
+
+        # A run only counts as done once every profiled table produced a result.
+        # Otherwise a run whose model calls all failed would still mark its changes
+        # complete, and the detector's retry path would never see them again.
+        expected = len(features[["database", "schema", "table_name"]].drop_duplicates())
+        if use_pending_changes and stored < expected:
+            msg = (
+                f"Only {stored} of {expected} profiled tables produced a normalform "
+                f"result (model calls failing). Releasing the changes so the next "
+                f"detection pass retries them."
+            )
+            print(f"\n❌ {msg}")
+            raise RuntimeError(msg)
+
+        succeeded = True
+    finally:
+        if use_pending_changes:
+            closed = close_nf_changes(run_id, succeeded=succeeded)
+            verb = "completed" if succeeded else "released for retry"
+            print(f"{closed} pending-change rows {verb}")
 
     print("\n✅ Normalform pipeline complete!")
     return {"tables": stored}

@@ -22,8 +22,16 @@ from datetime import UTC, datetime
 import pandas as pd
 import requests
 import urllib3
+from change_events import (
+    TRACK_KEYS,
+    TableRef,
+    claim_pending_changes,
+    complete_pending_changes,
+    release_pending_changes,
+)
 from dotenv import load_dotenv
 from prefect.cache_policies import NONE as NO_CACHE
+from prefect.runtime import flow_run
 from sqlalchemy import Engine, create_engine, text
 
 from prefect import flow, task
@@ -265,6 +273,7 @@ def recompute_table_stats(df_table: pd.DataFrame) -> pd.DataFrame:
 def extract_features(
     target_schemas: list[str],
     batch_size: int = 30,
+    only_tables: list[TableRef] | None = None,
 ) -> int:
     """
     Extract column-level features from information_schema and write them to
@@ -273,6 +282,10 @@ def extract_features(
     Args:
         target_schemas: Schemas to scan for tables/columns.
         batch_size: Number of columns to profile per Trino query.
+        only_tables: Restrict profiling to these tables. Used by the streaming
+            trigger so a run only pays for what actually changed instead of
+            re-profiling the whole schema. None = profile everything (the
+            original behaviour, kept for manual/full runs).
 
     Returns:
         Number of feature rows written.
@@ -311,6 +324,16 @@ def extract_features(
     for database, schema, table, column, data_type, ordinal_position in found_tables:
         key = (database, schema, table)
         grouped.setdefault(key, []).append((column, data_type, ordinal_position))
+
+    # Step 2b: Narrow to the changed tables when the streaming trigger scoped the run.
+    if only_tables is not None:
+        wanted = {tuple(ref) for ref in only_tables}
+        grouped = {key: cols for key, cols in grouped.items() if key in wanted}
+        missing = wanted - set(grouped)
+        if missing:
+            # A table was flagged as changed but is gone from information_schema by
+            # the time we got here (dropped between detection and processing).
+            print(f"{len(missing)} flagged tables no longer exist, skipping them")
 
     print(f"Processing {len(grouped)} tables")
 
@@ -410,15 +433,53 @@ def extract_features(
     return len(df_final)
 
 
+def _build_requeue_clause(
+    requeue_tables: list[TableRef] | None,
+) -> tuple[str, dict[str, str]]:
+    """
+    Build the SQL fragment that re-opens already-predicted columns.
+
+    Without this a column is predicted exactly once, ever: the queue dedup skips
+    anything with ``processed = TRUE``. When a table is reloaded, its data-dependent
+    features (unique_ratio, null_ratio, table_row_count, …) change, so the stale
+    prediction has to be recomputed rather than kept.
+
+    Returns:
+        The ``OR (...)`` fragment (empty string if nothing is flagged) and the bound
+        parameters it references.
+    """
+    if not requeue_tables:
+        return "", {}
+
+    predicates = []
+    params: dict[str, str] = {}
+    for i, ref in enumerate(requeue_tables):
+        params[f"rq_db_{i}"] = ref.database
+        params[f"rq_sc_{i}"] = ref.schema
+        params[f"rq_tb_{i}"] = ref.table_name
+        predicates.append(
+            f"(f.database = :rq_db_{i} AND f.schema = :rq_sc_{i} AND f.table_name = :rq_tb_{i})",
+        )
+
+    return f"OR ({' OR '.join(predicates)})", params
+
+
 @task(name="populate-prediction-queue", cache_policy=NO_CACHE)
-def populate_prediction_queue() -> int:
+def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> int:
     """
     Populate the prediction queue from the staging features table.
-    Only inserts rows that aren't already in the queue.
+
+    A column is queued when it has no unprocessed row waiting AND either it was
+    never predicted before, or its table appears in ``requeue_tables``.
+
+    Args:
+        requeue_tables: Tables whose already-predicted columns must be predicted
+            again because their data changed. Supplied by the streaming trigger.
 
     Returns:
         Number of rows inserted into queue
     """
+    requeue_clause, requeue_params = _build_requeue_clause(requeue_tables)
     trino_engine = get_trino_engine()
 
     with trino_engine.connect() as conn:
@@ -598,11 +659,23 @@ def populate_prediction_queue() -> int:
                   AND q.schema = f.schema
                   AND q.table_name = f.table_name
                   AND q.column_name = f.column_name
-                  AND q.processed = TRUE
+                  AND q.processed = FALSE
             )
-        """)  # noqa: S608 - max_id is an int from the DB, not user input
+            AND (
+                NOT EXISTS (
+                    SELECT 1
+                    FROM duckdb.predictions.queue AS q
+                    WHERE q.database = f.database
+                      AND q.schema = f.schema
+                      AND q.table_name = f.table_name
+                      AND q.column_name = f.column_name
+                      AND q.processed = TRUE
+                )
+                {requeue_clause}
+            )
+        """)  # noqa: S608 - max_id is an int and requeue_clause is built from bound parameters
 
-        result = conn.execute(insert_query)
+        result = conn.execute(insert_query, requeue_params)
         rows_inserted = result.rowcount if hasattr(result, "rowcount") else 0
 
         print(f"Inserted {rows_inserted} new rows into prediction queue")
@@ -814,11 +887,108 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
         print(f"Marked {len(successful_predictions)} rows as processed in queue")
 
 
+@task(name="count-unprocessed-for-tables", cache_policy=NO_CACHE)
+def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
+    """
+    How many queue rows for these tables are still waiting to be predicted.
+
+    This is the success test for a streaming run: the pending change may only be
+    marked complete once its columns actually have predictions. Counting leftovers
+    is more honest than counting attempts, because store_predictions_to_trino marks
+    a row processed only when all four models answered.
+    """
+    if not tables:
+        return 0
+
+    predicates = []
+    params: dict[str, str] = {}
+    for i, ref in enumerate(tables):
+        params[f"db_{i}"] = ref.database
+        params[f"sc_{i}"] = ref.schema
+        params[f"tb_{i}"] = ref.table_name
+        predicates.append(
+            f"(database = :db_{i} AND schema = :sc_{i} AND table_name = :tb_{i})",
+        )
+
+    query = text(f"""
+        SELECT COUNT(*)
+        FROM duckdb.predictions.queue
+        WHERE processed = FALSE
+          AND ({" OR ".join(predicates)})
+    """)  # noqa: S608 - predicates are built from bound parameters
+
+    with get_trino_engine().connect() as conn:
+        return conn.execute(query, params).scalar() or 0
+
+
+@task(name="claim-key-changes", cache_policy=NO_CACHE)
+def claim_key_changes(run_id: str) -> list[TableRef]:
+    """Claim the tables the change detector flagged for the pk/fk track."""
+    with get_trino_engine().begin() as conn:
+        return claim_pending_changes(conn, TRACK_KEYS, run_id)
+
+
+@task(name="close-key-changes", cache_policy=NO_CACHE)
+def close_key_changes(run_id: str, *, succeeded: bool) -> int:
+    """Complete the claim on success, release it on failure so the next run retries."""
+    with get_trino_engine().begin() as conn:
+        if succeeded:
+            return complete_pending_changes(conn, TRACK_KEYS, run_id)
+        return release_pending_changes(conn, TRACK_KEYS, run_id)
+
+
+def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
+    """
+    Predict unprocessed queue rows and return how many predictions were made.
+
+    With ``drain_queue`` the loop keeps going until the backlog is empty. It stops
+    early when a batch fails to reduce the unprocessed count - rows whose model call
+    failed stay ``processed = FALSE``, so without that guard the loop would spin on
+    the same failing batch forever.
+    """
+    predictions_made = 0
+    previous_unprocessed = None
+
+    while True:
+        queue_stats = check_queue_status()
+        unprocessed = queue_stats["unprocessed"] or 0
+
+        if unprocessed == 0:
+            print("All rows in queue already processed")
+            break
+
+        if previous_unprocessed is not None and unprocessed >= previous_unprocessed:
+            print(
+                f"Stopping: {unprocessed} rows still unprocessed after a full batch "
+                "(their model calls are failing). Check the model service.",
+            )
+            break
+        previous_unprocessed = unprocessed
+
+        print(f"\n🤖 Predicting up to {prediction_batch_size} of {unprocessed} unprocessed rows...")
+        start_time = time.time()
+        rows = fetch_new_rows(prediction_batch_size)
+        if rows.empty:
+            break
+
+        predictions = predict_batch(rows)
+        store_predictions_to_trino(predictions)
+        predictions_made += len(predictions)
+        print(f"Processed {len(predictions)} predicts in {round(time.time() - start_time, 1)}s")
+
+        if not drain_queue:
+            break
+
+    return predictions_made
+
+
 @flow(name="feature-engineering-pipeline")
 def feature_engineering_pipeline(
     target_schemas: list[str] | None = None,
     batch_size: int = 30,
     prediction_batch_size: int = 100,
+    use_pending_changes: bool = False,
+    drain_queue: bool = False,
 ) -> dict:
     """
     Complete pipeline: Extract features → Queue → Predict
@@ -826,50 +996,82 @@ def feature_engineering_pipeline(
     Args:
         target_schemas: Schemas to scan for features (default: ['new_predict_data']).
         batch_size: Column batch size for the feature extraction queries.
-        prediction_batch_size: Batch size for the prediction flow.
+        prediction_batch_size: Batch size for a single prediction round.
+        use_pending_changes: Streaming mode. Only process the tables the change
+            detector flagged, and re-predict their already-processed columns.
+            False (default) keeps the original full-schema scan.
+        drain_queue: Keep predicting until the queue backlog is empty instead of
+            stopping after one batch. Implied by ``use_pending_changes``, because a
+            change is only marked complete once its columns are actually predicted.
     """
     if target_schemas is None:
         target_schemas = ["new_predict_data"]
 
-    # Step 1: Extract features into duckdb.staging.stg_column_features
-    print("\n📊 Step 1: Extracting features from information_schema...")
-    rows_written = extract_features(target_schemas=target_schemas, batch_size=batch_size)
+    only_tables: list[TableRef] | None = None
+    run_id = str(flow_run.get_id())
 
-    if rows_written == 0:
-        print("\n⚠️  No features extracted - stopping pipeline.")
-        return {"rows_written": 0, "rows_queued": 0}
+    if use_pending_changes:
+        drain_queue = True
+        print("\n📋 Step 0: Claiming pending changes for the pk/fk track...")
+        only_tables = claim_key_changes(run_id)
+        if not only_tables:
+            # Normal case for a duplicate/late event - the work was already taken.
+            print("No pending changes to process - nothing to do.")
+            return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0, "tables": 0}
+        print(f"Claimed {len(only_tables)} changed tables")
 
-    # Step 2: Populate the prediction queue
-    print("\n📥 Step 2: Populating prediction queue...")
-    rows_inserted = populate_prediction_queue()
-
-    queue_stats = check_queue_status()
-
-    # Step 3: Predict a batch of unprocessed rows and store the results.
-    predictions_made = 0
-    if queue_stats["unprocessed"] > 0:
-        print(
-            f"\n🤖 Step 3: Predicting up to {prediction_batch_size} of "
-            f"{queue_stats['unprocessed']} unprocessed rows...",
+    succeeded = False
+    try:
+        # Step 1: Extract features into duckdb.staging.stg_column_features
+        print("\n📊 Step 1: Extracting features from information_schema...")
+        rows_written = extract_features(
+            target_schemas=target_schemas,
+            batch_size=batch_size,
+            only_tables=only_tables,
         )
-        start_time = time.time()
-        rows = fetch_new_rows(prediction_batch_size)
-        if not rows.empty:
-            predictions = predict_batch(rows)
-            store_predictions_to_trino(predictions)
-            predictions_made = len(predictions)
-            print(
-                f"Processed {predictions_made} predicts in {round(time.time() - start_time, 1)}s",
-            )
-    else:
-        print("All rows in queue already processed, skipping predictions")
+
+        if rows_written == 0:
+            print("\n⚠️  No features extracted - stopping pipeline.")
+            # Nothing to predict, but the claim is genuinely handled: the flagged
+            # tables are unreadable or gone, so retrying them would loop forever.
+            succeeded = True
+            return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0}
+
+        # Step 2: Populate the prediction queue
+        print("\n📥 Step 2: Populating prediction queue...")
+        rows_inserted = populate_prediction_queue(requeue_tables=only_tables)
+
+        # Step 3: Predict unprocessed rows and store the results.
+        predictions_made = _drain_queue(prediction_batch_size, drain_queue)
+
+        # Step 4: A run only counts as done once the claimed tables actually have
+        # predictions. Without this check a run whose every model call returned an
+        # error would still mark its changes complete, and the retry path built into
+        # the detector would never see them again - the work would vanish silently.
+        if use_pending_changes:
+            leftover = count_unprocessed_for_tables(only_tables)
+            if leftover:
+                msg = (
+                    f"{leftover} queue rows for the claimed tables are still "
+                    f"unpredicted (model calls failing). Releasing the changes so the "
+                    f"next detection pass retries them."
+                )
+                print(f"\n❌ {msg}")
+                raise RuntimeError(msg)
+
+        succeeded = True
+    finally:
+        if use_pending_changes:
+            closed = close_key_changes(run_id, succeeded=succeeded)
+            verb = "completed" if succeeded else "released for retry"
+            print(f"{closed} pending-change rows {verb}")
 
     print("Feature Engineering Pipeline Complete!")
 
     return {
         "rows_written": rows_written,
         "rows_queued": rows_inserted,
-        "queue_stats": queue_stats,
+        "queue_stats": check_queue_status(),
         "predictions_made": predictions_made,
     }
 

@@ -18,6 +18,49 @@ def load_model(model_name: str) -> PyFuncModel:
     return model
 
 
+def _align_to_signature(
+    model: PyFuncModel,
+    model_input: pd.DataFrame,
+    model_name: str,
+) -> pd.DataFrame:
+    """
+    Reorder the request columns to match the model's logged input signature.
+
+    Raises a message naming the offending fields when the request and the model
+    disagree on *which* features exist - that is a schema drift between the Pydantic
+    model and the registered model, and the bare sklearn error does not say so.
+    """
+    input_schema = model.metadata.get_input_schema()
+    if input_schema is None:
+        # No signature logged - nothing to align against, let the model decide.
+        return model_input
+
+    expected = list(input_schema.input_names())
+    provided = set(model_input.columns)
+
+    missing = []
+    for name in expected:
+        if name not in provided:
+            missing.append(name)
+            
+    extra = []
+    for name in model_input.columns:
+        if name not in expected:
+            extra.append(name)
+            
+    if missing or extra:
+        msg = (
+            f"Feature mismatch for '{model_name}': "
+            f"the model expects {len(expected)} features but the request does not "
+            f"match. Missing: {missing or 'none'}. Unexpected: {extra or 'none'}. "
+            f"The Pydantic schema and the registered model are out of sync - retrain "
+            f"the model or update the request schema."
+        )
+        raise ValueError(msg)
+
+    return model_input[expected]
+
+
 def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
     load_dotenv()
     mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
@@ -42,6 +85,11 @@ def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
     print("Load model...")
 
     model = load_model(model_name)
+
+    # Aligns columns to model's signature before predicting
+    # Feature names should match those passed during fit in naming and order
+    model_input = _align_to_signature(model, model_input, model_name)
+
     print("Making prediction with data: ", model_input.head())
     prediction = model.predict(model_input)
 

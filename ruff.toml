@@ -145,6 +145,8 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
     "PLR2004",  # Magic values are OK in test data
     "PLR0913",  # Many arguments OK in test parametrization
     "E501",     # Many asserts are just that long (100 line-length unrealistic)
+    "PLC0415",  # Deferred imports: a conftest that may skip should not pay the cost
+                # of importing heavy optional deps (mlflow) at collection time
 ]
 
 # Script files: Allow print statements and less strict checks
