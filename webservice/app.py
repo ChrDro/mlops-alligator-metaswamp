@@ -6,6 +6,7 @@ This module owns the public API surface used in the monitoring tutorial:
 - /metrics through prometheus-fastapi-instrumentator for service telemetry
 """
 
+import os
 import traceback
 
 import pandas as pd
@@ -24,9 +25,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # Inside Docker Compose this points to the Evidently service name.
 # It is configurable so you can run the API against another monitoring
 # endpoint without changing application code.
-# MONITORING_URL = os.getenv(
-#     "MONITORING_URL", "http://evidently_service:8085/iterate/green_taxi_data"
-# )
+MONITORING_URL = os.getenv(
+    "MONITORING_URL", "http://evidently_service:8085/iterate/green_taxi_data"
+)
 
 app = FastAPI()
 

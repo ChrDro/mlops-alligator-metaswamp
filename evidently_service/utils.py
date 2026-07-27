@@ -10,8 +10,17 @@ from typing import Any, cast
 import pandas as pd
 import prometheus_client
 import yaml
-from evidently import DataDefinition, Dataset, Report
-from evidently.metrics import DriftedColumnsCount, MissingValueCount, ValueDrift
+from evidently import BinaryClassification, DataDefinition, Dataset, Report
+from evidently.metrics import (
+    Accuracy,
+    DriftedColumnsCount,
+    F1Score,
+    LogLoss,
+    MissingValueCount,
+    Precision,
+    Recall,
+    ValueDrift,
+)
 
 
 def load_config(config_path: str = "config.yaml") -> dict[str, Any]:
@@ -182,6 +191,142 @@ def run_evidently(
     update_prometheus_metrics(metrics, gauge_store, dataset_name)
 
     logging.info(f"Report updated and {len(metrics)} metrics exported to Prometheus.")
+
+
+# ------------------------------------------------------------------------------
+# Classification quality track
+#
+# The drift track above needs no labels: it compares feature and prediction
+# distributions. F1/precision/recall/log-loss are different - they score
+# predictions against ground truth, so every event fed to this track must carry
+# the true label. That is why this is a separate endpoint and a separate report
+# rather than extra metrics on the drift report.
+# ------------------------------------------------------------------------------
+
+
+def positive_class_probability(prediction: int, probability: float) -> float:
+    """
+    Recover P(class=1) from the model API's ``probability`` field.
+
+    /predict_pk returns ``probability`` as the confidence in the *predicted*
+    class - ``max(predict_proba)``, see webservice/predict.py - not P(class=1).
+    Feeding that to log-loss directly would score a confident 0-prediction as if
+    it were a confident 1-prediction. For a binary argmax classifier the two are
+    related exactly, so the true positive-class probability is recoverable:
+
+        predicted 1 -> P(1) = probability
+        predicted 0 -> P(1) = 1 - probability
+    """
+    return float(probability) if int(prediction) == 1 else 1.0 - float(probability)
+
+
+def build_classification_data_definition(config: Mapping[str, Any]) -> DataDefinition:
+    """
+    Build the DataDefinition for the classification-quality report.
+
+    Only the three scoring columns are declared. Features are deliberately left
+    out: the metrics below do not read them, and declaring them would couple this
+    track to the model's feature schema for no benefit.
+    """
+    clf = config["classification"]
+
+    return DataDefinition(
+        classification=[
+            BinaryClassification(
+                target=clf["target"],
+                prediction_labels=clf["prediction"],
+                prediction_probas=clf["prediction_proba"],
+            ),
+        ],
+    )
+
+
+def create_classification_report(_config: Mapping[str, Any]) -> Report:
+    """
+    Create the classification-quality Report.
+
+    LogLoss is the only metric here that needs probabilities rather than hard
+    labels; the rest are computed from the label column.
+    """
+    report = Report(
+        metrics=[
+            cast("Any", F1Score)(),
+            cast("Any", Precision)(),
+            cast("Any", Recall)(),
+            cast("Any", Accuracy)(),
+            cast("Any", LogLoss)(),
+        ],
+    )
+    logging.info("Evidently classification report initialised.")
+    return report
+
+
+def update_classification_metrics(
+    metrics_dict: Mapping[str, Any],
+    gauge_store: dict[str, prometheus_client.Gauge],
+    dataset_name: str = "default_dataset",
+    series_type: str = "current",
+) -> None:
+    """
+    Export classification metrics as ``evidently_clf_*`` gauges.
+
+    Carries a ``type`` label ("current" or "reference") so one panel can plot the
+    live score against the baseline. Evidently's snapshot only ever reports the
+    current window - passing reference_data does not add reference values to it -
+    so the two series are produced by scoring the two datasets separately.
+
+    The ``evidently_clf_`` prefix keeps these distinct from the drift track's
+    ``evidently_*`` gauges, which carry a different label set. Re-registering one
+    metric name under two label sets is an error in prometheus_client.
+    """
+    for name, value in metrics_dict.items():
+        gauge_name = f"evidently_clf_{name.lower()}"
+
+        if name not in gauge_store:
+            gauge_store[name] = prometheus_client.Gauge(
+                gauge_name,
+                f"Evidently classification metric {name}",
+                labelnames=["dataset_name", "type"],
+            )
+            logging.info(f"Registered Prometheus gauge: {gauge_name}")
+
+        gauge_store[name].labels(dataset_name=dataset_name, type=series_type).set(float(value))
+
+
+def run_classification_report(
+    scored_data: pd.DataFrame,
+    data_definition: DataDefinition,
+    report: Report,
+    gauge_store: dict[str, prometheus_client.Gauge],
+    dataset_name: str = "default_dataset",
+    series_type: str = "current",
+    save_html: bool = True,
+) -> dict[str, Any]:
+    """
+    Score one labelled dataset and export the result to Prometheus.
+
+    Args:
+        scored_data: Rows carrying target, predicted label and positive-class
+            probability. Used as Evidently's *current* dataset regardless of
+            series_type - see update_classification_metrics for why.
+        series_type: "current" for the live window, "reference" for the baseline.
+        save_html: Skipped for the reference pass, which runs once at startup and
+            would otherwise overwrite the live report file.
+    """
+    dataset = Dataset.from_pandas(scored_data, data_definition=data_definition)
+    snapshot = report.run(reference_data=None, current_data=dataset)
+
+    if save_html:
+        snapshot.save_html("latest_classification_report.html")
+
+    metrics = extract_metrics_from_snapshot(snapshot)
+    update_classification_metrics(metrics, gauge_store, dataset_name, series_type)
+
+    logging.info(
+        f"Classification report ({series_type}) updated: "
+        f"{len(metrics)} metrics exported for {len(scored_data)} rows.",
+    )
+    return metrics
 
 
 def compute_hash(df: pd.DataFrame) -> str:

@@ -10,6 +10,26 @@ column_mapping:
   target: duration
   prediction: prediction
 
+# Classification-quality track (F1 / precision / recall / accuracy / log loss).
+# Scores the pk classifier against ground truth, so it is driven by
+# POST /iterate_classification/<dataset> rather than the drift endpoint.
+classification:
+  enabled: true
+  # Ground-truth column. pk_target is the label the task_1 model is trained on.
+  target: pk_target
+  # Predicted hard label, as returned by POST /predict_pk.
+  prediction: prediction
+  # P(class=1), derived by the service from the API's confidence value.
+  prediction_proba: prediction_proba
+  # Baseline scored dataset. Build it with build_classification_reference.py.
+  # If the file is missing the service still starts and exports current-window
+  # metrics only, with no reference series.
+  reference_path: ./classification_reference.csv
+  # Smaller than the drift window: these metrics need only enough rows for the
+  # positive class to appear. pk_target is ~12% positive, so 50 rows carries
+  # roughly 6 positives - thin, but enough for a trend.
+  window_size: 50
+
 service:
   calculation_period_sec: 10
   min_reference_size: 20000
