@@ -6,6 +6,7 @@ This module owns the public API surface used in the monitoring tutorial:
 - /metrics through prometheus-fastapi-instrumentator for service telemetry
 """
 
+import time
 import traceback
 
 import pandas as pd
@@ -15,6 +16,7 @@ from data_model_denormalization import NormalForm, NormalFormPrediction
 from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from fastapi import FastAPI, HTTPException
+from metrics import record_error, record_success
 from predict import predict
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -74,6 +76,7 @@ def index() -> dict:
 
 @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
 def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
+    started = time.perf_counter()
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -90,6 +93,8 @@ def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
         else:
             prediction_value = int(prediction)
 
+        record_success("pk_model", prediction_value, probability, time.perf_counter() - started)
+
         return PrimaryKeyPrediction(
             **data_dict,
             prediction=prediction_value,
@@ -99,6 +104,7 @@ def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
     except HTTPException:
         raise
     except Exception as error:
+        record_error("pk_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -109,6 +115,7 @@ def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
 
 @app.post("/predict_cpk", response_model=CompositePrimaryKeyPrediction)
 def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimaryKeyPrediction:
+    started = time.perf_counter()
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -125,6 +132,13 @@ def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimary
         else:
             prediction_value = int(prediction)
 
+        record_success(
+            "composite_pk_model",
+            prediction_value,
+            probability,
+            time.perf_counter() - started,
+        )
+
         return CompositePrimaryKeyPrediction(
             **data_dict,
             prediction=prediction_value,
@@ -134,6 +148,7 @@ def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimary
     except HTTPException:
         raise
     except Exception as error:
+        record_error("composite_pk_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -144,6 +159,7 @@ def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimary
 
 @app.post("/predict_fk", response_model=ForeignKeyPrediction)
 def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
+    started = time.perf_counter()
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -160,6 +176,8 @@ def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
         else:
             prediction_value = int(prediction)
 
+        record_success("fk_model", prediction_value, probability, time.perf_counter() - started)
+
         return ForeignKeyPrediction(
             **data_dict,
             prediction=prediction_value,
@@ -169,6 +187,7 @@ def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
     except HTTPException:
         raise
     except Exception as error:
+        record_error("fk_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -179,6 +198,7 @@ def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
 
 @app.post("/predict_cfk", response_model=CompositeForeignKeyPrediction)
 def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeignKeyPrediction:
+    started = time.perf_counter()
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -195,6 +215,13 @@ def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeign
         else:
             prediction_value = int(prediction)
 
+        record_success(
+            "composite_fk_model",
+            prediction_value,
+            probability,
+            time.perf_counter() - started,
+        )
+
         return CompositeForeignKeyPrediction(
             **data_dict,
             prediction=prediction_value,
@@ -204,6 +231,7 @@ def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeign
     except HTTPException:
         raise
     except Exception as error:
+        record_error("composite_fk_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -214,6 +242,7 @@ def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeign
 
 @app.post("/predict_normalform", response_model=NormalFormPrediction)
 def predict_normalform_key_candidate(data: NormalForm) -> NormalFormPrediction:
+    started = time.perf_counter()
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -230,6 +259,13 @@ def predict_normalform_key_candidate(data: NormalForm) -> NormalFormPrediction:
         else:
             prediction_value = int(prediction)
 
+        record_success(
+            "denormalization_model",
+            prediction_value,
+            probability,
+            time.perf_counter() - started,
+        )
+
         return NormalFormPrediction(
             **data_dict,
             prediction=prediction_value,
@@ -239,6 +275,7 @@ def predict_normalform_key_candidate(data: NormalForm) -> NormalFormPrediction:
     except HTTPException:
         raise
     except Exception as error:
+        record_error("denormalization_model", error)
         traceback.print_exc()
 
         raise HTTPException(

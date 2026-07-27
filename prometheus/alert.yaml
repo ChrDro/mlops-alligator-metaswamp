@@ -85,3 +85,53 @@ groups:
         annotations:
           summary: "Resident memory above 1.5GB"
           description: "The process resident memory has stayed above 1.5GB for 10 minutes."
+
+  # ---------------------------------------------------------------------------
+  # Model health: does the model behave sanely, not just is it up?
+  # Metrics come from webservice/metrics.py, exposed on /metrics:
+  #   - model_predictions_total{model, predicted_class}
+  #   - model_prediction_probability_{sum,count}{model}
+  #   - model_prediction_errors_total{model, error_type}
+  # ---------------------------------------------------------------------------
+  - name: model-health
+    rules:
+      - alert: ModelAlwaysPredictsOneClass
+        # Over 30m a model returned only a single distinct class while still
+        # serving a meaningful number of requests -- a classic sign the model
+        # (or its input) has degenerated.
+        expr: |
+          count by (model) (
+            count by (model, predicted_class) (
+              increase(model_predictions_total[30m]) > 0
+            )
+          ) == 1
+          and
+          sum by (model) (increase(model_predictions_total[30m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.model }} only ever predicts one class"
+          description: "{{ $labels.model }} returned a single class for all of its >50 predictions in the last 30 minutes."
+
+      - alert: PredictionConfidenceCollapsed
+        # Mean probability the model assigns to its chosen class has dropped
+        # below 0.6 -- the model is guessing rather than deciding.
+        expr: |
+          sum by (model) (rate(model_prediction_probability_sum[15m]))
+          / sum by (model) (rate(model_prediction_probability_count[15m])) < 0.6
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.model }} confidence collapsed below 0.6"
+          description: "Mean predicted-class probability for {{ $labels.model }} has stayed below 0.6 for 15 minutes."
+
+      - alert: PredictionErrorsSpiking
+        expr: sum by (model, error_type) (rate(model_prediction_errors_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.model }} prediction errors spiking ({{ $labels.error_type }})"
+          description: "{{ $labels.model }} is raising {{ $labels.error_type }} errors at more than 0.1/s over the last 5 minutes."
