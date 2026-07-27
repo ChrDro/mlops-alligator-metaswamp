@@ -264,7 +264,7 @@ def recover_stale_claims(stale_claim_minutes: int) -> int:
             recovered += release_stale_claims(conn, track, older_than_minutes=stale_claim_minutes)
 
     if recovered:
-        print(f"♻️  Recovered {recovered} stale claims from runs that never finished")
+        print(f"Recovered {recovered} stale claims from runs that never finished")
     return recovered
 
 
@@ -297,7 +297,7 @@ def change_detection_poller(
 
     recovered = recover_stale_claims(stale_claim_minutes)
 
-    print(f"\n🔍 Snapshotting {target_schemas} (source: {source})...")
+    print(f"Snapshotting {target_schemas} (source: {source})...")
     current = snapshot_source_tables(target_schemas)
     if current.empty:
         print("No readable tables - nothing to do.")
@@ -312,7 +312,7 @@ def change_detection_poller(
             print(f"  • {change_type}: {ref.database}.{ref.schema}.{ref.table_name}")
         recorded = record_changes(changes, source=source)
     else:
-        print(f"✅ {len(current)} tables scanned, nothing changed.")
+        print(f"{len(current)} tables scanned, nothing changed.")
 
     # Persist the new watermark only AFTER the work is durably recorded. If this flow
     # dies in between, the next run re-detects the same change and records it twice -
@@ -330,13 +330,13 @@ def change_detection_poller(
     if emit and open_work > 0:
         emit_changes_recorded(table_count=open_work, source=source)
         print(
-            f"\n📨 Emitted change signal for {open_work} waiting rows "
+            f"Emitted change signal for {open_work} waiting rows "
             f"({len(changes)} newly detected, {recovered} recovered claims).",
         )
     elif not emit:
-        print(f"\n(emit disabled - {open_work} rows left waiting in pending_changes)")
+        print(f"(emit disabled - {open_work} rows left waiting in pending_changes)")
     else:
-        print("\nNothing waiting - no signal sent.")
+        print("Nothing waiting - no signal sent.")
 
     return {
         "tables_scanned": len(current),
