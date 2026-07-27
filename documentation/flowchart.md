@@ -52,7 +52,7 @@ graph TD
 
     subgraph STREAM["Streaming-Trigger - Prefect"]
         DETECT["change-detection-poller"]
-        PKFK["feature-engineering-pipeline<br/>Track keys"]
+        PKFK["key-prediction-pipeline<br/>Track keys"]
         NF["normalform-prediction-pipeline<br/>Track nf"]
     end
 
@@ -119,7 +119,7 @@ graph TD
     R6 -->|"ja"| EV2(["Event<br/>alligator.changes.recorded"])
     R6 -->|"nein"| STOP
 
-    EV2 -->|"Automation"| P1["feature-engineering-pipeline"]
+    EV2 -->|"Automation"| P1["key-prediction-pipeline"]
     EV2 -->|"Automation"| P2["normalform-prediction-pipeline"]
 
     P1 --> Q1["nur geänderte Tabellen profilieren"]

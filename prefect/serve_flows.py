@@ -23,7 +23,7 @@ kept in sync automatically whenever this process starts - there is no separate
                                               alligator.changes.recorded
                                                               │
                                         ┌─────────────────────┴─────────────────────┐
-                              feature-engineering-pipeline        normalform-prediction-pipeline
+                              key-prediction-pipeline        normalform-prediction-pipeline
                                       (track: keys)                        (track: nf)
 
 Both prediction deployments listen to the *same* event, so they run in parallel and

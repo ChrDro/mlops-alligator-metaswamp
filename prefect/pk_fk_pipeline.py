@@ -982,7 +982,7 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
     return predictions_made
 
 
-@flow(name="feature-engineering-pipeline")
+@flow(name="key-prediction-pipeline")
 def feature_engineering_pipeline(
     target_schemas: list[str] | None = None,
     batch_size: int = 30,

@@ -289,7 +289,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - [~] **4.3** Prefect Orchestration Setup
   - [x] Prefect 3.7 installiert (`prefect`, `prefect-sqlalchemy`, `prefect-dbt[trino]`)
   - [x] Prefect Server als Service in [docker-compose.yaml](../docker-compose.yaml) (Port 4200)
-  - [x] Flow für Batch Prediction: `feature-engineering-pipeline` in [pk_fk_pipeline.py](../prefect/pk_fk_pipeline.py)
+  - [x] Flow für Batch Prediction: `key-prediction-pipeline` in [pk_fk_pipeline.py](../prefect/pk_fk_pipeline.py)
   - [x] Flow für Normalform-Prediction: `normalform-prediction-pipeline` in [normalform_pipeline.py](../prefect/normalform_pipeline.py) (TODO „predict normalform into prefect flow" erledigt)
   - [ ] Flow für Batch **Training** — die fünf `task_*_train_and_register.py` laufen weiterhin standalone
   - [~] ~~Flow für dbt Run orchestrieren~~ — entfällt, solange keine dbt-Models existieren
