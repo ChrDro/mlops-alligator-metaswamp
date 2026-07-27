@@ -717,7 +717,7 @@ def check_queue_status() -> dict:
             "processed": result[2],
         }
 
-        # print("\n📊 Queue Status:")
+        # print("Queue Status:")
         # print(f"   Total rows: {stats['total']}")
         # print(f"   Unprocessed: {stats['unprocessed']}")
         # print(f"   Processed: {stats['processed']}")
@@ -965,7 +965,7 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
             break
         previous_unprocessed = unprocessed
 
-        print(f"\n🤖 Predicting up to {prediction_batch_size} of {unprocessed} unprocessed rows...")
+        print(f"Predicting up to {prediction_batch_size} of {unprocessed} unprocessed rows...")
         start_time = time.time()
         rows = fetch_new_rows(prediction_batch_size)
         if rows.empty:
@@ -982,7 +982,7 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
     return predictions_made
 
 
-@flow(name="feature-engineering-pipeline")
+@flow(name="key-prediction-pipeline")
 def feature_engineering_pipeline(
     target_schemas: list[str] | None = None,
     batch_size: int = 30,
@@ -1012,7 +1012,7 @@ def feature_engineering_pipeline(
 
     if use_pending_changes:
         drain_queue = True
-        print("\n📋 Step 0: Claiming pending changes for the pk/fk track...")
+        print("Step 0: Claiming pending changes for the pk/fk track...")
         only_tables = claim_key_changes(run_id)
         if not only_tables:
             # Normal case for a duplicate/late event - the work was already taken.
@@ -1023,7 +1023,7 @@ def feature_engineering_pipeline(
     succeeded = False
     try:
         # Step 1: Extract features into duckdb.staging.stg_column_features
-        print("\n📊 Step 1: Extracting features from information_schema...")
+        print("Step 1: Extracting features from information_schema...")
         rows_written = extract_features(
             target_schemas=target_schemas,
             batch_size=batch_size,
@@ -1031,14 +1031,14 @@ def feature_engineering_pipeline(
         )
 
         if rows_written == 0:
-            print("\n⚠️  No features extracted - stopping pipeline.")
+            print("No features extracted - stopping pipeline.")
             # Nothing to predict, but the claim is genuinely handled: the flagged
             # tables are unreadable or gone, so retrying them would loop forever.
             succeeded = True
             return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0}
 
         # Step 2: Populate the prediction queue
-        print("\n📥 Step 2: Populating prediction queue...")
+        print("Step 2: Populating prediction queue...")
         rows_inserted = populate_prediction_queue(requeue_tables=only_tables)
 
         # Step 3: Predict unprocessed rows and store the results.
@@ -1056,7 +1056,7 @@ def feature_engineering_pipeline(
                     f"unpredicted (model calls failing). Releasing the changes so the "
                     f"next detection pass retries them."
                 )
-                print(f"\n❌ {msg}")
+                print(msg)
                 raise RuntimeError(msg)
 
         succeeded = True
