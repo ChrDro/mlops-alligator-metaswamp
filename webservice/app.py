@@ -41,7 +41,6 @@ def index() -> dict:
     return {"message": "PK, FK Candidate and Normalform Prediction"}
 
 
-
 @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
 def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
     try:

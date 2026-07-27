@@ -42,12 +42,12 @@ def _align_to_signature(
     for name in expected:
         if name not in provided:
             missing.append(name)
-            
+
     extra = []
     for name in model_input.columns:
         if name not in expected:
             extra.append(name)
-            
+
     if missing or extra:
         msg = (
             f"Feature mismatch for '{model_name}': "
