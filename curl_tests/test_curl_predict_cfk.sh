@@ -42,4 +42,3 @@ curl -X POST http://localhost:8080/predict_cfk \
        "column_type_integer": true,
        "column_type_varchar": false
      }'
-

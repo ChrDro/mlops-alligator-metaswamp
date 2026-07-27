@@ -75,7 +75,7 @@ services:
     env_file:
       - .env
     environment:
-      - PREFECT_API_URL=http://localhost:4200/api 
+      - PREFECT_API_URL=http://localhost:4200/api
       - MODEL_API_URL=http://model-service:8080
       # Persist server state in Postgres instead of SQLite in the container
       - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
@@ -192,7 +192,7 @@ services:
     networks:
       - ml-services-monitoring
 
-  # Second backup instance for Prefect's own database. 
+  # Second backup instance for Prefect's own database.
   # The image dumps exactly one database per container
   prefect_postgres_backup:
     image: eeshugerman/postgres-backup-s3:15
@@ -219,7 +219,7 @@ services:
       - POSTGRES_DATABASE=prefect
       - SCHEDULE=@hourly
       # Shorter than MLflow's 30 days as database holds operational
-      # telemetry (run history, logs, events), 
+      # telemetry (run history, logs, events),
       # not the system of record for models.
       - BACKUP_KEEP_DAYS=7
     networks:

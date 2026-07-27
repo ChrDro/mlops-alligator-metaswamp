@@ -54,25 +54,25 @@ select = [
     "E",     # pycodestyle errors (all, not just E4/E7/E9)
     "W",     # pycodestyle warnings
     "F",     # pyflakes (undefined names, unused imports, etc.)
-    
+
     # Import and naming
     "I",     # isort (import sorting)
     "N",     # pep8-naming (proper naming conventions)
-    
+
     # Code quality
     "B",     # flake8-bugbear (common bugs and anti-patterns)
     "Q",     # flake8-quotes (consistent quote usage)
     "C90",   # mccabe complexity (avoid overly complex functions)
     "UP",    # pyupgrade (modernize Python syntax)
-    
+
     # Type hints and documentation
     "ANN",   # flake8-annotations (enforce type hints)
-    
+
     # Security and best practices
     "S",     # flake8-bandit (security issues)
     "BLE",   # flake8-blind-except (avoid bare except)
     "A",     # flake8-builtins (avoid shadowing builtins)
-    
+
     # Code style
     "COM",   # flake8-commas (trailing commas)
     "C4",    # flake8-comprehensions (better list/dict comprehensions)
@@ -89,10 +89,10 @@ select = [
     "TCH",   # flake8-type-checking (optimize type checking imports)
     "ARG",   # flake8-unused-arguments (catch unused args)
     "PTH",   # flake8-use-pathlib (use pathlib instead of os.path)
-    
+
     # Framework-specific
     "PD",    # pandas-vet (pandas best practices)
-    
+
     # Comprehensive linting
     "PL",    # pylint (many additional checks)
     "TRY",   # tryceratops (better exception handling)
@@ -103,20 +103,20 @@ select = [
 ignore = [
     # Type annotation rules that can be too strict
     "ANN401",  # Dynamically typed expressions (Any) - sometimes needed
-    
+
     # Test-related
     "S101",    # Use of assert - OK in tests, handled by per-file-ignores
-    
+
     # Complexity rules (be pragmatic)
     "PLR0913", # Too many arguments to function - sometimes necessary
     "PLR2004", # Magic value used in comparison - OK with clear context
-    
+
     # Output rules (OK for scripts and debugging)
     "T201",    # print found - OK in scripts, handled by per-file-ignores
-    
+
     # Logging rules (f-strings in logging are fine in modern Python)
     "G004",    # Logging statement uses f-string
-    
+
     # Additional pragmatic ignores
     "PLR0912", # Too many branches - sometimes complex logic is needed
     "PLR0915", # Too many statements - OK for initialization code
@@ -126,6 +126,23 @@ ignore = [
     "PLW0603",
     "C901",
     "PLR0917",
+
+    # Rules the FORMATTER owns. Selecting these alongside `ruff-format` (the pre-commit
+    # ruff-format hook) makes the two fight: e.g. COM812 adds a trailing comma, then the
+    # formatter's magic-trailing-comma expands the collection onto new lines, which lint
+    # then re-touches. Ruff itself warns about these; let the formatter handle them.
+    "COM812",  # missing trailing comma      -> formatter adds/removes commas
+    "COM819",  # prohibited trailing comma
+    "ISC001",  # single-line implicit str concat -> formatter joins/splits strings
+    "ISC002",  # multi-line implicit str concat
+    "Q000",    # bad quotes                  -> formatter enforces quote-style
+    "Q001",
+    "Q002",
+    "Q003",
+    "W191",    # tab indentation             -> formatter controls indentation
+    "E111",    # indentation not multiple of four
+    "E114",
+    "E117",    # over-indented
 ]
 
 # Allow autofix for all enabled rules (when `--fix`) is provided.

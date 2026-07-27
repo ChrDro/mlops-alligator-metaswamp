@@ -3,7 +3,7 @@ dbt_trino_capstone_2:
   outputs:
     dev:
       type: trino
-      method: ldap 
+      method: ldap
       user: "{{ env_var('TRINO_USERNAME') }}"
       password: "{{ env_var('TRINO_PASSWORD') }}"
       host: "{{ env_var('TRINO_IP_ADDRESS') }}"
