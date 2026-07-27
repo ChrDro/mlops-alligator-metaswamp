@@ -51,5 +51,5 @@ curl -X POST http://localhost:8080/predict_normalform \
         "column_type_double": false,
         "column_type_integer": true,
         "column_type_timestamp": false,
-        "column_type_varchar": false     
+        "column_type_varchar": false
     }'

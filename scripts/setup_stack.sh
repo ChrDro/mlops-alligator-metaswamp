@@ -56,33 +56,33 @@ fi
 step()  { printf '\n%s==> %s%s\n' "$BOLD" "$1" "$RESET"; }
 ok()    { printf '    %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
 warn()  { printf '    %s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
-fail()  { printf '\n%sFEHLER:%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
+fail()  { printf '\n%sError:%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 
 # --- 1. preflight ------------------------------------------------------------
 
 step "1/6  Preflight"
 
-command -v docker >/dev/null 2>&1 || fail "docker nicht gefunden."
-docker info >/dev/null 2>&1 || fail "Docker-Daemon läuft nicht. Docker Desktop starten."
-ok "Docker läuft"
+command -v docker >/dev/null 2>&1 || fail "docker not found."
+docker info >/dev/null 2>&1 || fail "Docker daemon not running. Start Docker Desktop."
+ok "Docker found and running"
 
-[ -f .env ] || fail ".env fehlt. Aus .env.template erzeugen und ausfüllen."
+[ -f .env ] || fail ".env missong. Please create and fill .env from .env.template."
 
 # shellcheck disable=SC1091  # .env is user config, not tracked
 set -a; . ./.env; set +a
 
 for var in MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
-    [ -n "${!var:-}" ] || fail ".env: $var ist nicht gesetzt."
+    [ -n "${!var:-}" ] || fail ".env: $var not set."
 done
-ok ".env vollständig"
+ok ".env found and complete"
 
 if [ -x .venv/bin/python ]; then
     PYTHON="$REPO_ROOT/.venv/bin/python"
 elif command -v uv >/dev/null 2>&1; then
     PYTHON="uv run python"
-    warn "Kein .venv gefunden, nutze 'uv run python'"
+    warn "No .venv found, use 'uv run python' before executing python"
 else
-    fail "Weder .venv/bin/python noch uv gefunden. Erst 'uv sync' ausführen."
+    fail "Neother .venv/bin/python nor uv found. Execute 'uv sync' to create .venv."
 fi
 ok "Python: $PYTHON"
 
@@ -94,39 +94,39 @@ export MLFLOW_S3_ENDPOINT_URL="http://localhost:9000"
 export AWS_ACCESS_KEY_ID="$MINIO_ROOT_USER"
 export AWS_SECRET_ACCESS_KEY="$MINIO_ROOT_PASSWORD"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-eu-central-1}"
-ok "MLflow/S3 auf localhost umgebogen (Container nutzen weiter die .env-Namen)"
+ok "Switched MLflow/S3 to localhost (Container still use names in .env)"
 
 # --- helpers -----------------------------------------------------------------
 
 wait_for_http() {  # url, label, timeout_seconds
     local url=$1 label=$2 timeout=$3 waited=0
-    printf '    warte auf %s ' "$label"
+    printf '    waiting for %s ' "$label"
     until curl -sf -o /dev/null "$url" 2>/dev/null; do
         if [ "$waited" -ge "$timeout" ]; then
             printf '\n'
-            fail "$label nach ${timeout}s nicht erreichbar ($url). Logs: docker compose logs ${label%% *}"
+            fail "$label after ${timeout} seconds not accessible ($url). Logs: docker compose logs ${label%% *}"
         fi
         printf '.'
         sleep 3
         waited=$((waited + 3))
     done
     printf '\n'
-    ok "$label erreichbar (${waited}s)"
+    ok "$label accessible (${waited}s)"
 }
 
 wait_for_healthy() {  # service, timeout_seconds
     local svc=$1 timeout=$2 waited=0 cid status
-    printf '    warte auf %s ' "$svc"
+    printf '    waiting for %s ' "$svc"
     while true; do
         cid="$(docker compose ps -q "$svc" 2>/dev/null || true)"
         if [ -n "$cid" ]; then
             status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}' "$cid" 2>/dev/null || echo starting)"
             [ "$status" = "healthy" ] && { printf '\n'; ok "$svc healthy (${waited}s)"; return 0; }
-            [ "$status" = "nohealth" ] && { printf '\n'; ok "$svc läuft (kein Healthcheck)"; return 0; }
+            [ "$status" = "nohealth" ] && { printf '\n'; ok "$svc running (no healthcheck)"; return 0; }
         fi
         if [ "$waited" -ge "$timeout" ]; then
             printf '\n'
-            fail "$svc nach ${timeout}s nicht healthy. Logs: docker compose logs $svc"
+            fail "$svc after ${timeout} seconds not healthy. Logs: docker compose logs $svc"
         fi
         printf '.'
         sleep 3
@@ -150,12 +150,12 @@ PY
 
 # --- 2. compose --------------------------------------------------------------
 
-step "2/6  Container bauen und starten"
+step "2/6  Build and start container"
 
 # --build matters: webservice/ is baked into the image, not mounted. Without it a
 # code change silently keeps serving the old routes.
 docker compose up -d --build
-ok "docker compose up abgesetzt"
+ok "docker compose up executed"
 
 wait_for_healthy postgres 120
 wait_for_healthy minio 120
@@ -176,10 +176,10 @@ TRAIN_SCRIPTS=(
     "denormalization_model:task_3/task_3_denormalization_train_and_register.py"
 )
 
-step "3/6  Modelle trainieren und registrieren"
+step "3/6  Train and register models"
 
 if [ "$SKIP_TRAIN" = true ]; then
-    warn "--skip-train gesetzt, Training übersprungen"
+    warn "--skip-train was set, skipped training"
 else
     EXISTING="$(registered_models)"
     for entry in "${TRAIN_SCRIPTS[@]}"; do
@@ -187,11 +187,11 @@ else
         script="${entry#*:}"
 
         if [ "$RETRAIN" = false ] && printf '%s\n' "$EXISTING" | grep -qx "$model_name"; then
-            ok "$model_name bereits registriert, übersprungen (--retrain erzwingt neu)"
+            ok "$model_name already registered, skipped (--retrain erzwingt neu)"
             continue
         fi
 
-        printf '    trainiere %s ... ' "$model_name"
+        printf '    training %s ... ' "$model_name"
         log="$(mktemp)"
         if $PYTHON "$script" >"$log" 2>&1; then
             printf '%s✓%s\n' "$GREEN" "$RESET"
@@ -199,14 +199,14 @@ else
         else
             printf '%s✗%s\n' "$RED" "$RESET"
             tail -25 "$log" >&2
-            fail "Training von $model_name fehlgeschlagen (vollständiges Log: $log)"
+            fail "Training of $model_name failed (full log: $log)"
         fi
     done
 fi
 
 # --- 4. verify ---------------------------------------------------------------
 
-step "4/6  Registry und Schema-Verträge prüfen"
+step "4/6  Check Registry und Pydantic schema contract prüfen"
 
 MISSING=""
 FOUND="$(registered_models)"
@@ -218,21 +218,21 @@ for entry in "${TRAIN_SCRIPTS[@]}"; do
         MISSING="$MISSING $model_name"
     fi
 done
-[ -z "$MISSING" ] || fail "Nicht registriert:$MISSING — ohne diese Modelle liefert jeder Predict 400."
+[ -z "$MISSING" ] || fail "Not registered:$MISSING — without models each predict returns code 400."
 
 # Catches the drift that once let three of four models return NULL in production:
 # the Pydantic request schema and the logged model signature must agree on the
 # feature set AND their order.
 if $PYTHON -m pytest test/test_models -q >/dev/null 2>&1; then
-    ok "Schema-Contract-Tests bestanden"
+    ok "Passed pydantic schema contract test"
 else
     $PYTHON -m pytest test/test_models -q 2>&1 | tail -20 >&2
-    fail "Schema-Drift zwischen Pydantic-Modellen und Registry. Details oben."
+    fail "Schema drift between Pydantic models und model registry. More details above."
 fi
 
 # --- 5. smoke test -----------------------------------------------------------
 
-step "5/6  Smoke-Test: Real Predict with API"
+step "5/6  Smoke test: Real Predict with API"
 
 for script in curl_tests/test_curl_predict_*.sh; do
     endpoint="$(basename "$script" .sh | sed 's/^test_curl_//')"
@@ -283,7 +283,7 @@ $BOLD$GREEN Stack is ready.$RESET
   Prefect       http://localhost:4200
   Grafana       http://localhost:3000   (currently without Dashboards)
   Prometheus    http://localhost:9090
-  Alertmanager  http://localhost:9093   (Null-Receiver, sends nothing)
+  Alertmanager  http://localhost:9093   (Null Receiver, sends nothing)
   MinIO         http://localhost:9001
 
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
