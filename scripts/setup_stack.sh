@@ -76,8 +76,12 @@ for var in MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD P
 done
 ok ".env found and complete"
 
+# A venv created on Windows puts the interpreter in Scripts/, not bin/, so check
+# both before falling back to uv.
 if [ -x .venv/bin/python ]; then
     PYTHON="$REPO_ROOT/.venv/bin/python"
+elif [ -x .venv/Scripts/python.exe ]; then
+    PYTHON="$REPO_ROOT/.venv/Scripts/python.exe"
 elif command -v uv >/dev/null 2>&1; then
     PYTHON="uv run python"
     warn "No .venv found, use 'uv run python' before executing python"
@@ -95,6 +99,12 @@ export AWS_ACCESS_KEY_ID="$MINIO_ROOT_USER"
 export AWS_SECRET_ACCESS_KEY="$MINIO_ROOT_PASSWORD"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-eu-central-1}"
 ok "Switched MLflow/S3 to localhost (Container still use names in .env)"
+
+# The training output below is redirected to a log file, so on Windows Python
+# picks the ANSI codepage (cp1252) for stdout instead of the console's UTF-8.
+# MLflow prints "<runner emoji> View run ... at: ..." after every run, which then
+# dies with UnicodeEncodeError. UTF-8 mode makes the redirect encoding-safe.
+export PYTHONUTF8=1
 
 # --- helpers -----------------------------------------------------------------
 

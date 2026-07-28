@@ -18,7 +18,10 @@ services:
       #  POST /events/new-data needs the REST endpoint set
       - PREFECT_API_URL=http://prefect:4200/api
     volumes:
-      - ./mlruns:${PWD}/mlruns
+      # Fixed container path on purpose: ${PWD} here made the target depend on the
+      # host shell, and Git Bash rewrites it to C:/... which compose then reads as
+      # extra colons in the volume spec.
+      - ./mlruns:/app/mlruns
     networks:
       - ml-services-monitoring
 

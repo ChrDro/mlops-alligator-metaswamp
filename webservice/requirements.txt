@@ -10,3 +10,7 @@ python-dotenv==1.2.2
 requests==2.34.2
 scikit-learn==1.9.0
 uvicorn==0.51.0
+# All five training scripts log XGBoost candidates under the mlflow.sklearn
+# flavor, so unpickling a model whose best candidate was XGBoost needs the
+# library importable here. Pinned to the version used for training.
+xgboost==3.2.0
