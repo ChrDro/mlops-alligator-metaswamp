@@ -48,10 +48,20 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    environment:
+      - GF_USERS_DEFAULT_THEME=light
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/etc/grafana/dashboards
       - grafana-data:/var/lib/grafana
+      - ./grafana/img/grafana_icon.svg:/usr/share/grafana/public/img/grafana_icon.svg:ro
+      - ./grafana/img/grafana_icon.svg:/usr/share/grafana/public/build/img/grafana_icon.svg:ro
+      - ./grafana/img/grafana_icon.svg:/usr/share/grafana/public/build/static/img/grafana_icon.1e0deb6b.svg:ro
+      - ./grafana/img/fav32.png:/usr/share/grafana/public/img/fav32.png:ro
+      - ./grafana/img/apple-touch-icon.png:/usr/share/grafana/public/img/apple-touch-icon.png:ro
+      - ./grafana/img/mstile-150x150.png:/usr/share/grafana/public/img/mstile-150x150.png:ro
     depends_on:
       - prometheus
     networks:
