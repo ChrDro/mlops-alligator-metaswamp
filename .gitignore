@@ -220,3 +220,11 @@ __marimo__/
 # mlflow
 mlflow.db
 mlruns/
+
+# dbt
+dbt/logs/
+
+# evidently
+# Both directories can be ignored as they are produced again later durin run
+evidently_service/references/
+data/holdouts/
