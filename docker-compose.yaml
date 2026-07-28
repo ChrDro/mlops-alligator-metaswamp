@@ -94,6 +94,9 @@ services:
       - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
     volumes:
       - ./prefect:/opt/flows
+      # Read-only: model_quality_backtest.py replays the labelled holdout rows in
+      # data/pk_holdout.csv. Nothing in prefect/ writes to this directory.
+      - ./data:/opt/data:ro
     working_dir: /opt/flows
     command:
       - /bin/sh

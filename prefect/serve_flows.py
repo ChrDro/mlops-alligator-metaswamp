@@ -28,12 +28,19 @@ kept in sync automatically whenever this process starts - there is no separate
 
 Both prediction deployments listen to the *same* event, so they run in parallel and
 neither can starve the other.
+
+A fourth deployment, model-quality-backtest, is unrelated to this event chain.
+It runs purely on a cron schedule and exists because F1/precision/recall need
+ground-truth labels, which no live prediction carries - see
+model_quality_backtest.py for why that track cannot be event-driven. It covers all
+four key models in one run.
 """
 
 from datetime import timedelta
 
 from change_detector import change_detection_poller
 from change_events import CHANGES_RECORDED_EVENT, EVENT_RESOURCE_ID, NEW_DATA_EVENT
+from model_quality_backtest import model_quality_backtest
 from normalform_pipeline import normalform_prediction_pipeline
 from pk_fk_pipeline import feature_engineering_pipeline
 from prefect.client.schemas.objects import ConcurrencyLimitConfig, ConcurrencyLimitStrategy
@@ -47,6 +54,11 @@ TARGET_SCHEMAS = ["new_predict_data"]
 # Safety net for everything the push path misses. Every 15 minutes is cheap: the
 # detector only counts rows, it does not profile columns.
 DETECTION_CRON = "*/15 * * * *"
+
+# Hourly is plenty for the model-quality backtest. It replays a fixed labelled
+# sample, so its result only moves when the served model version changes - running
+# it more often would just re-measure the same thing.
+BACKTEST_CRON = "17 * * * *"
 
 # Only match our own events, so an unrelated event can never start a pipeline.
 RESOURCE_MATCH = {"prefect.resource.id": EVENT_RESOURCE_ID}
@@ -121,10 +133,26 @@ normalform_deployment = normalform_prediction_pipeline.to_deployment(
 )
 
 
+backtest_deployment = model_quality_backtest.to_deployment(
+    name="scheduled",
+    cron=BACKTEST_CRON,
+    parameters={"sample_size": 200},
+    # CANCEL_NEW: overlapping runs would interleave their rows in the Evidently
+    # service's single in-memory window, mixing two samples into one score.
+    concurrency_limit=ConcurrencyLimitConfig(
+        limit=1,
+        collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW,
+    ),
+    tags=["monitoring", "model-quality"],
+    description="Replay labelled holdout rows through the live key models and score F1.",
+)
+
+
 if __name__ == "__main__":
     serve(
         detector_deployment,
         keys_deployment,
         normalform_deployment,
-        limit=3,
+        backtest_deployment,
+        limit=4,
     )
