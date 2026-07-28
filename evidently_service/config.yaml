@@ -1,41 +1,112 @@
-column_mapping:
-  categorical_features:
-  - PULocationID
-  - DOLocationID
-  numerical_features:
-  - trip_distance
-  - passenger_count
-  - fare_amount
-  - total_amount
-  target: duration
-  prediction: prediction
+# Monitoring configuration, one entry per served model.
+#
+# Each track gets its own DataDefinition, reference dataset, report and rolling
+# window. The track name is both the path segment on /iterate/<track> and the
+# dataset_name label on every exported Prometheus gauge, which is what lets one
+# Grafana dashboard switch between models with a variable.
+#
+# Feature columns are deliberately NOT listed here. They are inferred from the
+# reference CSV, which build_monitoring_references.py generates from the Pydantic
+# request models in webservice/. Listing ~35 columns per track would duplicate that
+# contract four times and rot the moment a request model changes.
+#
+# Inference rule: bool columns and numeric columns with at most two distinct values
+# are categorical (binary flags, one-hot dummies); everything else is numerical
+# (counts, ratios, ranks). The service logs the split it inferred at startup.
+# force_categorical overrides it for a column the rule gets wrong.
 
-# Classification-quality track (F1 / precision / recall / accuracy / log loss).
-# Scores the pk classifier against ground truth, so it is driven by
-# POST /iterate_classification/<dataset> rather than the drift endpoint.
-classification:
-  enabled: true
-  # Ground-truth column. pk_target is the label the task_1 model is trained on.
-  target: pk_target
-  # Predicted hard label, as returned by POST /predict_pk.
+defaults: &defaults
   prediction: prediction
-  # P(class=1), derived by the service from the API's confidence value.
-  prediction_proba: prediction_proba
-  # Baseline scored dataset. Build it with build_classification_reference.py.
-  # If the file is missing the service still starts and exports current-window
-  # metrics only, with no reference series.
-  reference_path: ./classification_reference.csv
-  # Smaller than the drift window: these metrics need only enough rows for the
-  # positive class to appear. pk_target is ~12% positive, so 50 rows carries
-  # roughly 6 positives - thin, but enough for a trend.
-  window_size: 50
-
-service:
-  calculation_period_sec: 10
-  min_reference_size: 20000
-  moving_reference: false
-  reference_path: ./green_taxi_data/reference.csv
-  use_reference: true
+  # These models return a 0/1 label, so the prediction column is categorical.
+  # Declaring it numerical would run a continuous drift test on two values.
+  prediction_type: categorical
   window_size: 60
-  monitors:
-  - data_drift
+  # The window is a rolling tail, so without this every request past the first 60
+  # would run a full report over every column - one per prediction, since the
+  # predict endpoints forward all of them. Report once per this many new rows.
+  report_every: 30
+  classification:
+    enabled: true
+    prediction_proba: prediction_proba
+    # Smaller than the drift window: these metrics only need enough rows for the
+    # positive class to appear.
+    window_size: 50
+    report_every: 25
+
+models:
+  pk_columns:
+    <<: *defaults
+    target: pk_target
+    reference_path: ./references/pk_columns.csv
+    # Columns given their own ValueDrift series, on top of the DriftedColumnsCount
+    # summary over every column. prediction is the model's output distribution;
+    # unique_ratio is the strongest single signal for primary-key detection.
+    drift_columns:
+    - prediction
+    - unique_ratio
+
+  cpk_columns:
+    <<: *defaults
+    target: composite_pk_target
+    reference_path: ./references/cpk_columns.csv
+    drift_columns:
+    - prediction
+    - unique_ratio
+    - table_has_no_single_pk_candidate
+
+  fk_columns:
+    <<: *defaults
+    target: fk_target
+    reference_path: ./references/fk_columns.csv
+    drift_columns:
+    - prediction
+    - unique_ratio
+    - name_ends_with_id
+
+  # The normalform model is multiclass (normal forms 0-3), unlike the four key
+  # models above. Two consequences:
+  #   - the classification track uses MulticlassClassification, and its
+  #     F1/precision/recall are MACRO-averaged (every normal form weighted equally)
+  #   - log loss is not available: /predict_normalform returns max(predict_proba),
+  #     which for 4 classes cannot be expanded back into a full distribution. The
+  #     metric is omitted rather than reported wrong - Evidently raises outright if
+  #     asked for it without probabilities.
+  # It also draws on a different labelled dataset (data/nf_test_analyse.csv) with a
+  # different column_type vocabulary; see build_monitoring_references.py.
+  nf_columns:
+    target: target_normal_form
+    reference_path: ./references/nf_columns.csv
+    prediction: prediction
+    prediction_type: categorical
+    window_size: 60
+    report_every: 30
+    classification:
+      enabled: true
+      multiclass: true
+      # All four classes are roughly balanced in the labelled data (3060-4337 rows
+      # each), so a 100-row window reliably contains every class - macro averaging
+      # needs that to be meaningful.
+      window_size: 100
+      report_every: 50
+    drift_columns:
+    - prediction
+    # The strongest normalisation signals: repeated values within a column and
+    # duplicated groups across the table.
+    - unique_ratio
+    - table_row_count
+
+  cfk_columns:
+    <<: *defaults
+    target: composite_fk_target
+    reference_path: ./references/cfk_columns.csv
+    # composite_fk_target is only ~2% positive, so a 50-row classification window
+    # often holds a single class. The service skips those rather than exporting a
+    # misleading zero, so this track needs a wider window to score at all.
+    classification:
+      enabled: true
+      prediction_proba: prediction_proba
+      window_size: 150
+      report_every: 50
+    drift_columns:
+    - prediction
+    - unique_ratio

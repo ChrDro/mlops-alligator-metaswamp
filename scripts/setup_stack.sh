@@ -8,15 +8,17 @@
 #   3. Train      - the 5 models, unless they are already registered
 #   4. Verify     - registry aliases + the model/schema contract tests
 #   5. Smoke test - one real prediction through the API
-#   6. Streaming  - optional: reset watermarks and fire the push trigger
+#   6. Monitoring - build one Evidently baseline per key model (pk/cpk/fk/cfk)
+#   7. Streaming  - optional: reset watermarks and fire the push trigger
 #
-# The script is idempotent: run it again and it skips the training it does not
-# need. Use --retrain to force it.
+# The script is idempotent: run it again and it skips the training and the
+# baseline build it does not need. Use --retrain to force both.
 #
-#   ./scripts/setup_stack.sh                  # full setup, skips existing models
-#   ./scripts/setup_stack.sh --retrain        # retrain all 5 models
-#   ./scripts/setup_stack.sh --skip-train     # only start + verify + smoke test
-#   ./scripts/setup_stack.sh --with-streaming # also trigger a streaming run (needs Trino)
+#   ./scripts/setup_stack.sh                     # full setup, skips existing models
+#   ./scripts/setup_stack.sh --retrain           # retrain all 5 models + rebuild baseline
+#   ./scripts/setup_stack.sh --skip-train        # only start + verify + smoke test
+#   ./scripts/setup_stack.sh --rebuild-reference # force just the monitoring baseline
+#   ./scripts/setup_stack.sh --with-streaming    # also trigger a streaming run (needs Trino)
 #
 set -euo pipefail
 
@@ -28,12 +30,14 @@ cd "$REPO_ROOT"
 RETRAIN=false
 SKIP_TRAIN=false
 WITH_STREAMING=false
+REBUILD_REFERENCE=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --retrain)        RETRAIN=true ;;
-        --skip-train)     SKIP_TRAIN=true ;;
-        --with-streaming) WITH_STREAMING=true ;;
+        --retrain)            RETRAIN=true ;;
+        --skip-train)         SKIP_TRAIN=true ;;
+        --with-streaming)     WITH_STREAMING=true ;;
+        --rebuild-reference)  REBUILD_REFERENCE=true ;;
         # Print the header comment block, stopping at the first line of real code,
         # so --help cannot drift out of sync with a hard-coded line range.
         -h|--help)
@@ -60,7 +64,7 @@ fail()  { printf '\n%sError:%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 
 # --- 1. preflight ------------------------------------------------------------
 
-step "1/6  Preflight"
+step "1/7  Preflight"
 
 command -v docker >/dev/null 2>&1 || fail "docker not found."
 docker info >/dev/null 2>&1 || fail "Docker daemon not running. Start Docker Desktop."
@@ -150,7 +154,7 @@ PY
 
 # --- 2. compose --------------------------------------------------------------
 
-step "2/6  Build and start container"
+step "2/7  Build and start container"
 
 # --build matters: webservice/ is baked into the image, not mounted. Without it a
 # code change silently keeps serving the old routes.
@@ -176,7 +180,7 @@ TRAIN_SCRIPTS=(
     "denormalization_model:task_3/task_3_denormalization_train_and_register.py"
 )
 
-step "3/6  Train and register models"
+step "3/7  Train and register models"
 
 if [ "$SKIP_TRAIN" = true ]; then
     warn "--skip-train was set, skipped training"
@@ -206,7 +210,7 @@ fi
 
 # --- 4. verify ---------------------------------------------------------------
 
-step "4/6  Check Registry und Pydantic schema contract prüfen"
+step "4/7  Check Registry und Pydantic schema contract prüfen"
 
 MISSING=""
 FOUND="$(registered_models)"
@@ -232,7 +236,7 @@ fi
 
 # --- 5. smoke test -----------------------------------------------------------
 
-step "5/6  Smoke test: Real Predict with API"
+step "5/7  Smoke test: Real Predict with API"
 
 for script in curl_tests/test_curl_predict_*.sh; do
     endpoint="$(basename "$script" .sh | sed 's/^test_curl_//')"
@@ -246,9 +250,83 @@ for script in curl_tests/test_curl_predict_*.sh; do
     fi
 done
 
-# --- 6. streaming (optional) -------------------------------------------------
+# --- 6. monitoring baseline --------------------------------------------------
+#
+# Ordering here is not free to change. The baseline is a join of two things that
+# only both exist at this point in the script:
+#   - ground truth, from data/summary_output_task_1_2_training.csv
+#   - predictions, from a registered pk_model served over HTTP (steps 3 and 5)
+# And because evidently_service bakes its files in with `COPY . /app` rather than
+# mounting them, writing the CSV is not enough - the image has to be rebuilt after.
+# That is why this cannot move up next to the other builds in step 2.
 
-step "6/6  Streaming-Trigger"
+step "6/7  Evidently monitoring baselines"
+
+REFERENCE_DIR="evidently_service/references"
+HOLDOUT_DIR="data/holdouts"
+# One reference + one holdout per monitored model.
+MONITORED_TRACKS="pk_columns cpk_columns fk_columns cfk_columns"
+
+# A retrain invalidates the baseline: it describes how one specific model version
+# scored, so comparing a new model against it would measure the version change
+# rather than anything about the data.
+if [ "$RETRAIN" = true ]; then
+    REBUILD_REFERENCE=true
+    warn "Models were retrained - baseline must be rebuilt to match"
+fi
+
+for track in $MONITORED_TRACKS; do
+    if [ ! -f "$REFERENCE_DIR/$track.csv" ] || [ ! -f "$HOLDOUT_DIR/$track.csv" ]; then
+        REBUILD_REFERENCE=true
+        break
+    fi
+done
+
+if [ "$REBUILD_REFERENCE" = false ]; then
+    ok "Baselines exist for all 4 tracks, skipped (--rebuild-reference forces it)"
+else
+    printf '    scoring labelled rows through all 4 predict endpoints (~2min) ... '
+    log="$(mktemp)"
+    if $PYTHON evidently_service/build_monitoring_references.py \
+        --model-url "http://localhost:8080" >"$log" 2>&1; then
+        printf '%s✓%s\n' "$GREEN" "$RESET"
+        # Surface the per-track accuracy lines: a baseline built against a broken
+        # model would otherwise look like a success and quietly poison every
+        # comparison downstream.
+        sed -n 's/.*\(\(pk\|cpk\|fk\|cfk\)_columns  *ref=.*\)/      \1/p' "$log" || true
+        rm -f "$log"
+    else
+        printf '%s✗%s\n' "$RED" "$RESET"
+        tail -20 "$log" >&2
+        fail "Could not build the monitoring baseline (full log: $log)"
+    fi
+
+    # COPY . /app means the CSVs only reach the container through a rebuild.
+    printf '    rebuilding evidently_service to bake in the baseline ... '
+    if docker compose up -d --build evidently_service >/dev/null 2>&1; then
+        printf '%s✓%s\n' "$GREEN" "$RESET"
+    else
+        printf '%s✗%s\n' "$RED" "$RESET"
+        fail "evidently_service rebuild failed. Logs: docker compose logs evidently_service"
+    fi
+fi
+
+wait_for_http "http://localhost:8085/metrics" "evidently_service" 120
+
+# The reference gauges are exported at startup, so their absence means the service
+# came up without a usable baseline - the dashboards would then show a current
+# series with nothing to compare it against.
+ACTIVE_TRACKS="$(curl -s "http://localhost:8085/metrics" \
+    | sed -n 's/^evidently_reference_dataset_hash{dataset_name="\([^"]*\)".*/\1/p' | sort -u | tr '\n' ' ')"
+if [ -n "$ACTIVE_TRACKS" ]; then
+    ok "Active monitoring tracks: $ACTIVE_TRACKS"
+else
+    warn "No active tracks - check: docker compose logs evidently_service"
+fi
+
+# --- 7. streaming (optional) -------------------------------------------------
+
+step "7/7  Streaming-Trigger"
 
 if [ "$WITH_STREAMING" = false ]; then
     warn "skipped — set argument --with-streaming (needs accessible Trino instance)"
@@ -281,13 +359,29 @@ $BOLD$GREEN Stack is ready.$RESET
   MLflow        http://localhost:5000
   Model API     http://localhost:8080/docs
   Prefect       http://localhost:4200
-  Grafana       http://localhost:3000   (currently without Dashboards)
+  Grafana       http://localhost:3000   (admin/admin)
   Prometheus    http://localhost:9090
   Alertmanager  http://localhost:9093   (Null Receiver, sends nothing)
   MinIO         http://localhost:9001
+  Evidently     http://localhost:8085/report
+
+  Dashboards:
+    Model Service - Golden Signals    /d/model-service-golden-signals
+    Data Drift Monitoring             /d/evidently-data-drift
+    ML Model Performance Monitoring   /d/evidently-model-quality
 
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
   Trigger Streaming:    bash curl_tests/test_curl_notify_new_data.sh
   Results:              duckdb.prediction_results.key_results / nf_results
+
+  Monitoring notes:
+    Drift fills automatically from the 4 predict endpoints, one track per
+    model. Each needs service.window_size predictions before its first
+    report appears. Switch model with the Model dropdown on the dashboard.
+    F1/precision/recall need ground-truth labels, which live predictions do
+    not carry, so they come from the hourly model-quality-backtest
+    deployment. Run it now with:
+      docker compose exec -T -w /opt/flows prefect python model_quality_backtest.py
+    What is actually being monitored:  curl localhost:8085/tracks
 
 EOF
