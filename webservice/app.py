@@ -6,7 +6,6 @@ This module owns the public API surface used in the monitoring tutorial:
 - /metrics through prometheus-fastapi-instrumentator for service telemetry
 """
 
-import time
 import traceback
 
 import pandas as pd
@@ -18,6 +17,7 @@ from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from event_publisher import EventPublishError, publish_new_data_event
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from metrics import record_error
 from monitoring_client import forward_to_monitoring
 from predict import predict
 from prometheus_fastapi_instrumentator import Instrumentator
