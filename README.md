@@ -404,21 +404,24 @@ gate** that refuses to register a model whose test F1 falls below the current ba
 | Experiment tracking & registry | MLflow | ✅ params, metrics, signature, feature list; alias-based deploy |
 | Model service | FastAPI + Docker | ✅ 5 typed endpoints, `/health`, `/metrics` |
 | CI | GitHub Actions | ✅ Ruff lint/format + pytest with coverage |
-| Service monitoring | Prometheus + Grafana | ✅ golden signals, 11 alert rules, provisioned dashboard |
+| Service monitoring | Prometheus + Grafana | ✅ golden signals, 10 alert rules, 5 provisioned dashboards |
 | Model monitoring | Evidently | ✅ input drift against a real reference set |
 | Data pipeline | Prefect + dbt | 🔜 planned |
-| Retraining | manual trigger | 🔜 planned (`reload_models()` hook in place) |
+| Retraining | manual trigger | 🔜 planned — no trigger in code yet; models are cached per name via `@lru_cache`, so a reload hook would start at `load_model.cache_clear()` |
 
 ### Monitoring detail
 
 - `webservice/metrics.py` adds model-level metrics on top of the HTTP golden signals:
   predictions by class, inference duration, errors by type, returned confidence.
-- `prometheus/alert.yaml` covers latency, traffic, errors, saturation, plus model-health
-  rules (a model stuck on one class, confidence collapse, prediction errors spiking).
-- `grafana/dashboards/golden-signals.json` is auto-provisioned — a fresh `docker compose
-  up` shows the board with no manual setup.
-- `evidently_service/build_reference.py` regenerates the drift reference set from the
-  training data. **Re-run it whenever the feature set changes.**
+- `prometheus/alert.yaml` holds 10 rules in three groups: `service-health` (instance down,
+  model service unreachable), `golden-signals` (5xx/4xx rate, p95 latency, no traffic,
+  memory) and `model-health` (a model stuck on one class, confidence collapse, prediction
+  errors spiking).
+- `grafana/dashboards/` holds five auto-provisioned boards — `model_service_golden_signals`
+  plus a drift and a quality board each for the key and the normal-form models. A fresh
+  `docker compose up` shows all of them with no manual setup.
+- `evidently_service/build_monitoring_references.py` regenerates the drift reference sets
+  from the training data. **Re-run it whenever the feature set changes.**
 
 ---
 
