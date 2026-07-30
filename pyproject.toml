@@ -17,6 +17,7 @@ dependencies = [
     "mlflow>=3.5.0",
     "fastapi>=0.139.1",
     "uvicorn>=0.51.0",
+    "prometheus-fastapi-instrumentator>=8.1.0",
     "lightgbm>=4.7.0",
     "dbt-core>=1.7.9,<1.8.0",
     "dbt-trino>=1.5.1",
@@ -26,4 +27,45 @@ dependencies = [
     "boto3>=1.43.55",
     "xgboost>=3.2.0",
     "pre-commit>=4.6.1",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.15.0",
+    "httpx2>=2.9.1",
+]
+
+[project.optional-dependencies]
+dev = []
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
+markers = [
+    "integration: needs the docker compose stack (MLflow/Trino/Evidently) running",
+]
+
+[tool.coverage.run]
+
+source = [
+    "webservice",
+    "prefect",
+]
+omit = [
+    "*/__pycache__/*",
+    "*/.venv/*",
+    # Excluded deliberately: these need a live Trino/MLflow stack to execute, so
+    # counting their ~2.5k statements would only depress the number without saying
+    # anything about test quality. Their pure helpers are tested via the two modules
+    # that stay in scope.
+    "prefect/pk_fk_pipeline.py",
+    "prefect/normalform_pipeline.py",
+    "prefect/model_quality_backtest.py",
+    "prefect/serve_flows.py",
+    "prefect/ensure_database.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
 ]

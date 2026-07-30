@@ -223,8 +223,10 @@ mlruns/
 
 # dbt
 dbt/logs/
+dbt/target/
 
 # evidently
 # Both directories can be ignored as they are produced again later durin run
+
 evidently_service/references/
 data/holdouts/

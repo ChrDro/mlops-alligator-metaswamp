@@ -268,7 +268,7 @@ def recover_stale_claims(stale_claim_minutes: int) -> int:
     return recovered
 
 
-@flow(name="change-detection-poller")
+@flow(name="change-detection-check")
 def change_detection_poller(
     target_schemas: list[str] | None = None,
     source: str = "poller",

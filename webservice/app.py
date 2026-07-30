@@ -239,7 +239,7 @@ def notify_new_data(notification: NewDataNotification) -> NewDataAccepted:
     return NewDataAccepted(
         status="accepted",
         schema_name=notification.schema_name,
-        detail="Change detection triggered.",
+        detail="Predict Pipeline triggered..",
     )
 
 

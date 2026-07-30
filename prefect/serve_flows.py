@@ -16,7 +16,7 @@ kept in sync automatically whenever this process starts - there is no separate
 "create the automations" step that can be forgotten::
 
     POST /events/new-data ─┐
-                           ├─→ alligator.new-data.arrived ─→ change-detection-poller
+                           ├─→ alligator.new-data.arrived ─→ change-detection-check
     cron (safety net) ─────┘                                          │
                                             diff watermarks → pending_changes
                                                               │

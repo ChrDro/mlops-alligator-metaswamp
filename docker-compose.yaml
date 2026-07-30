@@ -95,7 +95,8 @@ services:
     volumes:
       - ./prefect:/opt/flows
       # Read-only: model_quality_backtest.py replays the labelled holdout rows in
-      # data/pk_holdout.csv. Nothing in prefect/ writes to this directory.
+      # data/holdouts/ (one CSV per monitored model). Nothing in prefect/ writes
+      # to this directory.
       - ./data:/opt/data:ro
     working_dir: /opt/flows
     command:

@@ -51,7 +51,7 @@ graph TD
     MINIO --- LOAD
 
     subgraph STREAM["Streaming-Trigger - Prefect"]
-        DETECT["change-detection-poller"]
+        DETECT["change-detection-check"]
         PKFK["key-prediction-pipeline<br/>Track keys"]
         NF["normalform-prediction-pipeline<br/>Track nf"]
     end
@@ -107,7 +107,7 @@ graph TD
     WH --> EV1(["Event<br/>alligator.new-data.arrived"])
     CRON["Cron alle 15 Minuten<br/>Sicherheitsnetz"] --> DET
 
-    EV1 -->|"Automation"| DET["change-detection-poller"]
+    EV1 -->|"Automation"| DET["change-detection-check"]
 
     DET --> R1["1 - verwaiste Claims freigeben<br/>älter als 120 Minuten"]
     R1 --> R2["2 - Snapshot: row_count<br/>und column_count je Tabelle"]
