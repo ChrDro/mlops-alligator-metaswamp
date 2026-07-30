@@ -83,11 +83,11 @@ through the registry: promoting a model is moving an alias, not rebuilding a con
 The project uses [`uv`](https://docs.astral.sh/uv/) and Python 3.11.
 
 ```bash
-# install dependencies (runtime + dev) into a local venv
-uv sync --extra dev
+# install dependencies into a local venv - test tooling included, no extra flag needed
+uv sync
 # or, with plain pip:
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+pip install -e .
 ```
 
 Copy the environment template and fill in the values:

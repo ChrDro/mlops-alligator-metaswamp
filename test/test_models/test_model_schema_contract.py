@@ -25,6 +25,12 @@ from .conftest import MODEL_CONTRACTS
 
 MODEL_NAMES = [contract[0] for contract in MODEL_CONTRACTS]
 
+# These tests read signatures from a live MLflow registry and their artifacts from
+# MinIO. They skip cleanly when the stack is down (see conftest.py), but the skip
+# still costs a reachability probe per session - so they are marked to be deselected
+# from the fast paths (`-m "not integration"` in the pre-commit hook).
+pytestmark = pytest.mark.integration
+
 
 # Tests if model signature is present in mlflow
 def _signature_or_fail(model_signatures: dict, model_name: str) -> list[str]:

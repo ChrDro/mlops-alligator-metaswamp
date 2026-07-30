@@ -258,7 +258,15 @@ def recompute_table_stats(df_table: pd.DataFrame) -> pd.DataFrame:
     ).index
     df_table["unique_ratio_rank"] = pd.Series(range(1, len(rank_idx) + 1), index=rank_idx)
 
-    rank_idx = df_table.sort_values(["ordinal_position"], ascending=[True]).index
+    # Must match the ROW_NUMBER() ordering in the extraction SQL above
+    # (null_ratio ASC, ordinal_position ASC), because this recompute overwrites the
+    # value the SQL produced. Until 30.07. the null_ratio key was missing here, which
+    # silently degraded null_ratio_rank to "position in the table" and
+    # is_least_null_in_table to "is the first column".
+    rank_idx = df_table.sort_values(
+        ["null_ratio", "ordinal_position"],
+        ascending=[True, True],
+    ).index
     df_table["null_ratio_rank"] = pd.Series(range(1, len(rank_idx) + 1), index=rank_idx)
 
     df_table["is_least_null_in_table"] = (df_table["null_ratio_rank"] == 1).astype(int)

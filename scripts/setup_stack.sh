@@ -75,7 +75,7 @@ ok "Docker found and running"
 # shellcheck disable=SC1091  # .env is user config, not tracked
 set -a; . ./.env; set +a
 
-for var in MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+for var in TRINO_USERNAME TRINO_PASSWORD TRINO_IP_ADDRESS MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
     [ -n "${!var:-}" ] || fail ".env: $var not set."
 done
 ok ".env found and complete"
@@ -354,7 +354,7 @@ print('Watermarks reseted')
 " || fail "Trino unreachable. Check network."
     ok "Watermarks reseted — next run will assume all talbes als "new""
 
-    bash curl_tests/test_curl_notify_new_data.sh >/dev/null 2>&1 \
+    bash trigger_prefect_pipeline.sh >/dev/null 2>&1 \
         || fail "Webhook call failed."
     ok "Push trigger send"
     warn "Runs need may need one or two minutes — see progress at: http://localhost:4200/runs"
@@ -369,28 +369,32 @@ $BOLD$GREEN Stack is ready.$RESET
   MLflow        http://localhost:5000
   Model API     http://localhost:8080/docs
   Prefect       http://localhost:4200
-  Grafana       http://localhost:3000   (admin/admin)
+  Grafana       http://localhost:3000   (GF_SECURITY_ADMIN_USER / GF_SECURITY_ADMIN_PASSWORD from .env)
   Prometheus    http://localhost:9090
   Alertmanager  http://localhost:9093   (Null Receiver, sends nothing)
   MinIO         http://localhost:9001
-  Evidently     http://localhost:8085/report
+  Evidently     http://localhost:8085/tracks          (what is monitored)
+                http://localhost:8085/report/<track> (drift HTML, e.g. pk_columns)
 
   Dashboards:
-    Model Service - Golden Signals    /d/model-service-golden-signals
-    Data Drift Monitoring             /d/evidently-data-drift
-    ML Model Performance Monitoring   /d/evidently-model-quality
+    Model Service - Golden Signals            /d/model-service-golden-signals
+    Key Predict Data Drift Monitoring         /d/evidently-key-drift
+    Key Model Performance Monitoring          /d/evidently-model-quality
+    Normalform Predict Data Drift Monitoring  /d/evidently-normalform-drift
+    Normalform Model Performance Monitoring   /d/evidently-normalform-quality
 
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
-  Trigger Streaming:    bash curl_tests/test_curl_notify_new_data.sh
+  Trigger Streaming:    bash trigger_prefect_pipeline.sh
   Results:              duckdb.prediction_results.key_results / nf_results
 
   Monitoring notes:
-    Drift fills automatically from the 4 predict endpoints, one track per
+    Drift fills automatically from all 5 predict endpoints, one track per
     model. Each needs service.window_size predictions before its first
-    report appears. Switch model with the Model dropdown on the dashboard.
+    report appears. The key dashboards carry a Model dropdown (pk/cpk/fk/cfk);
+    normalform has its own pair of dashboards because it is multiclass.
     F1/precision/recall need ground-truth labels, which live predictions do
     not carry, so they come from the hourly model-quality-backtest
-    deployment. Run it now with:
+    deployment. Run it now instead of waiting for :17 with:
       docker compose exec -T -w /opt/flows prefect python model_quality_backtest.py
     What is actually being monitored:  curl localhost:8085/tracks
 

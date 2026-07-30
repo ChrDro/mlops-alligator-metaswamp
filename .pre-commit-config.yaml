@@ -46,15 +46,17 @@ repos:
     hooks:
       - id: gitleaks
 
-  # - repo: local
-  #   hooks:
-  #     - id: pytest-check
-  #       name: pytest-check
-  #       entry: pytest
-  #       language: system
-  #       pass_filenames: false
-  #       always_run: true
-  #       args: [tests/, -v, --tb=short, -x]
+  # Fast feedback, not a gate - use `--no-verify` to bypass this.
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest-check
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        # Skip the tests that need MLflow/Trino/Evidently
+        args: [-m, "not integration", --tb=short, -x]
 
 default_language_version:
   python: python3.11
