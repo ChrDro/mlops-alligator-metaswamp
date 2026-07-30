@@ -15,8 +15,13 @@ services:
       - AWS_DEFAULT_REGION=eu-central-1
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - MLFLOW_S3_IGNORE_TLS=true
+      #  POST /events/new-data needs the REST endpoint set
+      - PREFECT_API_URL=http://prefect:4200/api
     volumes:
-      - ./mlruns:${PWD}/mlruns
+      # Fixed container path on purpose: ${PWD} here made the target depend on the
+      # host shell, and Git Bash rewrites it to C:/... which compose then reads as
+      # extra colons in the volume spec.
+      - ./mlruns:/app/mlruns
     networks:
       - ml-services-monitoring
 
@@ -46,10 +51,20 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    environment:
+      - GF_USERS_DEFAULT_THEME=light
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/etc/grafana/dashboards
       - grafana-data:/var/lib/grafana
+      - ./grafana/img/grafana_icon.svg:/usr/share/grafana/public/img/grafana_icon.svg:ro
+      - ./grafana/img/grafana_icon.svg:/usr/share/grafana/public/build/img/grafana_icon.svg:ro
+      - ./grafana/img/grafana_icon.svg:/usr/share/grafana/public/build/static/img/grafana_icon.1e0deb6b.svg:ro
+      - ./grafana/img/fav32.png:/usr/share/grafana/public/img/fav32.png:ro
+      - ./grafana/img/apple-touch-icon.png:/usr/share/grafana/public/img/apple-touch-icon.png:ro
+      - ./grafana/img/mstile-150x150.png:/usr/share/grafana/public/img/mstile-150x150.png:ro
     depends_on:
       - prometheus
     networks:
@@ -66,14 +81,51 @@ services:
 
   prefect:
     image: prefecthq/prefect:3.6.25-python3.11
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - PREFECT_API_URL=http://localhost:4200/api
+      - MODEL_API_URL=http://model-service:8080
+      # Persist server state in Postgres instead of SQLite in the container
+      - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
+    volumes:
+      - ./prefect:/opt/flows
+      # Read-only: model_quality_backtest.py replays the labelled holdout rows in
+      # data/pk_holdout.csv. Nothing in prefect/ writes to this directory.
+      - ./data:/opt/data:ro
+    working_dir: /opt/flows
     command:
       - /bin/sh
       - -lc
       - |
-        pip install --no-cache-dir asyncpg==0.31.0 && \
-        prefect server start --host 0.0.0.0
+        set -e
+        pip install --no-cache-dir \
+          asyncpg==0.31.0 \
+          "sqlalchemy>=2.0.51" "trino[sqlalchemy]>=0.338.0" \
+          "pandas>=2.0.0,<3.0.0" python-dotenv requests
+        python ensure_database.py
+        prefect server start --host 0.0.0.0 &
+        echo "Waiting for the Prefect API to come up..."
+        until python -c "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')" 2>/dev/null; do
+          sleep 2
+        done
+        echo "API is up - registering streaming deployments."
+        exec python serve_flows.py
     ports:
       - "4200:4200"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # Lets pip install above finish before the server starts.
+      start_period: 300s
+    networks:
+      - ml-services-monitoring
 
   minio:
     image: minio/minio:latest
@@ -156,6 +208,39 @@ services:
     networks:
       - ml-services-monitoring
 
+  # Second backup instance for Prefect's own database.
+  # The image dumps exactly one database per container
+  prefect_postgres_backup:
+    image: eeshugerman/postgres-backup-s3:15
+    container_name: prefect_postgres_backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      prefect:
+        condition: service_healthy
+    environment:
+      - S3_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - S3_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - S3_BUCKET=postgres-backups
+      - S3_ENDPOINT=http://minio:9000
+      - S3_S3V4=yes
+      - S3_PREFIX=prefect_db_backups
+      - S3_REGION=eu-central-1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=prefect
+      - POSTGRES_DATABASE=prefect
+      - SCHEDULE=@hourly
+      # Shorter than MLflow's 30 days as database holds operational
+      # telemetry (run history, logs, events),
+      # not the system of record for models.
+      - BACKUP_KEEP_DAYS=7
+    networks:
+      - ml-services-monitoring
+
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
     container_name: mlflow_server
@@ -168,9 +253,6 @@ services:
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - MLFLOW_S3_IGNORE_TLS=true
       # MLflow 3.x rejects Host headers not in its allowlist (DNS-rebinding protection).
-      # Setting this REPLACES the defaults, so list every host the server is reached by:
-      # "mlflow:5000" from other containers (e.g. model-service), and localhost from the
-      # host browser/CLI. Patterns use fnmatch, so ":*" covers any port.
       - MLFLOW_SERVER_ALLOWED_HOSTS=mlflow:*,localhost:*,127.0.0.1:*
     depends_on:
       minio:

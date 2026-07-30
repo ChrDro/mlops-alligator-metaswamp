@@ -13,20 +13,15 @@ import pandas as pd
 from data_model_cfk import CompositeForeignKey, CompositeForeignKeyPrediction
 from data_model_cpk import CompositePrimaryKey, CompositePrimaryKeyPrediction
 from data_model_denormalization import NormalForm, NormalFormPrediction
+from data_model_events import NewDataAccepted, NewDataNotification
 from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
-from fastapi import FastAPI, HTTPException
-from metrics import record_error, record_success
+from event_publisher import EventPublishError, publish_new_data_event
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from monitoring_client import forward_to_monitoring
 from predict import predict
 from prometheus_fastapi_instrumentator import Instrumentator
 
-
-# Inside Docker Compose this points to the Evidently service name.
-# It is configurable so you can run the API against another monitoring
-# endpoint without changing application code.
-# MONITORING_URL = os.getenv(
-#     "MONITORING_URL", "http://evidently_service:8085/iterate/green_taxi_data"
-# )
 
 app = FastAPI()
 
@@ -41,42 +36,11 @@ def index() -> dict:
     return {"message": "PK, FK Candidate and Normalform Prediction"}
 
 
-# @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
-# def predict_pk_key_candidate(data: PrimaryKey):
-#     # First serve the model prediction. Monitoring should observe this request,
-#     # but it should not change the prediction result returned to the client.
-#     prediction = predict("pk_model", data)
-#     #prediction = predict("pk-key-candidate-suggestion", data)
-#     try:
-#         print(f"Sending data to metrics application: {data}")
-
-#         # Evidently needs both the input features and the model output so it can
-#         # compare live predictions against the reference distribution.
-#         # monitoring_payload = PrimaryKeyPrediction(
-#         #     **data.model_dump(), prediction=prediction
-#         # ).model_dump()
-
-#         # This POST is intentionally fire-and-forget from the API's point of
-#         # view. If monitoring is slow or unavailable, the client should still
-#         # receive the prediction response from the model service.
-#         # requests.post(
-#         #     MONITORING_URL,
-#         #     json=monitoring_payload,
-#         #     timeout=5,
-#         # )
-#     except requests.exceptions.ConnectionError as error:
-#         print(f"Cannot reach a metrics application, error: {error}, data: {data}")
-#     except requests.exceptions.Timeout as error:
-#         print(f"Metrics application timed out, error: {error}, data: {data}")
-
-#     # Return the same payload shape used for monitoring so users can
-#     # compare what the client sees with what Evidently receives.
-#     return PrimaryKeyPrediction(**data.model_dump(), prediction=prediction)
-
-
 @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
-def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
-    started = time.perf_counter()
+def predict_primary_key(
+    data: PrimaryKey,
+    background_tasks: BackgroundTasks,
+) -> PrimaryKeyPrediction:
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -93,13 +57,21 @@ def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
         else:
             prediction_value = int(prediction)
 
-        record_success("pk_model", prediction_value, probability, time.perf_counter() - started)
-
-        return PrimaryKeyPrediction(
+        response = PrimaryKeyPrediction(
             **data_dict,
             prediction=prediction_value,
             probability=probability,
         )
+
+        # Forward to the drift monitor after the response is sent. Each model has
+        # its own track because each has its own feature schema; see `models` in
+        # evidently_service/config.yaml.
+        #
+        # The drift track needs no ground truth, which is why it can run from the
+        # serving path at all. Classification quality (F1/precision/recall) needs
+        # the target column, which does not exist at prediction time - that track is
+        # driven by prefect/model_quality_backtest.py instead.
+        background_tasks.add_task(forward_to_monitoring, response.model_dump(), "pk_columns")
 
     except HTTPException:
         raise
@@ -111,11 +83,15 @@ def predict_primary_key(data: PrimaryKey) -> PrimaryKeyPrediction:
             status_code=400,
             detail=f"Error in model input or predict logic: {error!s}",
         ) from error
+    else:
+        return response
 
 
 @app.post("/predict_cpk", response_model=CompositePrimaryKeyPrediction)
-def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimaryKeyPrediction:
-    started = time.perf_counter()
+def predict_composite_primary_key(
+    data: CompositePrimaryKey,
+    background_tasks: BackgroundTasks,
+) -> CompositePrimaryKeyPrediction:
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -132,18 +108,13 @@ def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimary
         else:
             prediction_value = int(prediction)
 
-        record_success(
-            "composite_pk_model",
-            prediction_value,
-            probability,
-            time.perf_counter() - started,
-        )
-
-        return CompositePrimaryKeyPrediction(
+        response = CompositePrimaryKeyPrediction(
             **data_dict,
             prediction=prediction_value,
             probability=probability,
         )
+
+        background_tasks.add_task(forward_to_monitoring, response.model_dump(), "cpk_columns")
 
     except HTTPException:
         raise
@@ -155,11 +126,15 @@ def predict_composite_primary_key(data: CompositePrimaryKey) -> CompositePrimary
             status_code=400,
             detail=f"Error in model input or predict logic: {error!s}",
         ) from error
+    else:
+        return response
 
 
 @app.post("/predict_fk", response_model=ForeignKeyPrediction)
-def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
-    started = time.perf_counter()
+def predict_foreign_key(
+    data: ForeignKey,
+    background_tasks: BackgroundTasks,
+) -> ForeignKeyPrediction:
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -176,13 +151,13 @@ def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
         else:
             prediction_value = int(prediction)
 
-        record_success("fk_model", prediction_value, probability, time.perf_counter() - started)
-
-        return ForeignKeyPrediction(
+        response = ForeignKeyPrediction(
             **data_dict,
             prediction=prediction_value,
             probability=probability,
         )
+
+        background_tasks.add_task(forward_to_monitoring, response.model_dump(), "fk_columns")
 
     except HTTPException:
         raise
@@ -194,11 +169,15 @@ def predict_foreign_key(data: ForeignKey) -> ForeignKeyPrediction:
             status_code=400,
             detail=f"Error in model input or predict logic: {error!s}",
         ) from error
+    else:
+        return response
 
 
 @app.post("/predict_cfk", response_model=CompositeForeignKeyPrediction)
-def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeignKeyPrediction:
-    started = time.perf_counter()
+def predict_composite_foreign_key(
+    data: CompositeForeignKey,
+    background_tasks: BackgroundTasks,
+) -> CompositeForeignKeyPrediction:
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -215,18 +194,13 @@ def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeign
         else:
             prediction_value = int(prediction)
 
-        record_success(
-            "composite_fk_model",
-            prediction_value,
-            probability,
-            time.perf_counter() - started,
-        )
-
-        return CompositeForeignKeyPrediction(
+        response = CompositeForeignKeyPrediction(
             **data_dict,
             prediction=prediction_value,
             probability=probability,
         )
+
+        background_tasks.add_task(forward_to_monitoring, response.model_dump(), "cfk_columns")
 
     except HTTPException:
         raise
@@ -238,11 +212,47 @@ def predict_composite_foreign_key(data: CompositeForeignKey) -> CompositeForeign
             status_code=400,
             detail=f"Error in model input or predict logic: {error!s}",
         ) from error
+    else:
+        return response
+
+
+@app.post("/events/new-data", response_model=NewDataAccepted, status_code=202)
+def notify_new_data(notification: NewDataNotification) -> NewDataAccepted:
+    """
+    Push trigger for the streaming pipeline.
+
+    A loader calls this right after writing to the source schema. The service only
+    forwards a "look now" event to Prefect and returns immediately - it does not
+    predict anything here. An automation starts the change detector, which diffs
+    watermarks, records what changed and triggers both prediction pipelines.
+
+    Missing this call is not fatal: the same detector also runs on a cron schedule
+    and will pick the change up on its next pass. That is why a failure to publish
+    returns 503 (retry if you like) rather than losing data.
+    """
+    try:
+        publish_new_data_event(schema=notification.schema_name, note=notification.note)
+    except EventPublishError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"{error} - the change will still be picked up by the scheduled "
+                f"change-detection run."
+            ),
+        ) from error
+
+    return NewDataAccepted(
+        status="accepted",
+        schema_name=notification.schema_name,
+        detail="Change detection triggered.",
+    )
 
 
 @app.post("/predict_normalform", response_model=NormalFormPrediction)
-def predict_normalform_key_candidate(data: NormalForm) -> NormalFormPrediction:
-    started = time.perf_counter()
+def predict_normalform_key_candidate(
+    data: NormalForm,
+    background_tasks: BackgroundTasks,
+) -> NormalFormPrediction:
     try:
         data_dict = data.model_dump()  # Nutze .dict() bei Pydantic v1
 
@@ -259,18 +269,16 @@ def predict_normalform_key_candidate(data: NormalForm) -> NormalFormPrediction:
         else:
             prediction_value = int(prediction)
 
-        record_success(
-            "denormalization_model",
-            prediction_value,
-            probability,
-            time.perf_counter() - started,
-        )
-
-        return NormalFormPrediction(
+        response = NormalFormPrediction(
             **data_dict,
             prediction=prediction_value,
             probability=probability,
         )
+
+        # Drift only. This model is multiclass, so its classification track cannot
+        # use log loss - but drift needs no labels and no probabilities, so it works
+        # here exactly as for the binary models.
+        background_tasks.add_task(forward_to_monitoring, response.model_dump(), "nf_columns")
 
     except HTTPException:
         raise
@@ -282,3 +290,5 @@ def predict_normalform_key_candidate(data: NormalForm) -> NormalFormPrediction:
             status_code=400,
             detail=f"Error in model input or predict logic: {error!s}",
         ) from error
+    else:
+        return response

@@ -28,7 +28,7 @@ The script executes comprehensive validations across **5 specific layers**:
     *   Verifies that `name_length` perfectly aligns with the actual character length of the `column_name` string.
 
 ### 3. Logical Bounds & Binary Flags ⭐⭐
-*   **`test_binary_flags_and_ratios`**: 
+*   **`test_binary_flags_and_ratios`**:
     *   Assures all categorical switch indicators (`name_ends_with_id`, `name_contains_key`, etc.) are bounded strictly to `0` or `1`.
     *   Guarantees all relational metrics (such as `null_ratio` or `unique_ratio_relative_to_max`) fall within the mathematical boundaries of `0.0` and `1.0`.
 

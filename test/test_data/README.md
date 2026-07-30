@@ -1,9 +1,9 @@
-# Training Data Quality Tests 
+# Training Data Quality Tests
 ## Overview
 
 This test suite validates the quality of the training CSV before the model is trained. It prevents common errors caused by poor data quality, missing columns, or inconsistent features.
 
-**File:** `data/summary_output_task_1_2_training.csv`  
+**File:** `data/summary_output_task_1_2_training.csv`
 **Total Tests:** 37 Tests in 9 categories
 
 ---
@@ -182,14 +182,14 @@ AssertionError: Missing required columns: ['ordinal_position', 'pk_target']
 ## 🐛 Common Errors and Solutions
 
 ### "Training data not found"
-**Problem:** CSV file does not exist 
+**Problem:** CSV file does not exist
 **Solution:** Run the data pipeline
 ```bash
 python src/get_trino_summaries_task_1_2_training.py
 ```
 
 ### "pk_target is extremely imbalanced: 0.2% positive"
-**Problem:** Too few positive examples  
+**Problem:** Too few positive examples
 **Solution:** Collect more data or adjust the sampling strategy
 
 ### "Missing required columns: ['unique_ratio']"
@@ -197,7 +197,7 @@ python src/get_trino_summaries_task_1_2_training.py
 **Solution:** Check the query in the data pipeline and rerun it
 
 ### "is_unique=1 but unique_ratio<1.0"
-**Problem:** Inconsistent feature calculation 
+**Problem:** Inconsistent feature calculation
 **Solution:** Verify the logic in `get_trino_summaries`
 
 ### "StratifiedGroupKFold split failed"
@@ -218,7 +218,7 @@ jobs:
     steps:
       - name: Validate Training Data
         run: pytest tests/test_data/test_training_data_quality.py -v
-  
+
   train-model:
     needs: validate-data  # Nur wenn Data Quality OK
     runs-on: ubuntu-latest
@@ -262,7 +262,7 @@ def training_pipeline():
 
 ## 📝 Extend The Tests
 
-### Add NewFeatures 
+### Add NewFeatures
 When adding new features to the CSV:
 
 1. **Aktualisiere `EXPECTED_FEATURE_COLUMNS`** (Zeile 27)
