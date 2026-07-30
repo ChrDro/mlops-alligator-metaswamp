@@ -38,6 +38,10 @@ dev = []
 [tool.pytest.ini_options]
 testpaths = ["test"]
 
+# Unregistered @pytest.mark.<x> -> collection error instead of warning. Guards typos in
+# the `integration` marker below; does not check `-m` expressions.
+addopts = "--strict-markers"
+
 markers = [
     "integration: needs the docker compose stack (MLflow/Trino/Evidently) running",
 ]
@@ -64,6 +68,8 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
+
+fail_under = 80
 
 exclude_also = [
     "if __name__ == .__main__.:",

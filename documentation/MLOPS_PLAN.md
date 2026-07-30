@@ -63,9 +63,9 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
             │                                              │
 ┌───────────▼──────────┐                      ┌───────────▼──────────┐
 │  BATCH Processing    │                      │  STREAMING Events    │
-│  - CSV Ingestion     │                      │  - Message Queue     │
-│  - Batch Training    │                      │  - Real-time Predict │
-│  - Batch Prediction  │                      │  - OpenAPI Calls     │
+│  - CSV Ingestion     │                      │  - Prefect Events    │
+│  - Batch Training    │                      │  - Webhook + Cron    │
+│  - Batch Prediction  │                      │  - Watermark Diff    │
 └───────────┬──────────┘                      └───────────┬──────────┘
             │                                              │
             └──────────────────────┬──────────────────────┘
@@ -165,64 +165,92 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 
 ## 2. DETAILLIERTE TODO-LISTE
 
-> **Stand: 27. Juli 2026** — abgeglichen mit dem tatsächlichen Repo-Zustand (Branch `dev`).
+> **Stand: 30. Juli 2026** — abgeglichen mit dem tatsächlichen Repo-Zustand
+> (Branch `feature/env_example`, 1 Commit vor `origin/dev`).
 > Legende: `[x]` erledigt · `[~]` teilweise erledigt (Details im Unterpunkt) · `[ ]` offen · ~~durchgestrichen~~ = bewusst verworfen.
 
 **Fortschritt auf einen Blick**
 
 | Phase | Status | Kern-Lücke |
 |-------|--------|------------|
-| 1 Clean Code | 🟢 ~90% | Pre-commit Hooks fehlen |
-| 2 Testing & CI/CD | 🟡 ~45% | Keine Unit-Tests für API/Predict, keine Coverage, kein Docker-Build-Workflow |
-| 3 API & Docker | 🟡 ~55% | Kein API-Versioning, Dockerfile nicht gehärtet (root, single-stage) |
-| 4 Data Pipeline | 🟢 ~80% | Streaming steht; Training nicht orchestriert, keine Deployments für Batch |
+| 1 Clean Code | 🟢 **100%** | keine offenen Punkte |
+| 2 Testing & CI/CD | 🟡 ~75% | Tests stehen (273, 86 % Coverage); offen: CI horcht auf `develop` statt `dev`, `--cov` fehlt im Workflow, kein Docker-Build-Workflow, `main` steht auf dem Initial Commit |
+| 3 API & Docker | 🟡 ~60% | Kein API-Versioning, keine echten Health-Probes, Dockerfile nicht gehärtet (root, single-stage) |
+| 4 Data Pipeline | 🟡 ~70% | Streaming steht; dbt praktisch entkernt (keine Models/Seeds), Training nicht orchestriert |
 | 5 MLflow & Retraining | 🟡 ~65% | Retraining-Pfad komplett offen |
-| 6 Monitoring | 🟡 ~55% | Grafana-Dashboards leer, Evidently noch auf Tutorial-Daten |
+| 6 Monitoring | 🟢 ~85% | Custom Model-Metriken fehlen, Alert-Receiver leer, kein Pipeline-Dashboard |
+| 7 Betrieb & Doku | 🔴 ~30% | **README beschreibt Dateien, die es nicht gibt**; 7 Begleit-Dokumente nie committet |
+
+**Seit dem letzten Abgleich (27. → 29. Juli) neu dazugekommen**
+
+| Was | Wo | Effekt auf den Plan |
+|-----|----|---------------------|
+| Pre-commit inkl. gitleaks | [.pre-commit-config.yaml](../.pre-commit-config.yaml) | 1.1 geschlossen |
+| Evidently produktiv auf **5 echten Tracks** | [evidently_service/](../evidently_service/), [config.yaml](../evidently_service/config.yaml) | 6.5 fast geschlossen |
+| Referenz-/Holdout-Generator aus den Pydantic-Modellen | [build_monitoring_references.py](../evidently_service/build_monitoring_references.py) | 6.5, neuer Contract |
+| Drift-Forwarding aus dem Serving-Pfad | [monitoring_client.py](../webservice/monitoring_client.py) + `BackgroundTasks` | 3.1/6.5 geschlossen |
+| Model-Quality-Backtest als Prefect-Flow (stündlich) | [model_quality_backtest.py](../prefect/model_quality_backtest.py) | 6.5, Basis für 5.4-Trigger |
+| 5 provisionierte Grafana-Dashboards + Datasource | [grafana/](../grafana/) | 6.3 fast geschlossen |
+| Prefect-Deployments von 3 auf 4 (Backtest-Cron) | [serve_flows.py](../prefect/serve_flows.py) | 4.3 |
+| `predict_proba` auf `max(proba)` umgestellt | [predict.py:103](../webservice/predict.py#L103) | Multiclass-Bug in 3.2 |
+| `.env.template` entfernt, `.env.example` ist Single Source | [.env.example](../.env.example) | 7.1 |
+| dbt-Seeds **entfernt** (`ad3ccdf`) | [dbt/](../dbt/) | 4.1/4.2 zurückgefallen |
 
 ---
 
 ### Phase 1: Clean, Structured Code
 
-- [~] **1.1** Ruff Installation und Konfiguration
+- [x] **1.1** Ruff Installation und Konfiguration
   - [x] Ruff zu `pyproject.toml` hinzufügen (gepinnt auf `0.16.0`)
   - [x] Ruff-Konfiguration erstellen → eigene [`ruff.toml`](../ruff.toml) (line-length, rules, excludes inkl. `README.md`)
-  - [ ] Pre-commit Hooks einrichten → **`.pre-commit-config.yaml` existiert nicht**; Ruff läuft aktuell nur in CI und manuell
+  - [x] **Pre-commit Hooks eingerichtet** ([.pre-commit-config.yaml](../.pre-commit-config.yaml)): `ruff --fix` + `ruff-format` (rev auf `v0.16.0` gepinnt, synchron zu `pyproject.toml`/CI), dazu `check-added-large-files`, `check-yaml/toml/json`, `check-ast`, `detect-private-key`, `check-merge-conflict`, `no-commit-to-branch=main`, `trailing-whitespace`, `end-of-file-fixer`, `requirements-txt-fixer` — plus **gitleaks** (`v8.18.2`) als Secret-Scanner
+  - [x] **`pytest`-Hook aktiviert (30.07.)** — der auskommentierte Block zeigte auf ein nie existierendes `tests/`-Verzeichnis. Jetzt aktiv als `pytest-fast` **ohne Pfadargument**: `testpaths` in `pyproject.toml` ist die einzige Stelle, an der der Pfad steht, also kann er nicht wieder auseinanderlaufen. Läuft mit `-m "not integration" --tb=short -x` in **1,2 s** (46 Tests, 10 stack-abhängige deselektiert). Bewusst kein Gate: `--no-verify` umgeht ihn und er existiert nur dort, wo `pre-commit install` gelaufen ist — das Gate sind CI auf `dev`/`main` plus Branch Protection (2.3). Der Hook liefert nur früheres Feedback. Ebenso bewusst auf der `pre-commit`-Stage und nicht `pre-push`: `pre-commit install` installiert **nur** den pre-commit-Hook, ein `stages: [pre-push]`-Hook würde also für jeden, der den Standardbefehl benutzt hat, unsichtbar nie feuern
 
 - [x] **1.2** Code-Quality-Verbesserungen
   - [x] Bestehenden Code mit Ruff formatiert (`ruff check` + `ruff format` grün in CI)
   - [x] Type Hints in Training-Scripts, Prefect-Flows und Webservice
 
-- [x] **1.3** Projektstruktur-Refactoring
-  - [x] Klare Module-Trennung: [task_1/](../task_1/) (PK/CPK), [task_2/](../task_2/) (FK/CFK), [task_3/](../task_3/) (Normalform), [prefect/](../prefect/), [webservice/](../webservice/), [dbt/](../dbt/), [test/](../test/)
+- [x] **1.3** Projektstruktur-Refactoring — **abgeschlossen 30.07.**
+  - [x] Klare Module-Trennung: [task_1/](../task_1/) (PK/CPK), [task_2/](../task_2/) (FK/CFK), [task_3/](../task_3/) (Normalform), [prefect/](../prefect/), [webservice/](../webservice/), [evidently_service/](../evidently_service/), [grafana/](../grafana/), [test/](../test/)
   - [x] Pipeline-Dateien umbenannt (`pk_fk_pipeline.py`, `normalform_pipeline.py`)
-  - [ ] Aufräumen: `src/test_trino_connection.py` liegt außerhalb der Teststruktur; `mlflow.db`/`mlruns/` sind lokale Altlasten neben dem Postgres-Backend
+  - [x] `mlflow.db` und `mlruns/` sind jetzt in [.gitignore](../.gitignore) (Zeile 221/222) — lokale Altlasten liegen noch im Arbeitsverzeichnis, gehen aber nicht mehr ins Repo
+  - [x] **`src/test_trino_connection.py` → [`src/check_trino_connection.py`](../src/check_trino_connection.py) (30.07.)** — der `test_`-Prefix ließ pytest die Datei sammeln, und weil der Verbindungsaufbau auf Modulebene stand, **öffnete jeder `pytest`-Lauf eine echte Trino-Verbindung während der Collection**. Der `except DBAPIError` schluckte den Fehler, also sah nichts davon verdächtig aus. Alles liegt jetzt hinter `main()` — Import ist nebenwirkungsfrei. Bewusst in `src/` geblieben statt nach `test/` verschoben: es ist ein manuelles Diagnose-Skript, kein Test. Zweite Absicherung von der anderen Seite: `testpaths = ["test"]` (2.1) hält die Collection ohnehin aus `src/` heraus
+  - [x] ~~Untracked Artefakte im Repo-Root aufräumen~~ — **erledigt/entfallen (30.07.)**: die vier `midterm_presentation*`-Dateien sind weg (`presentation/` ist ein leeres Restverzeichnis), `mlflow.log` und `logs/dbt.log` liegen noch lokal, greifen aber unter `*.log` in [.gitignore](../.gitignore) und können das Repo nicht erreichen. Einzige Ausnahme ist `workflow_idea.txt` — das ist kein Aufräum-, sondern ein Inhaltsthema und gehört zur dbt-Grundsatzentscheidung in 4.1(a), wo es ohnehin referenziert wird
 
 ---
 
 ### Phase 2: Testing & CI/CD
 
 - [~] **2.1** pytest Setup
-  - [~] `pytest` ist Hauptabhängigkeit; **`pytest-cov` und `pytest-mock` fehlen**
-  - [x] Test-Verzeichnisstruktur [test/test_data/](../test/test_data/)
-  - [x] [conftest.py](../test/test_data/conftest.py) für Fixtures
-  - [ ] pytest-Konfiguration in `pyproject.toml` (`[tool.pytest.ini_options]`, testpaths, addopts) fehlt
-  - [ ] `[project.optional-dependencies] dev` fehlt — CI ruft `uv pip install -e ".[dev]"` auf ein nicht existierendes Extra auf
+  - [x] `pytest` ist Hauptabhängigkeit; **`pytest-cov` (7.1.0), `pytest-mock` (3.15.1) und `httpx2` (für `TestClient`) am 30.07. nachgezogen** — bewusst ebenfalls in `dependencies`, nicht in einem Extra: ein blankes `uv sync` soll linten, testen **und** Coverage messen können, ohne dass sich jemand ein Flag merken muss. Preis ist, dass ein Consumer das Test-Tooling mitinstalliert — bewusst in Kauf genommen. `uv.lock` regeneriert
+  - [x] Test-Verzeichnisstruktur: [test/test_data/](../test/test_data/) (Datenqualität) und [test/test_models/](../test/test_models/) (Schema-Contract)
+  - [x] `conftest.py` je Paket: [test_data/conftest.py](../test/test_data/conftest.py), [test_models/conftest.py](../test/test_models/conftest.py)
+  - [x] **273 Tests, alle grün** — von 56 am 29.07. auf 273 am 30.07.; Laufzeit 6,5 s mit Coverage, 3,4 s auf dem schnellen Pfad
+  - [x] **pytest-Konfiguration in `pyproject.toml` (30.07.)**: `testpaths = ["test"]`, `addopts = "--strict-markers"`, Marker `integration`. Dazu `[tool.coverage.run]`/`[tool.coverage.report]` mit `fail_under = 80`, damit lokal und in CI dieselben Zahlen und dieselbe Schwelle gelten. `--cov` steht **nicht** in `addopts`: das würde jeden lokalen Lauf instrumentieren und die Fehlerausgabe unnötig zumüllen → CI übergibt die Coverage-Flags explizit
+    - Reichweite von `--strict-markers`, damit es nicht überschätzt wird: es macht einen **nicht registrierten Marker-Dekorator** zum Collection-Error (`@pytest.mark.integraton` → `'integraton' not found in markers configuration option`, verifiziert). Es prüft **keine `-m`-Ausdrücke** — `-m "not integraton"` selektiert weiterhin alles. Letzteres fällt aber von selbst auf, weil dann die stack-abhängigen Tests mitlaufen
+    - Stolperstein für später: `source` in `[tool.coverage.run]` akzeptiert nur **Verzeichnisse oder importierbare Pakete**, keine Dateipfade. Ein Eintrag `prefect/change_events.py` wird still ignoriert (`Module … was never imported`). Deshalb steht dort `prefect` als Verzeichnis, und die stack-abhängigen Pipeline-Module werden über `omit` ausgenommen. Coverage bevorzugt das lokale `./prefect`-Verzeichnis gegenüber der installierten `prefect`-Library — aber nur, wenn aus dem Repo-Root gestartet wird
+  - [x] **Kein `dev`-Extra mehr, alles in `dependencies` (30.07.)** — das gesamte Test-Tooling (`pytest`, `pytest-cov`, `pytest-mock`, `httpx2`, `ruff`, `pre-commit`) steht in `dependencies`, damit ein blankes `uv sync` linten, testen **und** Coverage messen kann, ohne dass sich jemand ein Flag merken muss. Nachprüfbar: `uv export` und `uv export --extra dev` liefern identische Paketmengen. Preis ist, dass ein Consumer das Test-Tooling mitinstalliert — bewusst in Kauf genommen
+    - `[project.optional-dependencies] dev = []` bleibt als **leerer Alias** stehen, damit CIs `uv pip install -e ".[dev]"` weiter auflöst. Ein unbekanntes Extra würde uv nur **warnen** statt zu scheitern — genau so blieb vorher unbemerkt, dass `pytest-cov` fehlte und die Codecov-/HTML-Upload-Steps nie etwas zu laden hatten. Alias und CI-Zeile gemeinsam in 2.3 entfernen
 
-- [~] **2.2** Unit Tests schreiben
+- [x] **2.2** Unit Tests schreiben — **erledigt am 30.07.**, 56 → 273 Tests, 86 % Coverage im gemessenen Scope. Vollständiger Katalog: **[TEST_SUITE.md](TEST_SUITE.md)** (was jeder der 217 neuen Tests prüft und warum)
   - [x] Datenqualitäts-Tests für Trainingsdaten: [test_training_data_quality.py](../test/test_data/test_training_data_quality.py), [..._nf.py](../test/test_data/test_training_data_quality_nf.py), [..._subject_area.py](../test/test_data/test_training_data_quality_subject_area.py)
-  - [ ] Tests für Prediction-Logik ([webservice/predict.py](../webservice/predict.py), MLflow-Model gemockt)
-  - [ ] Tests für FastAPI Endpoints mit `TestClient` (alle 5 Predict-Routes + Fehlerpfad 400)
-  - [ ] Tests für Pydantic-Validierung (`data_model_*.py`)
-  - [ ] Tests für Prefect-Tasks (Feature-Berechnung, `recompute_table_stats`, Queue-Logik)
-  - [ ] Mindestens 70% Code Coverage (aktuell wird Coverage gar nicht gemessen)
+  - [x] Schema-Contract-Tests über alle 5 Modelle: [test_model_schema_contract.py](../test/test_models/test_model_schema_contract.py) (Menge **und** Reihenfolge der Features, MLflow-Signatur vs. Pydantic)
+  - [x] **Prediction-Logik**: [test/test_webservice/test_predict.py](../test/test_webservice/test_predict.py) — 12 Tests, MLflow-Model durch `FakePyFuncModel` ersetzt (behält die Trennung pyfunc ↔ rohes sklearn-Modell, weil genau die der 27.07.-Bug war). Der Multiclass-Test ist so gebaut, dass altes `probabilities[0][1]` (0,20) und korrektes `max(proba)` (0,55) **verschiedene** Zahlen liefern — ein wiedereingeführter fixer Klassenindex fällt sofort auf. `_align_to_signature` in beide Richtungen: Umsortierung *und* Fehlermeldung mit Feldnamen
+  - [x] **FastAPI Endpoints**: [test_api_endpoints.py](../test/test_webservice/test_api_endpoints.py) — 75 Tests. Alle 5 Routen ×: 200 + Prediction/Probability, Echo aller Request-Features, **richtiger Modellname**, **eigener Monitoring-Track**, Feature-Reihenfolge an `predict()`, 400 bei Predict-Fehler, 422 bei unvollständigem/untypisiertem Body, Normalisierung aller Prediction-Shapes. Dazu `GET /`, `/metrics` und `POST /events/new-data` (202, Default-Schema, 503 mit Cron-Hinweis). Die fünf Handler sind Copy-Paste-Klone (3.1) — deshalb ist *jede* Zusicherung über alle fünf parametrisiert, nicht nur an einem Beispiel geprüft
+  - [x] **Pydantic-Validierung**: [test_data_models.py](../test/test_webservice/test_data_models.py) — 39 Tests über alle 5 Request/Response-Paare: kein Feld hat einen Default (ein stiller Default würde als echte Messung gescort), fehlende/untypisierte Werte werden abgelehnt, unbekannte Felder werden **ignoriert** (dokumentiert, weil `predict_batch` darauf baut), Response = Request + `prediction` + `probability`. Plus die `schema`/`schema_name`-Alias-Mechanik der Event-Modelle
+  - [x] **Prefect-Tasks**: [test/test_pipelines/](../test/test_pipelines/) — 70 Tests, kein Trino nötig. `diff_snapshots` in allen Fällen inkl. des **dokumentierten blinden Flecks** (In-place-UPDATE bei gleicher Zeilen-/Spaltenzahl ist unsichtbar); Claim-Protokoll gegen eine `FakeConnection`, die das erzeugte SQL mitschreibt: Track-Allowlist greift **vor** dem Execute, `complete`/`release` fassen nur den eigenen `run_id` an, Tabellennamen sind gebundene Parameter (mit einem Namen getestet, der interpoliert aus dem String-Literal ausbrechen würde); `recompute_table_stats` inkl. der Cross-Column-Features, die sich selbst ausschließen müssen
+  - [x] **`monitoring_client.py`**: [test_monitoring_client.py](../test/test_webservice/test_monitoring_client.py) — 11 Tests, 100 % Coverage. Jeder Fehlerpfad einzeln: Connection-Error, Timeout, generische RequestException, 4xx/5xx über `raise_for_status`, **und** eine Nicht-`requests`-Exception. Dazu die Log-Level-Entscheidung selbst (Transportfehler auf `debug`, Unerwartetes auf `error` mit Traceback), weil die der Grund für den doppelten `except` ist. Bonus: [test_event_publisher.py](../test/test_webservice/test_event_publisher.py) (10 Tests) für die *entgegengesetzte* Zusage — dieser Pfad muss werfen
+  - [x] **Coverage: 86 %** im gemessenen Scope (Ziel war 70 %) — `webservice/` **99 %** (`predict.py`, `monitoring_client.py`, `event_publisher.py`, alle 5 Datenmodelle je 100 %; `app.py` 96 %), die zwei getesteten Pipeline-Module 58 %. Gate steht auf `fail_under = 80` in `[tool.coverage.report]`, gilt damit lokal und in CI
 
 - [~] **2.3** GitHub Actions CI Pipeline
   - [x] [.github/workflows/ci.yml](../.github/workflows/ci.yml) mit Lint-, Test- und Summary-Job
-  - [x] Lint Job (`ruff check` + `ruff format --check`)
-  - [~] Test Job läuft `pytest` — **ohne `--cov`**, die Codecov-/HTML-Upload-Steps laden daher nie existierende Artefakte hoch
+  - [x] Lint Job (`ruff check` + `ruff format --check`, Version im Workflow gepinnt und kommentiert)
+  - [x] Trigger deckt `feature/**`, `hotfix/**`, `bugfix/**` ab → die Feature-Branches, auf denen tatsächlich gearbeitet wird, lösen CI aus
+  - [~] Test Job läuft `pytest` — **ohne `--cov`**, die Codecov-/HTML-Upload-Steps laden daher nie existierende Artefakte hoch (`coverage.xml`, `htmlcov/`)
   - [~] Matrix Testing vorhanden, aber nur `['3.11']` → um 3.12 erweitern oder Matrix entfernen
   - [ ] Coverage Badge zu README hinzufügen
-  - [ ] Trigger prüfen: Workflow horcht auf `develop`, der aktive Branch heißt `dev` → Pushes lösen aktuell keine CI aus
+  - [ ] `push`/`pull_request` horchen auf `develop`; der Integrationsbranch heißt `dev` → direkte Pushes auf `dev` und PRs *nach* `dev` laufen ohne CI. Entweder `develop` → `dev` umbenennen oder beides listen
+  - [ ] `origin/main` steht auf `e203865 Initial commit`, `origin/dev` ist **90 Commits** weiter → der Branch-Schutz („Tests grün vor Merge") greift heute faktisch nirgends; `dev` → `main` mergen und `main` als Default-Ziel etablieren
 
 - [ ] **2.4** Docker Build & GHCR Pipeline  *(offen — TODO „Docker build über github actions")*
   - [ ] `.github/workflows/docker-build.yml` erstellen
@@ -240,74 +268,93 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Pydantic Models für **alle 5** Endpoints: [data_model_pk.py](../webservice/data_model_pk.py), `_cpk`, `_fk`, `_cfk`, [data_model_denormalization.py](../webservice/data_model_denormalization.py)
   - [x] Endpoints `/predict_pk`, `/predict_cpk`, `/predict_fk`, `/predict_cfk`, `/predict_normalform` inkl. Probability im Response
   - [x] Error Handling mit `HTTPException` (400 bei Input-/Predict-Fehlern) in [app.py](../webservice/app.py)
-  - [x] Smoke-Tests per curl: [curl_tests/](../curl_tests/)
-  - [ ] API Versioning (`/api/v1/…`) — Doku [STREAMING_PREDICTION_APPROACHES.md](STREAMING_PREDICTION_APPROACHES.md) beschreibt bereits v1-Pfade, Code nutzt sie nicht
-  - [ ] Health-Check erweitern: `/health/live` + `/health/ready` (heute nur `GET /` mit Statischer Message)
+  - [x] Smoke-Tests per curl: [curl_tests/](../curl_tests/) — 5 Predict-Skripte + `test_curl_notify_new_data.sh`
+  - [x] `POST /events/new-data` als Push-Trigger für die Streaming-Pipeline (202 / 503 mit Hinweis auf den Cron-Fallback)
+  - [x] **Drift-Forwarding aus dem Serving-Pfad aktiv**: jeder der 5 Endpoints hängt `forward_to_monitoring(response, "<track>")` an `BackgroundTasks`, d.h. nach dem Senden der Response. Der frühere auskommentierte Evidently-Block ist damit ersetzt, nicht nur reaktiviert
+  - [ ] API Versioning (`/api/v1/…`) — Code nutzt weiterhin flache Pfade
+  - [ ] Health-Check erweitern: `/health/live` + `/health/ready` (heute nur `GET /` mit statischer Message; ein `ready`, das die MLflow-Erreichbarkeit prüft, würde die Startup-Latenz aus 3.2 sichtbar machen)
   - [ ] `/model/info` Endpoint (Modellname, Version, Alias)
-  - [ ] OpenAPI-Schema anreichern (Beschreibungen, `examples`, Tags)
-  - [ ] Auskommentierten Evidently-Block in `app.py` entfernen oder reaktivieren
+  - [ ] OpenAPI-Schema anreichern (Beschreibungen, `examples`, Tags) — der Modul-Docstring in [app.py](../webservice/app.py) beschreibt noch „POST /predict" aus dem Tutorial statt der 5 echten Routen
+  - [ ] `print()`-Debugausgaben in jedem Endpoint (`"Sending the following columns…"`) durch Logging ersetzen (siehe 6.6)
+  - [ ] Die fünf Predict-Handler sind bis auf Modellname und Track identisch (~35 Zeilen ×5) → auf einen gemeinsamen Helper ziehen; jede Änderung muss heute fünfmal gemacht werden
 
 - [~] **3.2** Model Loading Optimization
   - [x] Model Caching über `@lru_cache(maxsize=5)` in [predict.py](../webservice/predict.py)
   - [x] **Bugfix 27.07.:** `predict_proba` lief am rohen sklearn-Modell mit unsortierten Spalten, während `model.predict()` über pyfunc umsortiert. Sobald die Pydantic-Feldreihenfolge von der Trainingsreihenfolge abwich (cpk, cfk), scheiterte jeder Call mit `ValueError: feature names should match`. `_align_to_signature()` richtet die Spalten jetzt einmal an der Modellsignatur aus und meldet Schema-Drift mit Feldnamen statt einer nichtssagenden sklearn-Meldung
   - [x] **Bugfix 27.07.:** `ForeignKey` in [data_model_fk.py](../webservice/data_model_fk.py) war nicht mit `fk_model` synchron (4 Felder fehlten, 5 überzählig). Ursache: das fk-Trainingsskript wählt Features per **Drop-Liste**, das Pydantic-Schema wurde bei einer Erweiterung nicht nachgezogen
-  - [x] **Schema-Drift-Contract-Test:** [test/test_models/test_model_schema_contract.py](../test/test_models/test_model_schema_contract.py) vergleicht für alle 5 Modelle die MLflow-Signatur gegen die Pydantic-Felder — Menge **und** Reihenfolge, getrennt geprüft. Hat sofort die verbliebene Reihenfolgen-Drift in `CompositePrimaryKey` und `CompositeForeignKey` gefunden (beide korrigiert). Skippt sauber, wenn kein MLflow erreichbar ist
+  - [x] **Schema-Drift-Contract-Test:** [test/test_models/test_model_schema_contract.py](../test/test_models/test_model_schema_contract.py) vergleicht für alle 5 Modelle die MLflow-Signatur gegen die Pydantic-Felder — Menge **und** Reihenfolge, getrennt geprüft. Hat sofort die verbliebene Reihenfolgen-Drift in `CompositePrimaryKey` und `CompositeForeignKey` gefunden (beide korrigiert). Skippt sauber, wenn kein MLflow erreichbar ist; [conftest.py](../test/test_models/conftest.py) fällt für nicht auflösbare Compose-Hostnames automatisch auf `localhost` zurück, sodass derselbe Test auf Host und im Container läuft
+  - [x] **Bugfix 28.07.:** die Confidence war `probabilities[0][1]` — ein hart kodierter Klassenindex, der beim 4-klassigen Normalform-Modell schlicht die Wahrscheinlichkeit von Klasse 1 zurückgab. Jetzt `max(probabilities[0])`, also die Wahrscheinlichkeit der *vorhergesagten* Klasse; korrekt für binär und multiclass ([predict.py:103](../webservice/predict.py#L103))
   - [ ] Contract-Test in CI aktivieren — läuft dort mangels MLflow-Stack aktuell nur als Skip; sinnvoll wäre ein Job, der den Compose-Stack hochfährt
   - [ ] Model Loading beim Startup (heute lazy beim ersten Request → erster Call ist langsam)
-  - [ ] Graceful Model Reload ohne Downtime (Cache-Invalidierung / Reload-Endpoint)
-  - [ ] Model Alias/Version als Env Variable — `alias = "dev"` ist hart kodiert
-  - [ ] `load_dotenv()` aus dem Request-Pfad in den Startup ziehen
+  - [ ] Graceful Model Reload ohne Downtime (Cache-Invalidierung / Reload-Endpoint). Der Startpunkt ist `load_model.cache_clear()` auf dem `@lru_cache`; die README behauptet bereits einen `reload_models()`-Hook, den es nicht gibt
+  - [ ] Model Alias/Version als Env Variable — `alias = "dev"` ist in [predict.py:14](../webservice/predict.py#L14) hart kodiert
+  - [ ] `load_dotenv()` und `mlflow.set_tracking_uri()` aus dem Request-Pfad in den Startup ziehen (laufen heute bei **jedem** Predict)
 
 - [~] **3.3** Dockerfile Optimierung ([webservice/Dockerfile](../webservice/Dockerfile))
   - [x] Minimal Base Image (`python:3.11.13-slim-bookworm`, `libgomp1` für LightGBM)
   - [ ] Multi-stage Build (builder + runtime)
-  - [ ] Layer Caching optimieren (`COPY requirements.txt` vor `COPY . /app`)
+  - [ ] Layer Caching optimieren — `COPY . /app` steht **vor** `pip install`, jede Code-Änderung invalidiert also die komplette Dependency-Installation
   - [ ] Security: Non-root User
-  - [ ] `.dockerignore` erstellen (aktuell wandert u.a. `__pycache__` ins Image)
-  - [ ] `HEALTHCHECK` im Dockerfile
+  - [ ] `.dockerignore` erstellen — existiert **weder** im Root noch in `webservice/` oder `evidently_service/`; aktuell wandern `__pycache__/` und alles andere aus dem Build-Kontext ins Image
+  - [ ] `HEALTHCHECK` im Dockerfile (`model-service` ist der einzige Service in Compose ohne Healthcheck, deshalb kann nichts sinnvoll `depends_on: service_healthy` darauf setzen)
+  - [ ] Gleiches Härtungspaket für [evidently_service/Dockerfile](../evidently_service/Dockerfile) — dort zusätzlich: `COPY . /app` backt die Referenz-CSVs ins Image, weshalb [setup_stack.sh](../scripts/setup_stack.sh) den Service nach jedem Baseline-Bau neu bauen muss. Ein Volume-Mount für `references/` würde diesen Rebuild-Schritt ersatzlos streichen
 
 ---
 
 ### Phase 4: Data Pipeline
 
-- [~] **4.1** dbt Setup
+- [~] **4.1** dbt Setup — **⚠️ faktisch entkernt, Entscheidung überfällig**
   - [x] `dbt-core` + **`dbt-trino`** installiert (statt dbt-duckdb: DuckDB wird als Trino-Katalog angesprochen)
   - [x] dbt Projekt initialisiert: [dbt/dbt_project.yml](../dbt/dbt_project.yml)
   - [x] [profiles.yml](../dbt/profiles.yml) für Trino/LDAP konfiguriert (TODO „change dbt profile" erledigt)
-  - [x] Seeds für Test-Daten: [dbt/seeds/](../dbt/seeds/) (`employee_3.csv`, `employee_not_3.csv`)
-  - [~] ~~Models für Data Transformation~~ — `dbt/models/` ist leer: die Feature-Extraktion wurde bewusst nach Prefect verschoben, weil dbt-trino keine Python-Models unterstützt (siehe Docstring in [pk_fk_pipeline.py](../prefect/pk_fk_pipeline.py))
-  - [ ] Entscheidung dokumentieren: bleibt dbt nur für Seeds/Tests, oder SQL-Staging-Models nachziehen?
-  - [ ] `dbt/logs/` und `dbt/target/` in `.gitignore` aufnehmen (liegen aktuell untracked im Repo)
+  - [x] `target/` (Zeile 76) und `dbt/logs/` (Zeile 225) sind in [.gitignore](../.gitignore)
+  - [x] ~~Models für Data Transformation~~ — bewusst verworfen: die Feature-Extraktion liegt in Prefect, weil dbt-trino keine Python-Models unterstützt (siehe Docstring in [pk_fk_pipeline.py:10](../prefect/pk_fk_pipeline.py#L10))
+  - [x] ~~Seeds für Test-Daten~~ — mit `ad3ccdf` („Removed queue.csv and yaml as dbt seeds") **entfernt**
+  - [ ] **Ist-Zustand: von dbt sind nur noch `dbt_project.yml`, `profiles.yml` und `.user.yml` getrackt.** Keine Models, keine Seeds, keine Tests, kein Aufruf aus Prefect, Compose oder `setup_stack.sh`. Der einzige verbleibende Bezug im Code ist ein erklärender Kommentar. Damit ist dbt derzeit reine Konfiguration ohne Wirkung — eine der beiden Richtungen muss gewählt werden:
+    - **(a) reaktivieren** entlang [workflow_idea.txt](../workflow_idea.txt): `dbt` lädt `tpch.customer` als CSV-Seed nach `new_predict_data` in Trino, das triggert per Watermark-Diff die Streaming-Pipeline. Das gäbe dem Demo-Pfad ein realistisches Ingestion-Frontend und würde „dbt" im Stack ehrlich machen
+      - `workflow_idea.txt` selbst ist **untracked** (aus 1.3 hierher verschoben, weil es kein Aufräum-Thema ist): bei (a) mit-committen, weil es dann die Quelle des Demo-Pfads ist — bei (b) löschen. Ebenso die untracked `dbt/seeds/employee_3.csv`, `dbt/seeds/employee_not_3.csv` und `dbt/test/.gitkeep`, die offenbar in Richtung (a) angelegt wurden, obwohl `ad3ccdf` die Seeds gerade entfernt hatte
+    - **(b) entfernen** und `dbt-core`/`dbt-trino`/`prefect-dbt` aus `pyproject.toml` streichen — drei nicht genutzte Abhängigkeiten samt Transitivem
+  - [ ] Solange (a) nicht umgesetzt ist: die Zeile „Data pipeline | Prefect + dbt" in der README-Stack-Tabelle korrigieren (Prefect ist fertig, dbt nicht vorhanden)
 
 - [~] **4.2** Test Data Generation
-  - [x] dbt Seed-Dateien mit synthetischen Normalform-Daten
   - [x] Schema-/Datendokumentation: [test/test_data/README.md](../test/test_data/README.md), `README_NF.md`, `README_SubjectArea.md`
-  - [x] Datenqualitätstests — als **pytest**-Suite umgesetzt (nicht als dbt tests)
-  - [ ] `dbt/test/` ist leer (nur `.gitkeep`) → entweder dbt-Tests ergänzen oder Verzeichnis entfernen
-  - [ ] Python-Script zur erweiterten Datengenerierung
+  - [x] Datenqualitätstests — als **pytest**-Suite umgesetzt (nicht als dbt tests), läuft gegen die CSVs in [data/](../data/)
+  - [x] Holdout-/Referenz-Generierung für das Monitoring: [build_monitoring_references.py](../evidently_service/build_monitoring_references.py) splittet die gelabelten Trainingsdaten in Referenz + Holdout, stratifiziert je Zielspalte
+  - [ ] ~~dbt Seed-Dateien~~ — entfernt, siehe 4.1
+  - [ ] Python-Script zur erweiterten Datengenerierung (synthetische Tabellen mit bekannten PK/FK/Normalform-Eigenschaften) — bisher hängt alles am eingefrorenen, handgelabelten Datensatz
 
 - [~] **4.3** Prefect Orchestration Setup
   - [x] Prefect 3.7 installiert (`prefect`, `prefect-sqlalchemy`, `prefect-dbt[trino]`)
   - [x] Prefect Server als Service in [docker-compose.yaml](../docker-compose.yaml) (Port 4200)
   - [x] Flow für Batch Prediction: `key-prediction-pipeline` in [pk_fk_pipeline.py](../prefect/pk_fk_pipeline.py)
   - [x] Flow für Normalform-Prediction: `normalform-prediction-pipeline` in [normalform_pipeline.py](../prefect/normalform_pipeline.py) (TODO „predict normalform into prefect flow" erledigt)
+  - [x] **Prefect Deployments + Scheduling erledigt** — [serve_flows.py](../prefect/serve_flows.py) registriert **4 Deployments** über `serve()`, jeweils mit `ConcurrencyLimitConfig` und bewusst gewählter Kollisionsstrategie:
+
+    | Deployment | Auslöser | Strategie | Begründung im Code |
+    |---|---|---|---|
+    | `change-detection-check/streaming` | Event `alligator.new-data.arrived` + Cron `*/15 * * * *` | `CANCEL_NEW` | Ein laufender Snapshot sieht den aktuellen Stand schon; Bursts werden verworfen |
+    | `key-prediction-pipeline/streaming` | Event `alligator.changes.recorded` | `ENQUEUE` | Ein verworfener Lauf könnte `pending_changes` stranden lassen |
+    | `normalform-prediction-pipeline/streaming` | dasselbe Event (parallel) | `ENQUEUE` | dito; keine der beiden Pipelines kann die andere aushungern |
+    | `model-quality-backtest/scheduled` | Cron `17 * * * *` | `CANCEL_NEW` | Überlappende Läufe würden ihre Zeilen im selben Evidently-Fenster vermischen |
+  - [x] Trigger hängen an den Deployments selbst, werden also bei jedem Prozessstart mit-synchronisiert — es gibt keinen separaten „Automations anlegen"-Schritt, der vergessen werden kann
   - [ ] Flow für Batch **Training** — die fünf `task_*_train_and_register.py` laufen weiterhin standalone
-  - [~] ~~Flow für dbt Run orchestrieren~~ — entfällt, solange keine dbt-Models existieren
-  - [ ] Prefect Deployments + Scheduling (kein `serve()`/`deploy()`/Cron im Code)
+  - [x] ~~Flow für dbt Run orchestrieren~~ — entfällt, solange keine dbt-Models existieren (siehe 4.1)
 
 - [~] **4.4** Batch Pipeline
   - [x] Feature-Extraktion aus `information_schema` → `staging.stg_column_features`
+  - [x] **Bugfix 30.07. — `null_ratio_rank` in [pk_fk_pipeline.py:261](../prefect/pk_fk_pipeline.py#L261)**: das Extraktions-SQL rankt nach `null_ratio ASC, ordinal_position ASC`, der Python-Recompute, der diesen Wert nach dem Batching **überschreibt**, sortierte nur nach `ordinal_position`. Damit bedeutete `null_ratio_rank` faktisch „Position in der Tabelle" und `is_least_null_in_table` „ist die erste Spalte" — unabhängig von Nulls. `null_ratio` lag die ganze Zeit im DataFrame, der Sortierschlüssel war schlicht weggefallen. Gefunden beim Schreiben der Tests in 2.2, nicht durch einen Fehler: es hat nie etwas geworfen, das Feature hat nur aufgehört zu bedeuten, was sein Name sagt
+    - Nur `pk_fk_pipeline.py` war betroffen. [normalform_pipeline.py:381](../prefect/normalform_pipeline.py#L381) sortierte bereits korrekt und diente als Referenzimplementierung → **Retrain betrifft die vier Key-Modelle (pk/cpk/fk/cfk) und deren Evidently-Referenzen, nicht das Normalform-Modell**
+    - Zwei Regressionstests in [test_feature_recompute.py](../test/test_pipelines/test_feature_recompute.py) (Ranking nach `null_ratio`, Tie-Break nach Position) — vorher als `xfail(strict=True)` dokumentiert, jetzt aktiv
   - [x] Prediction-Queue + `fetch_new_rows` / `predict_batch` / `store_predictions_to_trino`
   - [x] Aggregation & Speicherung der Normalform-Ergebnisse in eigener Tabelle
   - [x] Error Handling und Retry Logic (`retries=2`, `retry_delay_seconds`)
   - [x] Keine „rows processed"-Meldung mehr bei leeren Predictions (TODO erledigt)
-  - [x] Ergebnis-Export nach Trino; CSV-Beispiel: [data/summary_output_task_3_predict.csv](../data/summary_output_task_3_predict.csv)
+  - [x] Ergebnis-Export nach Trino: `duckdb.prediction_results.key_results` / `nf_results`
   - [ ] Dedizierter CSV-Batch-Prediction-Flow inkl. Input-Validation
   - [ ] Training-Flow mit MLflow Logging (siehe 4.3)
 
-- [~] **4.5** Streaming Pipeline — **umgesetzt am 27.07.2026**, siehe [STREAMING_PIPELINE.md](STREAMING_PIPELINE.md)
-  - [x] Optionen dokumentiert: [STREAMING_PREDICTION_APPROACHES.md](STREAMING_PREDICTION_APPROACHES.md)
-  - [x] Entscheidung: Push-Webhook **+** Watermark-Polling als Sicherheitsnetz, Prefect Events als Transport
+- [~] **4.5** Streaming Pipeline — **umgesetzt am 27.07.2026**
+  - [x] Optionen abgewogen und entschieden: Push-Webhook **+** Watermark-Polling als Sicherheitsnetz, Prefect Events als Transport (die Begründung steht heute nur noch im Modul-Docstring von [serve_flows.py](../prefect/serve_flows.py) — das Entscheidungsdokument wurde nie committet, siehe 7.2)
   - [x] ~~Message Queue Setup (RabbitMQ/Kafka/Redis)~~ — verworfen: Prefect Events + `duckdb.staging.pending_changes` erfüllen die Aufgabe ohne neuen Service; echte CDC ist auf DuckDB-über-Trino ohnehin nicht möglich
   - [x] FastAPI Webhook: `POST /events/new-data` in [app.py](../webservice/app.py) — publiziert per REST, ohne Prefect-SDK im Model-Image
   - [x] Change Detector: [change_detector.py](../prefect/change_detector.py) — diffed `row_count`/`column_count` gegen `duckdb.staging.source_watermarks`
@@ -317,10 +364,11 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] `prefect`-Service ins `ml-services-monitoring`-Netz geholt und um den `serve()`-Runner erweitert (Server + Flow-Runner in einem Container)
   - [x] Prefect-Serverstate in Postgres statt SQLite: eigene DB `prefect` neben `mlflow_db`, angelegt von [ensure_database.py](../prefect/ensure_database.py) — überlebt jetzt `docker compose down`
   - [x] `prefect`-DB ins stündliche S3-Backup aufgenommen: eigener Service `prefect_postgres_backup` (Prefix `prefect_db_backups`, 7 Tage Retention) — das Image sichert nur je eine DB pro Container
-  - [ ] `prefect/Dockerfile` bauen, um das `pip install` beim Containerstart zu ersetzen
-  - [ ] Event Logging zu Monitoring (Prometheus-Metriken für empfangene Events, Detection-Latenz, Backlog-Tiefe)
+  - [ ] **`prefect/Dockerfile` bauen** — der Service installiert `asyncpg`, `sqlalchemy`, `trino`, `pandas`, `python-dotenv`, `requests` beim Containerstart per `pip install`. Deshalb braucht der Healthcheck `start_period: 300s`, und jeder `docker compose up` zahlt die Installation erneut. Die Versionen sind hier ein zweites Mal gepinnt, unabhängig von `pyproject.toml` → Driftquelle
+  - [ ] Event Logging zu Monitoring (Prometheus-Metriken für empfangene Events, Detection-Latenz, Backlog-Tiefe) — Prefect ist **kein** Scrape-Target in [prometheus.yaml](../prometheus/prometheus.yaml), die Streaming-Pipeline ist damit die einzige Komponente ohne Telemetrie
   - [ ] Housekeeping-Job: abgeschlossene `pending_changes`-Zeilen nach N Tagen löschen
   - [ ] Automatisierte Tests für Detector und Claim-Logik (bisher nur sqlglot-Parse + TestClient-Check)
+  - [ ] **Noch nie end-to-end gegen echte Trino-Daten gelaufen** — offen seit dem letzten Abgleich; `workflow_idea.txt` skizziert den Demo-Pfad dafür (siehe 4.1a)
 
 ---
 
@@ -332,8 +380,8 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Metrics Logging (Accuracy, Precision, Recall, F1 — je train/test)
   - [x] Alle vier Kandidaten (RF, XGB, jeweils Baseline + RandomizedSearch) werden geloggt, bester per `f1_score` registriert
   - [x] MLflow-Backend produktionsnah: Postgres als Backend-Store, MinIO/S3 als Artifact-Store, stündliches Postgres-Backup nach S3
-  - [~] Artifacts: Confusion Matrix als `mlflow.log_dict` ✔ — **Feature Importance Plot fehlt**
-  - [ ] Dataset Tracking mit `mlflow.data` / `log_input`
+  - [~] Artifacts: Confusion Matrix als `mlflow.log_dict` ✔ in allen 5 Scripts — **Feature Importance Plot fehlt** (in allen 5)
+  - [ ] Dataset Tracking mit `mlflow.data` / `log_input` — würde zugleich die Frage „gegen welchen Datensatz wurde diese Version trainiert?" beantworten, die der Backtest in 6.5 implizit stellt
 
 - [~] **5.2** MLflow Model Registry
   - [x] Model Registration nach Training (`mlflow.register_model`)
@@ -351,14 +399,15 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Model Loading Funktion mit Fallback (letzte funktionierende Version)
   - [ ] Blue-Green Deployment Vorbereitung
 
-- [ ] **5.4** Retraining Path  *(offen — TODO „Automatic retraining?")*
+- [ ] **5.4** Retraining Path  *(offen — TODO „Automatic retraining?")* — **die größte verbleibende Lücke im MLOps-Kreislauf**
   - [ ] Manueller Retraining Trigger (API Endpoint `/model/retrain`)
   - [ ] Prefect Flow für Retraining (kapselt die `task_*_train_and_register.py`)
   - [ ] Retraining mit neuen Daten aus Trino
   - [ ] Auto-Register zu MLflow nach Retraining (Logik existiert bereits in den Scripts → wiederverwenden)
   - [ ] Model Comparison (Old vs New) vor Alias-Umzug
   - [ ] Manuelle Promotion nach `prod`
-  - [ ] Trigger-Kriterium festlegen (Zeitplan vs. Evidently-Drift-Signal)
+  - [ ] Trigger-Kriterium festlegen — **das Signal existiert jetzt**: die `evidently_*`-Gauges liefern Drift pro Track, und `model-quality-backtest` liefert stündlich F1 der *aktuell ausgelieferten* Version. Ein Prometheus-Alert auf einen F1-Einbruch oder einen anhaltend hohen `drifted_share` kann den Retraining-Flow anstoßen
+  - [ ] Baseline-Invalidierung mitdenken: nach einem Retraining beschreibt die Evidently-Referenz die *alte* Modellversion. [setup_stack.sh](../scripts/setup_stack.sh) löst das für den manuellen Weg (`--retrain` erzwingt `REBUILD_REFERENCE`); ein automatisierter Retraining-Flow muss dieselbe Kopplung herstellen, sonst misst das Monitoring danach den Versionswechsel statt der Daten
 
 - [ ] **5.5** CI/CD für Modelle
   - [ ] GitHub Action für Model Training
@@ -372,85 +421,141 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - [~] **6.1** Prometheus Service Monitoring
   - [x] `prometheus-fastapi-instrumentator` aktiviert, `/metrics` exponiert
   - [x] [prometheus/prometheus.yaml](../prometheus/prometheus.yaml) scraped `prometheus`, `model-service`, `evidently_service`
-  - [ ] Custom Metrics hinzufügen:
+  - [x] Der Evidently-Service exportiert eigene Gauges über `prometheus_client` + `DispatcherMiddleware` auf `/metrics` — inkl. `evidently_reference_dataset_hash`, das [setup_stack.sh](../scripts/setup_stack.sh) als Beweis auswertet, dass der Service mit einer nutzbaren Baseline hochgekommen ist
+  - [ ] Custom Metrics im Model-Service hinzufügen — **existieren nicht**; die README behauptet ein `webservice/metrics.py`, das nie geschrieben wurde:
     - [ ] Prediction Counter (by model type: pk/cpk/fk/cfk/normalform)
     - [ ] Prediction Duration Histogram (Model-Inferenz getrennt vom HTTP-Overhead)
     - [ ] Error Counter
-    - [ ] Model Version Gauge
-  - [ ] Prefect-Flows als Scrape-Target oder Pushgateway anbinden
+    - [ ] Model Version Gauge (macht Rollbacks in Grafana sichtbar und ist Voraussetzung für 5.3)
+  - [ ] Prefect-Flows als Scrape-Target oder Pushgateway anbinden (siehe 4.5)
 
 - [~] **6.2** Golden Signals implementieren
-  - [x] **Latency**: `http_request_duration_highr_seconds` (p95-Alert aktiv)
-  - [x] **Traffic**: `http_requests_total` (No-Traffic-Alert aktiv)
-  - [x] **Errors**: 4xx-/5xx-Rate-Alerts aktiv
+  - [x] **Latency**: `http_request_duration_highr_seconds` (p95-Alert aktiv, Panel + Perzentil-Panel im Dashboard)
+  - [x] **Traffic**: `http_requests_total` (No-Traffic-Alert aktiv, Rate je Endpoint im Dashboard)
+  - [x] **Errors**: 4xx-/5xx-Rate-Alerts aktiv, Error-Rate-Panel im Dashboard
   - [~] **Saturation**: nur `process_resident_memory_bytes` — CPU und Disk fehlen (z.B. node-exporter/cAdvisor ergänzen)
 
-- [ ] **6.3** Grafana Dashboards  *(offen — TODO „Graphana Dashboard")*
-  - [x] Grafana-Container in Compose inkl. Volume-Mounts für `provisioning/` und `dashboards/`
-  - [ ] **`grafana/provisioning/` und `grafana/dashboards/` sind leer** → Datasource- und Dashboard-Provisioning anlegen
-  - [ ] Dashboard für Golden Signals
-  - [ ] Dashboard für Model Performance / Prediction-Verteilung
-  - [ ] Dashboard für Data Pipeline (Queue-Länge, verarbeitete Zeilen)
+- [~] **6.3** Grafana Dashboards — **weitgehend erledigt** (TODO „Graphana Dashboard" abgearbeitet)
+  - [x] Grafana-Container in Compose inkl. Volume-Mounts, eigenem Branding (`grafana/img/`) und Admin-Credentials aus `.env` statt `admin/admin`
+  - [x] Provisioning angelegt: [datasources.yaml](../grafana/provisioning/datasources/datasources.yaml) (Prometheus, `uid: prometheus`, default) und [grafana_dashboards.yaml](../grafana/provisioning/dashboards/grafana_dashboards.yaml) (File-Provider, `allowUiUpdates: false`)
+  - [x] **5 Dashboards** in [grafana/dashboards/](../grafana/dashboards/):
+
+    | Dashboard | UID | Inhalt |
+    |---|---|---|
+    | Model Service - Golden Signals | `model-service-golden-signals` | 10 Panels: Targets up, Request-Rate, 5xx-Rate, p95, Rate/Latenz je Endpoint, Perzentile, SLO „unter 500ms", Resident Memory |
+    | Key Predict Data Drift | `evidently-key-drift` | Prediction-Drift-p-Value, drifted columns/share, Missing predictions, p-Value je Spalte — Modell-Dropdown (pk/cpk/fk/cfk) |
+    | Key Model Performance | `evidently-model-quality` | F1/Precision/Recall/Log-Loss, jeweils current und current-vs-reference — Modell-Dropdown |
+    | Normalform Predict Data Drift | `evidently-normalform-drift` | wie oben, ohne Dropdown, plus Macro-F1/Accuracy-Panels aus dem Backtest |
+    | Normalform Model Performance | `evidently-normalform-quality` | Macro F1/Precision/Recall + Quality-Overview |
+
+    Normalform hat ein eigenes Dashboard-Paar, weil das Modell multiclass ist und die Metriken macro-averaged sind — eine gemeinsame Variable mit den binären Modellen würde inkompatible Serien in dieselben Panels mischen
+  - [ ] Dashboard für Data Pipeline (Queue-Länge, `pending_changes`-Tiefe, verarbeitete Zeilen, Detection-Latenz) — braucht zuerst die Prefect-Metriken aus 6.1
   - [ ] Dashboard für MLflow Experiments
+  - [ ] Panel für Model Version / Prediction-Klassenverteilung — braucht die Custom Metrics aus 6.1
 
 - [~] **6.4** Alerting
-  - [x] [prometheus/alert.yaml](../prometheus/alert.yaml) mit 7 Regeln in 2 Gruppen:
-    - [x] High Error Rate (5xx >5% / 4xx >25%)
-    - [x] High Latency (p95 >500ms)
-    - [x] Low Traffic + `InstanceDown` + `ModelServiceUnreachable`
-    - [x] High Memory Usage (>1.5GB)
+  - [x] [prometheus/alert.yaml](../prometheus/alert.yaml) mit **7 Regeln** in 2 Gruppen (`service-health`, `golden-signals`):
+    - [x] `HighServerErrorRate` (5xx >5%) / `HighClientErrorRate` (4xx >25%)
+    - [x] `HighRequestLatencyP95` (>500ms)
+    - [x] `NoTrafficReceived` + `InstanceDown` + `ModelServiceUnreachable`
+    - [x] `HighMemoryUsage` (>1.5GB)
   - [x] Alertmanager konfiguriert und an Prometheus angebunden ([alertmanager.yml](../alertmanager/alertmanager.yml), UI auf :9093)
   - [ ] Notification Channels — Receiver `default` ist bewusst leer (null receiver); Slack/E-Mail via `*_file`-Secrets nachziehen
-  - [ ] Einen Alert end-to-end testen und das Ergebnis dokumentieren
+  - [ ] Einen Alert end-to-end testen und das Ergebnis dokumentieren *(bleibt das einzige „mindestens 1 funktionaler Alert"-Kriterium, das noch offen ist)*
+  - [ ] Modell-Alerts auf die Evidently-Gauges legen (F1-Einbruch, anhaltender `drifted_share`) — liefert gleichzeitig das Trigger-Signal für 5.4
+  - [ ] README korrigieren: dort stehen „11 alert rules", es sind 7
 
-- [ ] **6.5** Evidently Model Monitoring
+- [~] **6.5** Evidently Model Monitoring — **vom Tutorial-Stand auf produktiv umgebaut (28.07.2026)**
   - [x] Evidently-Service läuft als Container ([evidently_service/](../evidently_service/), Port 8085) und exponiert `/metrics`
-  - [ ] **Service noch auf Tutorial-Daten**: [config.yaml](../evidently_service/config.yaml) und `green_taxi_data/reference.csv` gehören zum Taxi-Beispiel
-  - [ ] Reference Dataset aus den echten PK/FK/Normalform-Features erzeugen
-  - [ ] `column_mapping` auf die tatsächlichen Feature-Namen umstellen
-  - [ ] Monitoring-Call in [app.py](../webservice/app.py) reaktivieren (Block ist auskommentiert)
-  - [ ] Input Drift Detection + Prediction Quality Monitoring
-  - [ ] Evidently-Metriken in Grafana visualisieren
-  - [ ] Scheduled Reports mit Prefect
+  - [x] ~~Tutorial-Daten~~ **ersetzt**: keine `green_taxi_data` mehr. [config.yaml](../evidently_service/config.yaml) definiert **5 Tracks** (`pk_columns`, `cpk_columns`, `fk_columns`, `cfk_columns`, `nf_columns`), je mit eigener `DataDefinition`, Referenz, Report und rollierendem Fenster
+  - [x] Reference Datasets aus den echten Features: [build_monitoring_references.py](../evidently_service/build_monitoring_references.py) leitet die Feature-Listen **aus den Pydantic-Request-Modellen** ab und scored die gelabelten Zeilen durch die live Endpoints. Damit gibt es keine dritte Stelle, an der ~35 Spaltennamen gepflegt werden müssten
+  - [x] Kein `column_mapping` mehr nötig: numerisch/kategorial wird aus der Referenz-CSV inferiert (bool und Numerik mit ≤2 Werten → kategorial), `force_categorical` überschreibt Ausnahmen. Der Service loggt beim Start, welchen Split er inferiert hat
+  - [x] Monitoring-Call in [app.py](../webservice/app.py) — nicht nur reaktiviert, sondern über [monitoring_client.py](../webservice/monitoring_client.py) + `BackgroundTasks` sauber gebaut: Post nach dem Response, `MONITORING_ENABLED`-Schalter, 2s-Timeout, **jede** Exception wird geschluckt (Log auf `debug`, damit ein toter Monitor nicht jede Prediction zumüllt)
+  - [x] **Input Drift Detection** läuft aus dem Serving-Pfad (braucht keine Labels): `POST /iterate/<track>`, Fenster 60 Zeilen, Report alle 30 — bewusst nicht pro Request, sonst würde jede Prediction einen Vollreport über alle Spalten auslösen
+  - [x] **Prediction Quality Monitoring** über [model_quality_backtest.py](../prefect/model_quality_backtest.py): F1/Precision/Recall brauchen Ground Truth, die es zur Predict-Zeit nicht gibt. Der Flow spielt stündlich die **Holdout**-Hälfte der gelabelten Daten durch die live Modelle (`/iterate_classification/<track>`) und beantwortet damit die engere, aber ehrliche Frage „scoren die gerade ausgelieferten Versionen noch wie ihre Baselines?"
+  - [x] Stratifizierte Stichproben im Backtest, weil `composite_fk_target` nur ~2% positiv ist und ein einklassiges Fenster sonst eine irreführende Null exportieren würde — der Service überspringt solche Fenster bewusst
+  - [x] Evidently-Metriken in Grafana visualisiert (4 der 5 Dashboards, siehe 6.3)
+  - [x] Scheduled Reports mit Prefect: `model-quality-backtest/scheduled`, Cron `17 * * * *`
+  - [x] Report-Introspektion per HTTP: `GET /tracks` (was wird überwacht), `GET /report/<track>`, `GET /classification_report/<track>`
+  - [ ] **`MONITORED_TRACKS` in [setup_stack.sh](../scripts/setup_stack.sh) listet nur 4 Tracks** (`pk cpk fk cfk`). `build_monitoring_references.py` wird ohne `--only` aufgerufen und baut daher alle 5 — aber die Existenzprüfung und die Accuracy-Ausgabe übergehen `nf_columns`. Ein fehlender NF-Baseline-Build würde unbemerkt durchlaufen. Die Meldungen „all 4 predict endpoints" / „4 tracks" sind entsprechend falsch
+  - [ ] Referenzen und Holdouts sind gitignored (`evidently_service/references/`, `data/holdouts/`) und müssen lokal erzeugt werden → in der README als Pflichtschritt dokumentieren, nicht nur im Setup-Skript
+  - [ ] Log Loss für `nf_columns` bleibt bewusst weg (`/predict_normalform` gibt nur `max(predict_proba)` zurück, was für 4 Klassen nicht in eine Verteilung zurückgerechnet werden kann) → falls das Metrik-Loch stört: den Endpoint um die vollen Klassenwahrscheinlichkeiten erweitern
+  - [ ] Das Drift-Fenster liegt im Prozessspeicher des Evidently-Service → ein Restart verwirft alle laufenden Fenster. Für Demos ausreichend, für Dauerbetrieb persistieren
 
 - [ ] **6.6** Logging & Tracing
-  - [ ] Structured Logging (JSON) — Webservice nutzt aktuell `print()`/`traceback.print_exc()`
+  - [ ] Structured Logging (JSON) — Webservice nutzt weiterhin `print()`/`traceback.print_exc()`; nur `monitoring_client.py` verwendet bereits `logging`
   - [ ] Log Aggregation (optional: Loki)
-  - [ ] Correlation IDs für Request Tracing
+  - [ ] Correlation IDs für Request Tracing — mit vier ereignisgekoppelten Deployments wäre eine ID vom Webhook über den Detector bis in beide Pipelines inzwischen echter Mehrwert, nicht mehr nur Kosmetik
 
 ---
 
 ### Phase 7: Betrieb, Doku & offene Entscheidungen *(neu)*
 
 - [~] **7.1** Developer Experience
-  - [x] Start-up-Script: [scripts/setup_stack.sh](../scripts/setup_stack.sh) — Preflight, Compose mit Health-Waits, Training (idempotent), Registry- und Schema-Verifikation, Smoke-Test aller 5 Endpoints, optional Streaming via `--with-streaming`
-  - [x] `.env.template` / `.env.example` vorhanden
-  - [ ] README um „Quickstart in 5 Minuten" ergänzen
+  - [x] Start-up-Script: [scripts/setup_stack.sh](../scripts/setup_stack.sh) — inzwischen **7 Schritte**: Preflight, Compose mit Health-Waits, Training (idempotent), Registry- und Schema-Verifikation, Smoke-Test aller 5 Endpoints, **Evidently-Baselines inkl. Rebuild des Service**, optional Streaming via `--with-streaming`
+  - [x] Skript auf Englisch übersetzt und Windows-tauglich gemacht (`3c50608`: kein `${PWD}` in Volume-Specs mehr, weil Git Bash es zu `C:/…` umschreibt und Compose die Doppelpunkte fehldeutet)
+  - [x] Abschluss-Summary listet alle UIs, Dashboard-Pfade und die Monitoring-Besonderheiten (welche Metrik woher kommt, wie man den Backtest sofort auslöst)
+  - [x] `.env.template` entfernt — [.env.example](../.env.example) ist die einzige Vorlage (`3404279`)
+  - [x] README hat einen Quickstart (Environment → Train → Stack → Predict)
+  - [ ] Zwei Abweichungen zwischen `.env.example` und dem tatsächlich gelesenen Environment: `.env.example` nennt `MONITORING_URL`, der Code liest `MONITORING_BASE_URL` ([monitoring_client.py](../webservice/monitoring_client.py), [model_quality_backtest.py](../prefect/model_quality_backtest.py)). Nicht genutzte Variablen aus der Vorlage streichen, genutzte ergänzen (`MONITORING_ENABLED`, `MONITORING_TIMEOUT_SECONDS`, `MODEL_API_URL`, `HOLDOUT_DIR`)
+  - [ ] Die Schritt-Überschriften 4 und 7 im Setup-Skript sind noch deutsch/gemischt („Check Registry und Pydantic schema contract prüfen", „Streaming-Trigger")
+  - [ ] `docker-compose.yaml` und `scripts/setup_stack.sh` sind uncommitted (Holdout-Kommentar bzw. Summary-Text) → committen
 
-- [ ] **7.2** Dokumentation aktuell halten
-  - [ ] [flowchart.md](flowchart.md) an den Ist-Stand anpassen (Postgres/MinIO-Backend, Prefect statt dbt-Python-Models, zwei Pipelines)
-  - [ ] Neue Docs in README verlinken: [FEATURE_PIPELINE_README.md](FEATURE_PIPELINE_README.md), [TRAIN_AND_PREDICT_FLOW.md](TRAIN_AND_PREDICT_FLOW.md), [NORMALFORM_PREDICTION.md](NORMALFORM_PREDICTION.md), [PYDANTIC_PREFECT_DBT_FIX.md](PYDANTIC_PREFECT_DBT_FIX.md), [INCREMENTAL_FEATURE_PROCESSING.md](INCREMENTAL_FEATURE_PROCESSING.md), [STREAMING_PREDICTION_APPROACHES.md](STREAMING_PREDICTION_APPROACHES.md)
-  - [ ] Untracked Doku und `dbt/seeds/` committen
+- [ ] **7.2** Dokumentation aktuell halten — **🔴 der schlechteste Bereich im Projekt**
+  - [ ] **Die README beschreibt Dateien und Zahlen, die es nicht gibt.** Belegte Abweichungen:
+
+    | README sagt | Realität |
+    |---|---|
+    | `webservice/metrics.py` mit Model-Metriken | existiert nicht (siehe 6.1) |
+    | `grafana/dashboards/golden-signals.json` | heißt `model_service_golden_signals.json` |
+    | `evidently_service/build_reference.py` | heißt `build_monitoring_references.py` |
+    | `test/test_api/` deckt die API-Oberfläche ab | existiert nicht; es gibt `test/test_data/` und `test/test_models/` |
+    | „11 alert rules" | 7 Regeln |
+    | „pytest with coverage" / `pytest --cov-report=term-missing` | `pytest-cov` ist nicht installiert, der Befehl schlägt fehl |
+    | „Data pipeline · Prefect + dbt · 🔜 planned" | Prefect-Pipelines laufen inkl. 4 Deployments; dbt hat keine Models/Seeds |
+    | „Retraining · `reload_models()` hook in place" | kein solcher Hook im Code |
+    | „Model monitoring · input drift" | untertrieben: 5 Tracks, Drift **und** Classification Quality |
+
+    Das ist gefährlicher als eine lückenhafte README: wer sie liest, sucht nach Dateien, die nie existierten, und hält Fertiges für geplant.
+  - [ ] **7 Begleit-Dokumente wurden nie committet und liegen nicht mehr im Arbeitsverzeichnis**: `STREAMING_PIPELINE.md`, `STREAMING_PREDICTION_APPROACHES.md`, `FEATURE_PIPELINE_README.md`, `TRAIN_AND_PREDICT_FLOW.md`, `NORMALFORM_PREDICTION.md`, `PYDANTIC_PREFECT_DBT_FIX.md`, `INCREMENTAL_FEATURE_PROCESSING.md`. Sie existieren nur noch in einem Stash (`9fbb699`). `documentation/` enthält heute ausschließlich diese Datei und `flowchart.md` — alle Verweise darauf in früheren Planversionen waren tote Links. Entweder aus dem Stash zurückholen und committen oder die Inhalte in README/Modul-Docstrings überführen und die Dokumente als erledigt abhaken
+  - [ ] [flowchart.md](flowchart.md) an den Ist-Stand anpassen (Postgres/MinIO-Backend, Prefect statt dbt-Python-Models, zwei Prediction-Pipelines, Evidently mit 5 Tracks, Backtest-Flow)
+  - [ ] Monitoring-Architektur dokumentieren — die entscheidende Trennung „Drift ohne Labels aus dem Serving-Pfad **vs.** Classification Quality mit Labels aus dem Backtest" steht heute nur in Docstrings und in der Compose-/Setup-Ausgabe
 
 - [ ] **7.3** Offene Entscheidungen
-  - [ ] Anderer Katalog als DuckDB für Queue und `prediction_results`? (Persistenz/Concurrency bei parallelen Flows)
-  - [ ] Wo werden Features final extrahiert — Prefect (Ist-Zustand) oder zurück nach dbt/SQL?
-  - [ ] Klären: `min_value` / `max_value` werden nur zum Gruppieren und für Traceability genutzt, nie als Feature — korrekt so? Falls ja, in [FEATURE_PIPELINE_README.md](FEATURE_PIPELINE_README.md) festhalten
-  - [~] Inkrementelle Feature-Verarbeitung — Design steht, Umsetzung zurückgestellt (siehe [INCREMENTAL_FEATURE_PROCESSING.md](INCREMENTAL_FEATURE_PROCESSING.md))
+  - [ ] Anderer Katalog als DuckDB für Queue und `prediction_results`? (Persistenz/Concurrency bei parallelen Flows — mit zwei gleichzeitig getriggerten Pipelines jetzt akuter als vorher)
+  - [ ] Wo werden Features final extrahiert — Prefect (Ist-Zustand) oder zurück nach dbt/SQL? Hängt an der dbt-Grundsatzentscheidung in 4.1
+  - [ ] Klären: `min_value` / `max_value` werden nur zum Gruppieren und für Traceability genutzt, nie als Feature — korrekt so? (Der Backtest listet sie konsistent unter `IDENTITY_COLUMNS`, was dafür spricht.) Ergebnis festhalten
+  - [~] Inkrementelle Feature-Verarbeitung — laut Projektnotizen mit dem Streaming-Trigger am 27.07. umgesetzt; History-Erhalt ist dabei Randbedingung. Ist-Stand gegen das ursprüngliche Design abgleichen und den Punkt schließen
+  - [ ] Referenz-Datenhaltung: `evidently_service/references/` und `data/holdouts/` sind gitignored, aber die Baseline ist Teil der Monitoring-Aussage. Reproduzierbar aus dem Skript (heute) oder versioniert in MinIO (belastbarer)?
 
 ---
 
 ### Nächste 5 sinnvolle Schritte
 
-1. **Streaming end-to-end gegen Trino testen** (4.5) — Code steht, aber noch nie gegen die echte Datenbank gelaufen; erste echte Tabelle laden und den Lauf beobachten.
-2. **Grafana-Dashboards provisionieren** (6.3) — die Metriken und Alerts liegen bereits an, es fehlt nur die Visualisierung.
-3. **CI reparieren und härten** (2.1/2.3) — `dev`-Branch triggern, `[dev]`-Extra anlegen, `pytest --cov` aktivieren.
-4. **Docker-Build-Workflow + Dockerfile-Härtung** (2.4/3.3) — Multi-stage, non-root, `.dockerignore`, Push zu GHCR.
-5. **Retraining-Flow in Prefect** (5.4) — die Trainings-Scripts sind bereits registrierungsfähig, sie müssen nur orchestriert werden.
+1. **README auf den Ist-Stand bringen** (7.2) — sie ist das Einstiegsdokument und beschreibt derzeit ein anderes Projekt: nicht existierende Dateien, falsche Zahlen, Fertiges als „geplant" markiert. Billigste Korrektur mit dem größten Effekt.
+2. **`dev` → `main` mergen und CI-Trigger geradeziehen** (2.3) — `main` steht auf dem Initial Commit, der Workflow horcht auf `develop`. Solange beides so ist, schützt kein Gate irgendetwas.
+3. **Retraining-Flow in Prefect** (5.4) — der letzte fehlende Bogen im Kreislauf. Trainings-Scripts sind registrierungsfähig, das Trigger-Signal liefert jetzt der Quality-Backtest; nur Orchestrierung plus Baseline-Invalidierung fehlen.
+4. **Custom Model-Metriken + Coverage** (6.1/2.1) — `pytest-cov` und `[dev]`-Extra nachziehen (reparieren zwei kaputte CI-Steps), Prediction-Counter/Duration/Version-Gauge ergänzen (schalten die letzten Grafana-Panels frei).
+5. **Docker-Build-Workflow + Dockerfile-Härtung** (2.4/3.3) — Multi-stage, non-root, `.dockerignore`, `HEALTHCHECK`, Push zu GHCR. Für `evidently_service` zusätzlich `references/` mounten statt einbacken; das streicht einen Rebuild-Schritt aus dem Setup.
+
+**Danach, mit klarem Vorlauf:** dbt-Grundsatzentscheidung (4.1), `prefect/Dockerfile` (4.5), Streaming end-to-end gegen echte Trino-Daten (4.5), Alert-Receiver + ein End-to-End-Test (6.4).
 
 ---
 
 ## 3. ARBEITSPAKETE MIT TEILSCHRITTEN
+
+> **Hinweis:** Die Abschnitte 3 bis 9 sind der *ursprüngliche* Plan vom Projektstart und
+> werden absichtlich unverändert gelassen — sie dokumentieren die Ausgangsannahmen.
+> Der verbindliche Ist-Stand steht in **Abschnitt 2**. Wo beides auseinandergeht, gilt
+> Abschnitt 2. Die größten bewussten Abweichungen:
+>
+> - **Arbeitspaket 6** plant RabbitMQ/Redis; umgesetzt wurden Prefect Events + Watermark-Diff
+>   ohne zusätzlichen Service (echte CDC ist auf DuckDB-über-Trino nicht möglich).
+> - **Arbeitspaket 4** plant dbt-Models; die Feature-Extraktion liegt in Prefect, weil
+>   dbt-trino keine Python-Models unterstützt.
+> - **Arbeitspaket 11** plant Evidently mit *einem* Referenzdatensatz; umgesetzt sind 5 Tracks
+>   mit getrennten Drift- und Classification-Quality-Pfaden.
+> - MLflow **Stages** (Arbeitspaket 7/8) sind in MLflow 3.x deprecated → das Projekt nutzt **Aliase**.
 
 ### ARBEITSPAKET 1: Foundation (Woche 1)
 
@@ -811,65 +916,80 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 
 ## 5. TECHNOLOGIE-STACK ÜBERSICHT
 
-| Kategorie | Technologie | Zweck |
-|-----------|-------------|-------|
-| **Code Quality** | Ruff | Linting & Formatting |
-| **Testing** | pytest, pytest-cov | Unit & Integration Tests |
-| **CI/CD** | GitHub Actions | Automation Pipeline |
-| **Container** | Docker, Docker Compose | Containerization |
-| **Registry** | GitHub Container Registry | Image Storage |
-| **API** | FastAPI, Pydantic | Model Service |
-| **Orchestration** | Prefect | Workflow Management |
-| **Data Transform** | dbt | Data Pipeline |
-| **Messaging** | RabbitMQ/Redis | Event Streaming |
-| **ML Tracking** | MLflow | Experiment Tracking & Registry |
-| **Service Monitoring** | Prometheus | Metrics Collection |
-| **Visualization** | Grafana | Dashboards & Alerts |
-| **Model Monitoring** | Evidently | Drift & Quality |
-| **Logging** | Python logging, structlog | Application Logs |
+*Ist-Stand, Stand 29. Juli 2026 — abweichend vom ursprünglichen Plan, wo vermerkt.*
+
+| Kategorie | Technologie | Zweck | Status |
+|-----------|-------------|-------|--------|
+| **Code Quality** | Ruff `0.16.0` + pre-commit + gitleaks | Linting, Formatting, Secret-Scan | ✅ |
+| **Testing** | pytest (56 Tests) | Datenqualität + Schema-Contract | 🟡 `pytest-cov`/`pytest-mock` fehlen |
+| **CI/CD** | GitHub Actions | Lint + Test | 🟡 Trigger-Branch falsch, Coverage-Steps ins Leere |
+| **Container** | Docker, Docker Compose (11 Services) | Containerization | 🟡 nicht gehärtet, kein `.dockerignore` |
+| **Registry** | GitHub Container Registry | Image Storage | ❌ offen, Compose baut lokal |
+| **API** | FastAPI, Pydantic | Model Service, 5 typisierte Endpoints + Event-Webhook | ✅ |
+| **Orchestration** | Prefect 3 | 4 Deployments: Detector, 2 Prediction-Pipelines, Quality-Backtest | ✅ |
+| **Data Transform** | ~~dbt~~ | war für Feature-Extraktion geplant | ❌ entkernt, Entscheidung offen (4.1) |
+| **Messaging** | ~~RabbitMQ/Redis~~ → **Prefect Events** | Event-Transport ohne zusätzlichen Service | ✅ bewusste Abweichung |
+| **ML Tracking** | MLflow 3 + Postgres + MinIO/S3 | Experiment Tracking & Registry (Aliase statt Stages) | ✅ |
+| **Service Monitoring** | Prometheus | Golden Signals, 7 Alert-Regeln | 🟡 Custom Model-Metriken fehlen |
+| **Alerting** | Alertmanager | Routing, Dedup | 🟡 Receiver ist null |
+| **Visualization** | Grafana 13 | 5 provisionierte Dashboards | 🟢 Pipeline-/MLflow-Dashboard fehlt |
+| **Model Monitoring** | Evidently | 5 Tracks: Drift (serving) + Classification Quality (Backtest) | ✅ |
+| **Storage** | Trino/DuckDB, Postgres, MinIO | Quelldaten & Ergebnisse, State, Artefakte | ✅ |
+| **Backup** | postgres-backup-s3 (2 Instanzen) | `mlflow_db` (30 T) + `prefect` (7 T) nach MinIO | ✅ |
+| **Logging** | `print()` | Application Logs | ❌ Structured Logging offen (6.6) |
 
 ---
 
 ## 6. ERFOLGSKRITERIEN
 
+*Abgleich zum 29. Juli 2026 — ✅ erfüllt · 🟡 teilweise · ❌ offen.*
+
 ### Code Quality
 
-- ✅ Ruff läuft ohne Errors
-- ✅ 100% der Funktionen haben Type Hints
-- ✅ >70% Test Coverage
+- ✅ Ruff läuft ohne Errors (Lint + Format, in CI **und** pre-commit)
+- ✅ Type Hints in Training-Scripts, Prefect-Flows und Webservice
+- ❌ >70% Test Coverage — Coverage wird gar nicht gemessen (`pytest-cov` fehlt)
 
 ### CI/CD
 
-- ✅ Alle Commits werden getestet
-- ✅ Docker Images werden automatisch gebaut
-- ✅ Tests müssen grün sein vor Merge
+- 🟡 Alle Commits werden getestet — Feature-Branches ja, `dev` selbst nicht (Trigger horcht auf `develop`)
+- ❌ Docker Images werden automatisch gebaut — kein `docker-build.yml`, kein GHCR-Push
+- ❌ Tests müssen grün sein vor Merge — `main` steht auf dem Initial Commit, PRs laufen nach `dev` ohne CI
 
 ### Data Pipeline
 
-- ✅ Batch Training läuft automatisch
-- ✅ Streaming Pipeline verarbeitet Events
-- ✅ dbt generiert Test-Daten
+- ❌ Batch Training läuft automatisch — die 5 Trainings-Scripts laufen standalone
+- 🟡 Streaming Pipeline verarbeitet Events — Event-Kette und Deployments stehen, aber noch nie gegen echte Trino-Daten gelaufen
+- ❌ dbt generiert Test-Daten — Seeds wurden entfernt, dbt ist ohne Models/Seeds
 
 ### MLOps
 
-- ✅ Alle Experimente in MLflow geloggt
-- ✅ Produktions-Models im Registry
-- ✅ Retraining manuell auslösbar
+- ✅ Alle Experimente in MLflow geloggt (5 Modelle × 4 Kandidaten, Metriken/Signatur/Input-Example)
+- ✅ Produktions-Models im Registry, Deploy über Alias `@dev`
+- ❌ Retraining manuell auslösbar — kein Endpoint, kein Flow
 
 ### Monitoring
 
-- ✅ Alle 4 Golden Signals messbar
-- ✅ Mindestens 1 Alert konfiguriert
-- ✅ Evidently trackt Drift
+- 🟡 Alle 4 Golden Signals messbar — Latency/Traffic/Errors ✅, Saturation nur Memory
+- 🟡 Mindestens 1 Alert konfiguriert — 7 Regeln feuern, aber der Receiver ist null und nichts ist end-to-end getestet
+- ✅ Evidently trackt Drift — 5 Tracks aus dem Serving-Pfad, dazu Classification Quality aus dem stündlichen Backtest, alles in Grafana sichtbar
+
+**Fazit:** Der Monitoring- und Orchestrierungsteil ist am weitesten, der **Kreislauf ist noch nicht
+geschlossen** (kein Retraining), und die **Nachweisschicht** — Coverage, Merge-Gate, Doku — ist die
+schwächste Stelle.
 
 ---
 
 ## 7. NÄCHSTE SCHRITTE
 
-1. **Sofort starten**: Arbeitspaket 1 (Foundation)
-2. **Priorität hoch**: Arbeitspakete 2-3 (Docker, API)
-3. **Parallel möglich**: Arbeitspakete 4-6 (Pipelines) und 7-8 (MLflow)
-4. **Zum Schluss**: Arbeitspakete 9-11 (Monitoring)
+Die verbindliche, priorisierte Liste steht in **Abschnitt 2 → „Nächste 5 sinnvolle Schritte"**.
+Kurzfassung der Reihenfolge, in der die Arbeitspakete real abgeschlossen werden sollten:
+
+1. **Nachziehen, was schon läuft**: README/Doku auf den Ist-Stand (7.2), `dev` → `main` + CI-Trigger (2.3)
+2. **Kreislauf schließen**: Retraining-Flow inkl. Baseline-Invalidierung (5.4, Arbeitspaket 8)
+3. **Messbar machen**: Coverage + Custom Model-Metriken (2.1, 6.1)
+4. **Produktionsreife**: Docker-Härtung + GHCR (2.4/3.3, Arbeitspaket 2)
+5. **Grundsatzfragen**: Rolle von dbt (4.1), `prefect/Dockerfile` (4.5), Alert-Receiver (6.4)
 
 ---
 
@@ -945,14 +1065,49 @@ dbt docs serve
 ### MLflow
 
 ```bash
-# Start UI
+# UI (läuft im Stack als Service auf :5000)
 mlflow ui --host 0.0.0.0 --port 5000
 
 # List registered models
 mlflow models list
+```
 
-# Promote model
-mlflow models transition-stage --name pk-model --version 3 --stage Production
+> **Achtung:** `mlflow models transition-stage --stage Production` aus dem Ursprungsplan gilt
+> nicht mehr — Stages sind in MLflow 3.x deprecated. Das Projekt nutzt **Aliase**
+> (`set_registered_model_alias(name, "dev", version)`), und der Webservice lädt
+> `models:/<name>@dev`.
+
+### Projekt-spezifisch
+
+```bash
+# Kompletter Stack von null auf lauffähig (7 Schritte, idempotent)
+./scripts/setup_stack.sh
+./scripts/setup_stack.sh --retrain              # Modelle neu trainieren + Baseline neu bauen
+./scripts/setup_stack.sh --with-streaming       # zusätzlich den Streaming-Trigger auslösen
+
+# Was wird überwacht?
+curl localhost:8085/tracks
+
+# Drift-Report als HTML
+open http://localhost:8085/report/pk_columns
+
+# Model-Quality-Backtest sofort laufen lassen (statt auf Minute :17 zu warten)
+docker compose exec -T -w /opt/flows prefect python model_quality_backtest.py
+
+# Evidently-Baselines neu erzeugen (nach Retraining oder Feature-Änderung Pflicht)
+python evidently_service/build_monitoring_references.py --model-url http://localhost:8080
+docker compose up -d --build evidently_service   # COPY . /app -> Rebuild nötig
+
+# Einzel-Prediction und Streaming-Trigger
+bash curl_tests/test_curl_predict_pk.sh
+bash trigger_prefect_pipeline.sh
+```
+
+### Pre-commit
+
+```bash
+pre-commit install            # einmalig, Hooks aktivieren
+pre-commit run --all-files    # alles prüfen, ohne zu committen
 ```
 
 ---

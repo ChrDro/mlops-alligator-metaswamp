@@ -369,7 +369,7 @@ $BOLD$GREEN Stack is ready.$RESET
   MLflow        http://localhost:5000
   Model API     http://localhost:8080/docs
   Prefect       http://localhost:4200
-  Grafana       http://localhost:3000   (GF_SECURITY_ADMIN_USER / _PASSWORD from .env)
+  Grafana       http://localhost:3000   (GF_SECURITY_ADMIN_USER / GF_SECURITY_ADMIN_PASSWORD from .env)
   Prometheus    http://localhost:9090
   Alertmanager  http://localhost:9093   (Null Receiver, sends nothing)
   MinIO         http://localhost:9001
