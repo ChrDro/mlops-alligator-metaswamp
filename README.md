@@ -100,7 +100,7 @@ cp env.template .env
 | :--- | :--- |
 | `MLFLOW_TRACKING_URI` | Where the service and training scripts reach MLflow (e.g. `http://127.0.0.1:5000`). **Required.** |
 | `MLFLOW_MODEL_ALIAS` | Which registry alias the service serves. Defaults to `dev`. |
-| `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). |
+| `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). `TRINO_IP_ADDRESS` is a host without a port - use `localhost` for the Trino container from `docker-compose.yaml`. The user must exist in `trino-iceberg/etc/trino/password.db` (`htpasswd -B -C 10 trino-iceberg/etc/trino/password.db "$TRINO_USERNAME"`). |
 
 ### 2. Train and register the models
 
@@ -128,6 +128,16 @@ docker compose up --build
 | Prometheus | http://localhost:9090 |
 | Grafana (dashboard auto-provisioned) | http://localhost:3000 |
 | Evidently drift report | http://localhost:8085/report |
+| MLflow | http://localhost:5000 |
+| Prefect | http://localhost:4200 |
+| MinIO console | http://localhost:9001 |
+| Trino (self-signed TLS, password auth) | https://localhost:8443 |
+| Nessie (Iceberg catalog) API | http://localhost:19120/api/v1 |
+
+Trino, Nessie and the `warehouse` bucket are part of this stack - the separate
+`docker run` setup under `trino-iceberg/` is gone, and its MinIO is now the same
+`minio` service that MLflow stores artifacts in. Catalogs: `iceberg` (Nessie on
+MinIO), `duckdb` (`trino-iceberg/data/capstone.db`) and `tpch`.
 
 ### 4. Make a prediction
 

@@ -7,7 +7,7 @@ flow up early). See ``change_events.py`` for the full contract.
 
 Why a watermark instead of real CDC
 -----------------------------------
-The source is DuckDB accessed through Trino. There is no write-ahead log to tail,
+The source is iceberg accessed through Trino. There is no write-ahead log to tail,
 no triggers, and no ``LISTEN/NOTIFY``, so Debezium-style CDC is not available. The
 cheapest reliable substitute is a per-table version token:
 
@@ -37,6 +37,7 @@ from change_events import (
     emit_changes_recorded,
     record_pending_changes,
     release_stale_claims,
+    with_commit_retry,
 )
 from dotenv import load_dotenv
 from prefect.cache_policies import NONE as NO_CACHE
@@ -53,7 +54,7 @@ TRINO_IP_ADDRESS = str(os.environ.get("TRINO_IP_ADDRESS"))
 TRINO_USERNAME = str(os.environ.get("TRINO_USERNAME"))
 TRINO_PASSWORD = str(os.environ.get("TRINO_PASSWORD"))
 
-WATERMARK_TABLE = "duckdb.staging.source_watermarks"
+WATERMARK_TABLE = "iceberg.staging.source_watermarks"
 
 # How many per-table COUNT(*) aggregates to pack into one UNION ALL query.
 SNAPSHOT_BATCH_SIZE = 25
@@ -62,7 +63,7 @@ SNAPSHOT_BATCH_SIZE = 25
 def get_trino_engine() -> Engine:
     """Create and return a Trino engine instance."""
     return create_engine(
-        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/duckdb",
+        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/iceberg",
         connect_args={
             "http_scheme": "https",
             "verify": False,
@@ -102,8 +103,8 @@ def snapshot_source_tables(target_schemas: list[str]) -> pd.DataFrame:
     schema_filter = "', '".join(target_schemas)
     discovery_query = text(f"""
         SELECT t.table_catalog, t.table_schema, t.table_name, COUNT(c.column_name) AS column_count
-        FROM duckdb.information_schema.tables AS t
-        INNER JOIN duckdb.information_schema.columns AS c
+        FROM iceberg.information_schema.tables AS t
+        INNER JOIN iceberg.information_schema.columns AS c
             ON t.table_catalog = c.table_catalog
             AND t.table_schema = c.table_schema
             AND t.table_name = c.table_name
@@ -161,7 +162,7 @@ def load_previous_watermarks() -> dict[tuple[str, str, str], tuple[int, int]]:
     with engine.connect() as conn:
         exists = conn.execute(
             text(
-                "SELECT COUNT(*) FROM duckdb.information_schema.tables "
+                "SELECT COUNT(*) FROM iceberg.information_schema.tables "
                 "WHERE table_schema = 'staging' AND table_name = 'source_watermarks'",
             ),
         ).scalar()
@@ -220,7 +221,7 @@ def persist_watermarks(current: pd.DataFrame) -> int:
     engine = get_trino_engine()
 
     with engine.begin() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.staging"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
         current.to_sql(
             "source_watermarks",
             conn,
@@ -235,10 +236,10 @@ def persist_watermarks(current: pd.DataFrame) -> int:
 @task(name="record-changes", cache_policy=NO_CACHE)
 def record_changes(changes: list[tuple[TableRef, str]], source: str) -> int:
     """Append the detected changes to the durable pending-changes work list."""
-    engine = get_trino_engine()
-
-    with engine.begin() as conn:
-        return record_pending_changes(conn, changes, source=source)
+    return with_commit_retry(
+        get_trino_engine(),
+        lambda conn: record_pending_changes(conn, changes, source=source),
+    )
 
 
 @task(name="count-open-work", cache_policy=NO_CACHE)
@@ -255,13 +256,23 @@ def recover_stale_claims(stale_claim_minutes: int) -> int:
 
     The detector is the natural place for this: it runs on a schedule anyway, and it
     runs before the pipelines, so recovered work is picked up in the same cycle.
+
+    One transaction per track, each with commit retries: this sweep can land while a
+    healthy pipeline is closing its own claim, and on iceberg two writers on the same
+    rows means one of them loses the commit race.
     """
     engine = get_trino_engine()
     recovered = 0
 
-    with engine.begin() as conn:
-        for track in TRACKS:
-            recovered += release_stale_claims(conn, track, older_than_minutes=stale_claim_minutes)
+    for track in TRACKS:
+        recovered += with_commit_retry(
+            engine,
+            lambda conn, track=track: release_stale_claims(
+                conn,
+                track,
+                older_than_minutes=stale_claim_minutes,
+            ),
+        )
 
     if recovered:
         print(f"Recovered {recovered} stale claims from runs that never finished")
