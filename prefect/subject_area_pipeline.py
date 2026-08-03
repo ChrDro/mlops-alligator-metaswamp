@@ -3,10 +3,10 @@ Prefect flow for the subject-area (domain grouping) prediction track.
 
 Same three steps as the pk/fk pipeline, at TABLE grain instead of column grain:
 1. Extracts the two subject-area features from information_schema (plain
-   Python/pandas) and writes them to duckdb.staging.stg_subject_area in Trino.
-2. Populates duckdb.predictions.subject_area_queue from the extracted features.
+   Python/pandas) and writes them to iceberg.staging.stg_subject_area in Trino.
+2. Populates iceberg.predictions.subject_area_queue from the extracted features.
 3. Calls POST /predict_subject_area per queued table, stores the answer in
-   duckdb.prediction_results.subject_area_results and marks the queue row processed.
+   iceberg.prediction_results.subject_area_results and marks the queue row processed.
 
 Its own staging, queue and results tables on purpose: the feature set here is two
 text columns (`table_name` plus the table's comma-separated column names), which
@@ -35,11 +35,12 @@ from change_events import (
     claim_pending_changes,
     complete_pending_changes,
     release_pending_changes,
+    with_commit_retry,
 )
 from dotenv import load_dotenv
 from prefect.cache_policies import NONE as NO_CACHE
 from prefect.runtime import flow_run
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
 
 from prefect import flow, task
 
@@ -57,16 +58,17 @@ TRINO_PASSWORD = str(os.environ.get("TRINO_PASSWORD"))
 MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://localhost:8080")
 
 # The model's second feature is called `columns` in the SubjectArea request schema,
-# but the staging/queue tables store it as `column_names`: `columns` collides with
-# DuckDB's COLUMNS(...) expression, and an unquoted identifier travelling through
-# Trino -> DuckDB is not worth the risk. _row_to_payload does the renaming.
+# but the staging/queue tables store it as `column_names`. `columns` reads as a
+# keyword in enough SQL dialects to be worth avoiding for an unquoted identifier, and
+# it is confusing next to information_schema.columns. _row_to_payload does the
+# renaming, so the request still sends `columns` as the model expects.
 FEATURE_COLUMN = "column_names"
 
 
 def get_trino_engine() -> Engine:
     """Create and return a Trino engine instance."""
     return create_engine(
-        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/duckdb",
+        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/iceberg",
         connect_args={
             "http_scheme": "https",
             "verify": False,
@@ -86,7 +88,7 @@ def extract_subject_area_features(
     only_tables: list[TableRef] | None = None,
 ) -> int:
     """
-    Build one feature row per table and write it to duckdb.staging.stg_subject_area.
+    Build one feature row per table and write it to iceberg.staging.stg_subject_area.
 
     Args:
         target_schemas: Schemas to scan for tables/columns.
@@ -103,7 +105,7 @@ def extract_subject_area_features(
     # vectoriser a different string for the same table.
     discovery_query = text(f"""
         SELECT c.table_catalog, c.table_schema, c.table_name, c.column_name
-        FROM duckdb.information_schema.columns AS c
+        FROM iceberg.information_schema.columns AS c
         WHERE c.table_schema IN ('{schema_filter}')
         ORDER BY c.table_catalog, c.table_schema, c.table_name, c.ordinal_position ASC
     """)  # noqa: S608 - schema names are operator-supplied config, not user input
@@ -141,7 +143,7 @@ def extract_subject_area_features(
     # Rebuilt each run, mirroring stg_column_features and stg_normalform_features,
     # so the features can be inspected without running prediction.
     with engine.begin() as connection:
-        connection.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.staging"))
+        connection.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
         df_final.to_sql(
             "stg_subject_area",
             connection,
@@ -152,7 +154,7 @@ def extract_subject_area_features(
 
     print(
         f"Extracted features for {len(df_final)} tables "
-        "(written to duckdb.staging.stg_subject_area)",
+        "(written to iceberg.staging.stg_subject_area)",
     )
     return len(df_final)
 
@@ -207,12 +209,12 @@ def populate_subject_area_queue(requeue_tables: list[TableRef] | None = None) ->
     trino_engine = get_trino_engine()
 
     with trino_engine.connect() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.predictions"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.predictions"))
         # id is INTEGER because store_predictions_to_trino marks rows processed via
         # int(id), matching how the pk/fk queue is keyed.
         conn.execute(
             text(f"""
-                CREATE TABLE IF NOT EXISTS duckdb.predictions.subject_area_queue (
+                CREATE TABLE IF NOT EXISTS iceberg.predictions.subject_area_queue (
                     id INTEGER,
                     database VARCHAR,
                     schema VARCHAR,
@@ -230,7 +232,7 @@ def populate_subject_area_queue(requeue_tables: list[TableRef] | None = None) ->
         # across runs (Trino has no auto-increment / sequences).
         max_id = (
             conn.execute(
-                text("SELECT COALESCE(MAX(id), 0) FROM duckdb.predictions.subject_area_queue"),
+                text("SELECT COALESCE(MAX(id), 0) FROM iceberg.predictions.subject_area_queue"),
             ).scalar()
             or 0
         )
@@ -238,7 +240,7 @@ def populate_subject_area_queue(requeue_tables: list[TableRef] | None = None) ->
         # Insert new rows from staging that aren't already queued unprocessed.
         # Column list is explicit so the projection is matched by name, not position.
         insert_query = text(f"""
-            INSERT INTO duckdb.predictions.subject_area_queue (
+            INSERT INTO iceberg.predictions.subject_area_queue (
                 id, database, schema, table_name, {FEATURE_COLUMN},
                 processed, processed_at, created_at
             )
@@ -253,10 +255,10 @@ def populate_subject_area_queue(requeue_tables: list[TableRef] | None = None) ->
                 FALSE AS processed,
                 CAST(NULL AS VARCHAR) AS processed_at,
                 CAST(CURRENT_TIMESTAMP AS VARCHAR) AS created_at
-            FROM duckdb.staging.stg_subject_area AS f
+            FROM iceberg.staging.stg_subject_area AS f
             WHERE NOT EXISTS (
                 SELECT 1
-                FROM duckdb.predictions.subject_area_queue AS q
+                FROM iceberg.predictions.subject_area_queue AS q
                 WHERE q.database = f.database
                   AND q.schema = f.schema
                   AND q.table_name = f.table_name
@@ -265,7 +267,7 @@ def populate_subject_area_queue(requeue_tables: list[TableRef] | None = None) ->
             AND (
                 NOT EXISTS (
                     SELECT 1
-                    FROM duckdb.predictions.subject_area_queue AS q
+                    FROM iceberg.predictions.subject_area_queue AS q
                     WHERE q.database = f.database
                       AND q.schema = f.schema
                       AND q.table_name = f.table_name
@@ -286,7 +288,7 @@ def populate_subject_area_queue(requeue_tables: list[TableRef] | None = None) ->
                     COUNT(*) as total_rows,
                     SUM(CASE WHEN processed = FALSE THEN 1 ELSE 0 END) as unprocessed,
                     SUM(CASE WHEN processed = TRUE THEN 1 ELSE 0 END) as processed
-                FROM duckdb.predictions.subject_area_queue
+                FROM iceberg.predictions.subject_area_queue
             """),
         ).fetchone()
         print(
@@ -306,7 +308,7 @@ def check_queue_status() -> dict:
                 COUNT(*) as total_rows,
                 SUM(CASE WHEN processed = FALSE THEN 1 ELSE 0 END) as unprocessed,
                 SUM(CASE WHEN processed = TRUE THEN 1 ELSE 0 END) as processed
-            FROM duckdb.predictions.subject_area_queue
+            FROM iceberg.predictions.subject_area_queue
         """)
 
         result = conn.execute(query).fetchone()
@@ -325,7 +327,7 @@ def fetch_new_rows(batch_size: int = 100) -> pd.DataFrame:
 
     query = text(f"""
         SELECT id, database, schema, table_name, {FEATURE_COLUMN}
-        FROM duckdb.predictions.subject_area_queue
+        FROM iceberg.predictions.subject_area_queue
         WHERE processed = FALSE
         LIMIT :batch_size
     """)  # noqa: S608 - FEATURE_COLUMN is a module constant, not user input
@@ -423,7 +425,7 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
     df["predicted_subject_area"] = df["predicted_subject_area"].fillna("NULL").astype(str)
 
     with trino_engine.connect() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.prediction_results"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.prediction_results"))
         df.to_sql(
             "subject_area_results",
             conn,
@@ -442,7 +444,7 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
         params["current_timestamp"] = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
         update_query = text(f"""
-            UPDATE duckdb.predictions.subject_area_queue
+            UPDATE iceberg.predictions.subject_area_queue
             SET processed = TRUE,
                 processed_at = :current_timestamp
             WHERE id IN ({placeholders})
@@ -474,7 +476,7 @@ def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
 
     query = text(f"""
         SELECT COUNT(*)
-        FROM duckdb.predictions.subject_area_queue
+        FROM iceberg.predictions.subject_area_queue
         WHERE processed = FALSE
           AND ({" OR ".join(predicates)})
     """)  # noqa: S608 - predicates are built from bound parameters
@@ -485,18 +487,28 @@ def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
 
 @task(name="claim-subject-area-changes", cache_policy=NO_CACHE)
 def claim_subject_area_changes(run_id: str) -> list[TableRef]:
-    """Claim the tables the change detector flagged for the subject-area track."""
-    with get_trino_engine().begin() as conn:
-        return claim_pending_changes(conn, TRACK_SUBJECT_AREA, run_id)
+    """
+    Claim the tables the change detector flagged for the subject-area track.
+
+    Retried on commit conflicts: all three tracks are woken by the same event and
+    claim the same rows, so on iceberg two of the three lose the commit race.
+    """
+    return with_commit_retry(
+        get_trino_engine(),
+        lambda conn: claim_pending_changes(conn, TRACK_SUBJECT_AREA, run_id),
+    )
 
 
 @task(name="close-subject-area-changes", cache_policy=NO_CACHE)
 def close_subject_area_changes(run_id: str, *, succeeded: bool) -> int:
     """Complete the claim on success, release it on failure so the next run retries."""
-    with get_trino_engine().begin() as conn:
+
+    def close(conn: Connection) -> int:
         if succeeded:
             return complete_pending_changes(conn, TRACK_SUBJECT_AREA, run_id)
         return release_pending_changes(conn, TRACK_SUBJECT_AREA, run_id)
+
+    return with_commit_retry(get_trino_engine(), close)
 
 
 def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
@@ -588,7 +600,7 @@ def subject_area_prediction_pipeline(
     rows_inserted = 0
     predictions_made = 0
     try:
-        # Step 1: Extract features into duckdb.staging.stg_subject_area
+        # Step 1: Extract features into iceberg.staging.stg_subject_area
         print("Step 1: Extracting subject-area features from information_schema...")
         rows_written = extract_subject_area_features(
             target_schemas=target_schemas,

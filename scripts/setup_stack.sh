@@ -414,6 +414,24 @@ $BOLD$GREEN Stack is ready.$RESET
     Normalform Model Performance Monitoring   /d/evidently-normalform-quality
 
   Ollama        http://localhost:${OLLAMA_HOST_PORT:-11434}   (names the task_4 subject areas)
+  Trino         https://localhost:8443  (user/password from .env)
+
+  SQL client (DBeaver / DataGrip): the TLS certificate is self-signed and freshly
+  generated per clone, so a verifying client rejects it with "PKIX path building
+  failed" until pointed at the matching truststore. Ready-to-paste JDBC URL:
+
+jdbc:trino://localhost:8443/iceberg?SSL=true&SSLTrustStorePath=$REPO_ROOT/trino-iceberg/etc/trino-truststore.jks&SSLTrustStorePassword=$TRINO_KEYSTORE_PASSWORD
+
+  User / password are $TRINO_USERNAME and TRINO_PASSWORD from .env. Swap the catalog
+  for duckdb or tpch as needed. The truststore holds only the public certificate - no
+  private key - so the password above protects its integrity, not a secret.
+
+  Note SSLTrustStore*, not SSLKeyStore*: the latter is for client certificates
+  (mutual TLS) and does not make the server's certificate trusted.
+
+  The truststore is rewritten in place whenever the keystore is regenerated, so this
+  URL keeps working. Prefer it over SSLVerification=NONE, which every person then has
+  to set on every machine and which switches the check off rather than passing it.
 
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
   Subject area:         bash curl_tests/test_curl_predict_subject_area.sh

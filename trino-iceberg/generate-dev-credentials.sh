@@ -34,6 +34,11 @@ set +a
 
 keystore="etc/keystore.jks"
 passwd_file="etc/trino/password.db"
+# Derived from the keystore, for GUI/JDBC clients (DBeaver, DataGrip) that validate
+# TLS properly instead of skipping it the way every client in this repo does. Neither
+# holds a private key; both are git-ignored because they go stale with the keystore.
+cert_file="etc/trino-cert.crt"
+truststore="etc/trino-truststore.jks"
 
 # `docker compose up` run BEFORE this script bind-mounts two paths that do not exist
 # yet, and Docker creates a *directory* for each. Trino then cannot start, and the
@@ -51,9 +56,11 @@ clear_stale() {
 
 # 1. TLS keystore. CN=trino matches the compose service name; the certificate is
 # self-signed, which is why every client in the repo connects with verify=False.
+keystore_written=false
 if [[ -f "$keystore" && "$force" == false ]]; then
     echo "keep   $keystore (exists - pass --force to replace)"
 else
+    keystore_written=true
     clear_stale "$keystore"
     keytool -genkeypair \
         -alias trino \
@@ -69,7 +76,25 @@ else
     echo "wrote  $keystore (CN=trino, self-signed, 10 years)"
 fi
 
-# 2. Password file for the file-based authenticator. Trino requires bcrypt with a
+# 2. The public half of that certificate, for clients that verify TLS. Re-derived
+# whenever the keystore is (re)written, so these can never point at an older cert -
+# a stale truststore is exactly the "PKIX path building failed" that sends people
+# reaching for SSLVerification=NONE.
+if [[ "$keystore_written" == true || ! -f "$cert_file" || ! -f "$truststore" ]]; then
+    clear_stale "$cert_file"
+    clear_stale "$truststore"
+    keytool -exportcert -rfc -alias trino \
+        -keystore "$keystore" -storepass "$TRINO_KEYSTORE_PASSWORD" \
+        -file "$cert_file" >/dev/null
+    keytool -importcert -noprompt -trustcacerts -alias trino \
+        -file "$cert_file" \
+        -keystore "$truststore" -storepass "$TRINO_KEYSTORE_PASSWORD" >/dev/null
+    echo "wrote  $cert_file and $truststore (for DBeaver/JDBC clients)"
+else
+    echo "keep   $cert_file and $truststore (match the existing keystore)"
+fi
+
+# 3. Password file for the file-based authenticator. Trino requires bcrypt with a
 # minimum cost of 10. htpasswd ships with Apache tools; the container fallback
 # keeps this working on machines without it.
 if [[ -f "$passwd_file" && "$force" == false ]]; then
@@ -92,3 +117,11 @@ fi
 
 echo
 echo "Done. Start Trino with: docker compose up -d trino"
+echo
+echo "GUI/JDBC clients (DBeaver, DataGrip) verify TLS and will reject this"
+echo "self-signed certificate until pointed at the truststore above. In the driver"
+echo "properties of a Trino connection to https://localhost:8443 set:"
+echo "    SSL                    true"
+echo "    SSLTrustStorePath      $(pwd)/$truststore"
+echo "    SSLTrustStorePassword  \$TRINO_KEYSTORE_PASSWORD (from .env)"
+echo "The repo's own clients (prefect, dbt, the CLI) skip verification instead."
