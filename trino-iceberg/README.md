@@ -7,14 +7,37 @@ the stack, replacing the `docker run` script this directory used to hold.
 ```text
 etc/config.properties                    coordinator + HTTPS/password auth (mounted over the image's own)
 etc/password-authenticator.properties    file-based authenticator
-etc/keystore.jks                         self-signed dev certificate, CN=trino
-etc/trino/password.db                    users; add one with htpasswd -B -C 10 <file> <user>
+etc/keystore.jks                         GIT-IGNORED, generated - self-signed dev certificate, CN=trino
+etc/trino/password.db                    GIT-IGNORED, generated - bcrypt user entries
 etc/trino/catalog/iceberg.properties     Nessie catalog, warehouse in the stack's MinIO
 etc/trino/catalog/duckdb.properties      data/capstone.db
 etc/trino/catalog/tpch.properties        generated demo data
 data/                                    mounted to /duckdb, holds capstone.db (git-ignored,
                                          DuckDB creates it on first use)
 ```
+
+## Credentials on a fresh clone
+
+The two git-ignored files above hold a private key and a password hash, so they are
+not committed. A clone has neither - generate them from `.env` before starting Trino:
+
+```bash
+bash trino-iceberg/generate-dev-credentials.sh
+```
+
+It is idempotent (existing files are kept; `--force` rotates them) and
+`scripts/setup_stack.sh` calls it in preflight, so the full setup path needs no extra
+step. Add a second user with
+`htpasswd -B -C 10 trino-iceberg/etc/trino/password.db <user>`.
+
+**Generate before the first `docker compose up`.** Compose bind-mounts both paths, and
+Docker creates a *directory* for a bind-mount source that does not exist - Trino then
+fails to start with a confusing keystore error. The generator recovers from that state
+(it removes the stray directories), but avoiding it is cheaper: run the script first,
+or use `scripts/setup_stack.sh`.
+
+Replacing the keystore needs `docker compose restart trino`; the coordinator loads it
+at startup and does not notice the file changing underneath.
 
 Two things that used to be separate are now shared with the rest of the stack:
 

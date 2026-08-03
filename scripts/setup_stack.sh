@@ -3,7 +3,7 @@
 # Bring the whole stack from "fresh clone" to "a prediction actually works".
 #
 # Steps, in order:
-#   1. Preflight  - docker, .env, python interpreter
+#   1. Preflight  - docker, .env, python interpreter, Trino dev credentials
 #   2. Compose    - build and start all services, wait until they answer
 #   3. Train      - the 5 models, unless they are already registered
 #   4. Verify     - registry aliases + the model/schema contract tests
@@ -75,10 +75,24 @@ ok "Docker found and running"
 # shellcheck disable=SC1091  # .env is user config, not tracked
 set -a; . ./.env; set +a
 
-for var in TRINO_USERNAME TRINO_PASSWORD TRINO_IP_ADDRESS MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+for var in TRINO_USERNAME TRINO_PASSWORD TRINO_IP_ADDRESS TRINO_KEYSTORE_PASSWORD TRINO_SHARED_SECRET MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
     [ -n "${!var:-}" ] || fail ".env: $var not set."
 done
 ok ".env found and complete"
+
+# Trino serves HTTPS with file-based password auth, so it needs a TLS keystore (holds
+# a private key) and a bcrypt password file. Both are git-ignored, so a fresh clone
+# has neither - and `docker compose up` would bind-mount the missing paths, which
+# makes Docker create DIRECTORIES there and leaves Trino unable to start. Generating
+# before step 2 avoids that; the generator keeps files that already exist, so this is
+# safe on every run. Pass --force to that script by hand to rotate the credentials.
+if credentials_log="$(bash trino-iceberg/generate-dev-credentials.sh 2>&1)"; then
+    printf '%s\n' "$credentials_log" | sed '/^$/d; s/^/      /'
+    ok "Trino TLS keystore and password file in place"
+else
+    printf '%s\n' "$credentials_log" >&2
+    fail "Could not generate the Trino credentials (see above)."
+fi
 
 # A venv created on Windows puts the interpreter in Scripts/, not bin/, so check
 # both before falling back to uv.

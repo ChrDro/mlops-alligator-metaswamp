@@ -35,12 +35,26 @@ set +a
 keystore="etc/keystore.jks"
 passwd_file="etc/trino/password.db"
 
+# `docker compose up` run BEFORE this script bind-mounts two paths that do not exist
+# yet, and Docker creates a *directory* for each. Trino then cannot start, and the
+# leftover directory also defeats the plain `rm -f` below - so clear a stale path
+# whichever kind it turned out to be.
+clear_stale() {
+    local path=$1
+    if [[ -d "$path" ]]; then
+        echo "note   $path is a directory (a bind mount created it) - removing"
+        rm -rf "$path"
+    else
+        rm -f "$path"
+    fi
+}
+
 # 1. TLS keystore. CN=trino matches the compose service name; the certificate is
 # self-signed, which is why every client in the repo connects with verify=False.
 if [[ -f "$keystore" && "$force" == false ]]; then
     echo "keep   $keystore (exists - pass --force to replace)"
 else
-    rm -f "$keystore"
+    clear_stale "$keystore"
     keytool -genkeypair \
         -alias trino \
         -keyalg RSA \
@@ -61,6 +75,7 @@ fi
 if [[ -f "$passwd_file" && "$force" == false ]]; then
     echo "keep   $passwd_file (exists - pass --force to replace)"
 else
+    clear_stale "$passwd_file"
     mkdir -p "$(dirname "$passwd_file")"
     if command -v htpasswd >/dev/null 2>&1; then
         htpasswd -bBC 10 -c "$passwd_file" "$TRINO_USERNAME" "$TRINO_PASSWORD" 2>/dev/null
