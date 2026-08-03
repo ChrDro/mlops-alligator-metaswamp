@@ -104,6 +104,8 @@ cp env.template .env
 | `MLFLOW_TRACKING_URI` | Where the service and training scripts reach MLflow (e.g. `http://127.0.0.1:5000`). **Required.** |
 | `MLFLOW_MODEL_ALIAS` | Which registry alias the service serves. Defaults to `dev`. |
 | `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). |
+| `OLLAMA_MODEL` / `OLLAMA_MODEL_FAMILY` | Which open-weights model names the task_4 subject areas. Defaults to `qwen2.5:3b`; use `qwen2.5:7b` if Docker has ≥8 GB RAM. Keep the two in sync — the container healthcheck greps for the family. |
+| `OLLAMA_HOST_PORT` / `OLLAMA_BASE_URL` | Set both to a free port if the host already runs Ollama natively on 11434. |
 
 ### 2. Train and register the models
 
@@ -134,6 +136,12 @@ docker compose up --build
 | Prometheus | http://localhost:9090 |
 | Grafana (dashboard auto-provisioned) | http://localhost:3000 |
 | Evidently drift report | http://localhost:8085/report |
+| Ollama (task_4 subject-area labels) | http://localhost:11434 |
+
+On first start the `ollama` service pulls its model (~2 GB for the default
+`qwen2.5:3b`) into a named volume, so the container reports `starting` for a few
+minutes before it turns `healthy`. Every later `up` reuses the volume. This replaces
+the previous OpenRouter call — no API key, and label generation needs no internet.
 
 ### 4. Make a prediction
 

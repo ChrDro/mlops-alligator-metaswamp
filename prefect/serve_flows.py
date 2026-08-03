@@ -22,14 +22,15 @@ kept in sync automatically whenever this process starts - there is no separate
                                                               │
                                               alligator.changes.recorded
                                                               │
-                                        ┌─────────────────────┴─────────────────────┐
-                              key-prediction-pipeline        normalform-prediction-pipeline
-                                      (track: keys)                        (track: nf)
+                        ┌───────────────────────────┼───────────────────────────┐
+              key-prediction-        normalform-prediction-      subject-area-prediction-
+                  pipeline                  pipeline                    pipeline
+              (track: keys)              (track: nf)             (track: subject_area)
 
-Both prediction deployments listen to the *same* event, so they run in parallel and
-neither can starve the other.
+All three prediction deployments listen to the *same* event, so they run in parallel
+and none can starve the others.
 
-A fourth deployment, model-quality-backtest, is unrelated to this event chain.
+A fifth deployment, model-quality-backtest, is unrelated to this event chain.
 It runs purely on a cron schedule and exists because F1/precision/recall need
 ground-truth labels, which no live prediction carries - see
 model_quality_backtest.py for why that track cannot be event-driven. It covers all
@@ -45,6 +46,7 @@ from normalform_pipeline import normalform_prediction_pipeline
 from pk_fk_pipeline import feature_engineering_pipeline
 from prefect.client.schemas.objects import ConcurrencyLimitConfig, ConcurrencyLimitStrategy
 from prefect.events import DeploymentEventTrigger
+from subject_area_pipeline import subject_area_prediction_pipeline
 
 from prefect import serve
 
@@ -133,6 +135,26 @@ normalform_deployment = normalform_prediction_pipeline.to_deployment(
 )
 
 
+subject_area_deployment = subject_area_prediction_pipeline.to_deployment(
+    name="streaming",
+    parameters={"target_schemas": TARGET_SCHEMAS, "use_pending_changes": True},
+    concurrency_limit=ConcurrencyLimitConfig(
+        limit=1,
+        collision_strategy=ConcurrencyLimitStrategy.ENQUEUE,
+    ),
+    triggers=[
+        DeploymentEventTrigger(
+            name="on-changes-recorded",
+            expect={CHANGES_RECORDED_EVENT},
+            match=RESOURCE_MATCH,
+            within=timedelta(seconds=0),
+        ),
+    ],
+    tags=["streaming", "subject-area"],
+    description="Re-predict the subject area of changed tables.",
+)
+
+
 backtest_deployment = model_quality_backtest.to_deployment(
     name="scheduled",
     cron=BACKTEST_CRON,
@@ -153,6 +175,7 @@ if __name__ == "__main__":
         detector_deployment,
         keys_deployment,
         normalform_deployment,
+        subject_area_deployment,
         backtest_deployment,
-        limit=4,
+        limit=5,
     )

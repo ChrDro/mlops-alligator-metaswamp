@@ -1,15 +1,17 @@
 """
 Tests for the per-track claim protocol in prefect/change_events.py.
 
-This is the concurrency contract of the streaming pipeline. Two consumers (`keys` and
-`nf`) work the same rows independently, and the trigger is at-least-once, so the
-properties that matter are:
+This is the concurrency contract of the streaming pipeline. Three consumers (`keys`,
+`nf` and `subject_area`) work the same rows independently, and the trigger is
+at-least-once, so the properties that matter are:
 
 * a run only ever completes or releases **its own** claim - otherwise one pipeline
   closes work the other is still doing, and that change is never predicted again
 * the track name is validated against a fixed allowlist before it reaches an f-string
   in a SQL statement
 * table names and change types are **bound parameters**, never interpolated
+* a work list created before a track existed gains that track's columns rather than
+  being dropped - dropping it strands work no detector would ever re-flag
 
 All of it is asserted against a fake connection, because the interesting failures are
 in the SQL that gets built, not in what Trino does with it.
@@ -25,6 +27,7 @@ from change_events import (
     TRACK_NF,
     TRACKS,
     TableRef,
+    claim_columns,
     claim_pending_changes,
     complete_pending_changes,
     count_unclaimed_changes,
@@ -39,6 +42,18 @@ from .conftest import FakeConnection
 
 RUN_ID = "run-abc-123"
 OTHER_TABLE = TableRef("duckdb", "new_predict_data", "customer")
+
+# The claim columns a work list had before the subject-area track was added. Written
+# out rather than derived from TRACKS: the point is to pin the *old* shape, so adding
+# a track must not silently update this fixture too.
+LEGACY_CLAIM_COLUMNS = [
+    "keys_claimed_by",
+    "keys_claimed_at",
+    "keys_completed_at",
+    "nf_claimed_by",
+    "nf_claimed_at",
+    "nf_completed_at",
+]
 
 # A table name that would break out of a string literal if it were interpolated
 # instead of bound. Not a realistic table name - that is the point.
@@ -121,6 +136,83 @@ def test_recording_creates_the_work_list_if_missing():
 
     assert connection.statements("CREATE SCHEMA IF NOT EXISTS duckdb.staging")
     assert connection.statements("CREATE TABLE IF NOT EXISTS")
+
+
+# --- work-list schema ---------------------------------------------------------
+#
+# ensure_pending_table probes information_schema for the existing columns, so the
+# canned rows below are (column_name,) tuples rather than table references.
+
+
+def test_work_list_ddl_declares_a_claim_trio_for_every_track():
+    """
+    The DDL is generated from TRACKS. If the two ever drift, a claim UPDATE hits a
+    column that does not exist and the whole track stops silently.
+    """
+    connection = FakeConnection(rows=[(column,) for column in claim_columns()])
+
+    ensure_pending_table(connection)
+
+    ddl = connection.statements("CREATE TABLE IF NOT EXISTS")[0]
+    missing = [column for column in claim_columns() if f"{column} VARCHAR" not in ddl]
+    assert missing == []
+    assert len(claim_columns()) == 3 * len(TRACKS)
+
+
+def test_a_current_work_list_is_left_alone():
+    connection = FakeConnection(rows=[(column,) for column in claim_columns()])
+
+    ensure_pending_table(connection)
+
+    assert connection.statements("ALTER TABLE") == []
+
+
+def test_a_work_list_predating_a_track_gains_its_columns():
+    """
+    CREATE TABLE IF NOT EXISTS does not alter an existing table, so the columns of a
+    newly added track have to be added explicitly.
+    """
+    connection = FakeConnection(rows=[(column,) for column in LEGACY_CLAIM_COLUMNS])
+
+    ensure_pending_table(connection)
+
+    added = connection.statements("ALTER TABLE")
+    expected = [column for column in claim_columns() if column not in LEGACY_CLAIM_COLUMNS]
+    assert len(added) == len(expected)
+    for column, statement in zip(expected, added, strict=True):
+        assert statement == f"ALTER TABLE {PENDING_TABLE} ADD COLUMN {column} VARCHAR"
+
+
+def test_a_work_list_predating_a_track_is_never_dropped():
+    """
+    pk_fk_pipeline drops and recreates its queue when the feature schema changes,
+    because queue rows are rebuilt from staging. This table is different: the
+    watermarks are already persisted, so a change dropped here is never re-detected.
+    """
+    connection = FakeConnection(rows=[(column,) for column in LEGACY_CLAIM_COLUMNS])
+
+    ensure_pending_table(connection)
+
+    assert connection.statements("DROP TABLE") == []
+
+
+def test_a_claim_column_that_cannot_be_added_fails_loudly():
+    """
+    Better to stop with an actionable message than to let every later claim fail on a
+    missing column, which reads like a broken pipeline rather than a stale schema.
+    """
+
+    class RefusesAlter(FakeConnection):
+        def execute(self, statement, params=None):
+            if "ALTER TABLE" in str(statement):
+                message = "This connector does not support adding columns"
+                raise RuntimeError(message)
+            return super().execute(statement, params)
+
+    connection = RefusesAlter(rows=[(column,) for column in LEGACY_CLAIM_COLUMNS])
+
+    with pytest.raises(RuntimeError, match="DROP TABLE"):
+        ensure_pending_table(connection)
 
 
 def test_recording_binds_table_identifiers_instead_of_interpolating_them():

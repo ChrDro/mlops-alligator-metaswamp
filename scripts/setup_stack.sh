@@ -401,6 +401,7 @@ $BOLD$GREEN Stack is ready.$RESET
   Subject area:         bash curl_tests/test_curl_predict_subject_area.sh
   Trigger Streaming:    bash trigger_prefect_pipeline.sh
   Results:              duckdb.prediction_results.key_results / nf_results
+                        duckdb.prediction_results.subject_area_results
 
   Monitoring notes:
     Drift fills automatically from all 5 predict endpoints, one track per
