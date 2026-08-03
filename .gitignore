@@ -230,3 +230,15 @@ dbt/target/
 
 evidently_service/references/
 data/holdouts/
+
+# trino
+# DuckDB database behind the duckdb catalog plus its write-ahead log. DuckDB
+# recreates the file on first connect, the directory itself is kept by .gitkeep.
+trino-iceberg/data/*.db
+trino-iceberg/data/*.db.wal
+
+# Local Trino credentials: a TLS private key and a password hash. Never commit
+# these - regenerate with trino-iceberg/generate-dev-credentials.sh. The rest of
+# trino-iceberg/etc/ is committed and reads its secrets from .env instead.
+trino-iceberg/etc/keystore.jks
+trino-iceberg/etc/trino/password.db

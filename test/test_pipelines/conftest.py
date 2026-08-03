@@ -19,7 +19,10 @@ specific directory instead of the project root.
 """
 
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+
+from sqlalchemy.exc import DBAPIError
 
 
 CONFTEST_DIR = Path(__file__).parent
@@ -83,3 +86,54 @@ class FakeConnection:
     @property
     def all_sql(self) -> str:
         return "\n".join(sql for sql, _params in self.executed)
+
+
+class FakeEngine:
+    """
+    Stand-in for a SQLAlchemy ``Engine`` whose ``begin()`` can fail at commit time.
+
+    ``with_commit_retry`` owns the transaction (a failed iceberg commit leaves the
+    old one unusable), so testing it needs an engine rather than a connection. Each
+    entry in ``commit_errors`` is raised when the *n*-th transaction exits - which is
+    where a real commit conflict surfaces, after the statements already ran.
+
+    ``connections`` holds one :class:`FakeConnection` per attempt, so a test can
+    assert the statement really was re-issued on a fresh transaction.
+    """
+
+    def __init__(self, commit_errors=(), rows=(), scalar_value=0, rowcount: int = 0) -> None:
+        self._commit_errors = list(commit_errors)
+        self._rows = rows
+        self._scalar_value = scalar_value
+        self._rowcount = rowcount
+        self.connections: list[FakeConnection] = []
+
+    @contextmanager
+    def begin(self):
+        connection = FakeConnection(self._rows, self._scalar_value, self._rowcount)
+        self.connections.append(connection)
+        yield connection
+        attempt = len(self.connections) - 1
+        if attempt < len(self._commit_errors) and self._commit_errors[attempt] is not None:
+            raise self._commit_errors[attempt]
+
+    @property
+    def attempts(self) -> int:
+        return len(self.connections)
+
+
+def trino_error(error_name: str, message: str = "boom") -> DBAPIError:
+    """
+    A SQLAlchemy error wrapping a Trino error, shaped like the real thing.
+
+    The retry decision reads ``orig.error_name``, so the ``orig`` stand-in has to
+    carry that attribute - a bare ``Exception`` would silently take the string
+    fallback path instead of the one the production code relies on.
+    """
+
+    class FakeTrinoError(Exception):
+        def __init__(self) -> None:
+            super().__init__(f'TrinoExternalError(name={error_name}, message="{message}")')
+            self.error_name = error_name
+
+    return DBAPIError("UPDATE …", {}, FakeTrinoError())

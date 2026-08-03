@@ -100,7 +100,22 @@ cp env.template .env
 | :--- | :--- |
 | `MLFLOW_TRACKING_URI` | Where the service and training scripts reach MLflow (e.g. `http://127.0.0.1:5000`). **Required.** |
 | `MLFLOW_MODEL_ALIAS` | Which registry alias the service serves. Defaults to `dev`. |
-| `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). |
+| `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). `TRINO_IP_ADDRESS` is a host without a port - use `localhost` for the Trino container from `docker-compose.yaml`. The user is created in `password.db` by the credential script below. |
+| `TRINO_KEYSTORE_PASSWORD` / `TRINO_SHARED_SECRET` | Protect the generated TLS keystore and Trino's internal communication. Any non-empty values work locally. |
+
+Then generate Trino's credentials. It serves HTTPS with password auth, and the two
+files that needs — a TLS keystore holding a private key and a bcrypt password file —
+are git-ignored, so a clone has neither:
+
+```bash
+bash trino-iceberg/generate-dev-credentials.sh
+```
+
+Run this **before** the first `docker compose up`: Compose bind-mounts both paths, and
+Docker creates a directory for a bind-mount source that is missing, which leaves Trino
+unable to start. The script is idempotent, keeps existing files, and takes `--force` to
+rotate them. `scripts/setup_stack.sh` runs it in preflight, so the scripted path needs
+no extra step. See [trino-iceberg/README.md](trino-iceberg/README.md) for details.
 
 ### 2. Train and register the models
 
@@ -119,8 +134,16 @@ python task_3/task_3_denormalization_train_and_register.py  # normal form
 ### 3. Run the full stack
 
 ```bash
+# Trino's keystore and password file are git-ignored - generate them first (step 1).
+# Skipping this leaves Trino unable to start: Compose bind-mounts the two missing
+# paths and Docker creates directories there. Re-running the script clears them.
+bash trino-iceberg/generate-dev-credentials.sh
+
 docker compose up --build
 ```
+
+Or let `scripts/setup_stack.sh` do all of it — it runs the generator in preflight and
+takes the stack from a fresh clone to a working prediction in one command.
 
 | Service | URL |
 | :--- | :--- |
@@ -128,6 +151,16 @@ docker compose up --build
 | Prometheus | http://localhost:9090 |
 | Grafana (dashboard auto-provisioned) | http://localhost:3000 |
 | Evidently drift report | http://localhost:8085/report |
+| MLflow | http://localhost:5000 |
+| Prefect | http://localhost:4200 |
+| MinIO console | http://localhost:9001 |
+| Trino (self-signed TLS, password auth) | https://localhost:8443 |
+| Nessie (Iceberg catalog) API | http://localhost:19120/api/v1 |
+
+Trino, Nessie and the `warehouse` bucket are part of this stack - the separate
+`docker run` setup under `trino-iceberg/` is gone, and its MinIO is now the same
+`minio` service that MLflow stores artifacts in. Catalogs: `iceberg` (Nessie on
+MinIO), `duckdb` (`trino-iceberg/data/capstone.db`) and `tpch`.
 
 #### Alternative: start the stack from a container (Docker-out-of-Docker)
 

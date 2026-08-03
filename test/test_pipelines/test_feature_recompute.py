@@ -240,8 +240,8 @@ def test_requeue_clause_binds_one_predicate_per_table():
     prediction.
     """
     tables = [
-        TableRef("duckdb", "new_predict_data", "customer"),
-        TableRef("duckdb", "new_predict_data", "orders"),
+        TableRef("iceberg", "new_predict_data", "customer"),
+        TableRef("iceberg", "new_predict_data", "orders"),
     ]
 
     clause, params = _build_requeue_clause(tables)
@@ -249,17 +249,17 @@ def test_requeue_clause_binds_one_predicate_per_table():
     assert clause.startswith("OR (")
     assert clause.count("f.table_name = :rq_tb_") == 2
     assert params == {
-        "rq_db_0": "duckdb",
+        "rq_db_0": "iceberg",
         "rq_sc_0": "new_predict_data",
         "rq_tb_0": "customer",
-        "rq_db_1": "duckdb",
+        "rq_db_1": "iceberg",
         "rq_sc_1": "new_predict_data",
         "rq_tb_1": "orders",
     }
 
 
 def test_requeue_clause_does_not_interpolate_table_names():
-    hostile = TableRef("duckdb", "new_predict_data", "orders'); DROP TABLE staging--")
+    hostile = TableRef("iceberg", "new_predict_data", "orders'); DROP TABLE staging--")
 
     clause, params = _build_requeue_clause([hostile])
 

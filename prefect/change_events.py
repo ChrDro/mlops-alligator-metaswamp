@@ -7,7 +7,7 @@ Two detectors feed one mechanism
    ``POST /events/new-data`` on the model service, which emits
    :data:`NEW_DATA_EVENT`. Lowest latency, but only as reliable as the caller.
 2. **Poll** - ``change_detector.py`` runs on a cron schedule and compares a cheap
-   watermark per table against ``duckdb.staging.source_watermarks``. It catches
+   watermark per table against ``iceberg.staging.source_watermarks``. It catches
    everything the push path missed (loader crashed before the call, event lost
    during a server restart, someone loaded data by hand).
 
@@ -17,7 +17,7 @@ changed" in exactly one place instead of duplicating the diff logic in the API.
 
 Durable work list vs. transient signal
 --------------------------------------
-``duckdb.staging.pending_changes`` is the real work list; a Prefect event is only a
+``iceberg.staging.pending_changes`` is the real work list; a Prefect event is only a
 wake-up signal. If an event is lost, the next scheduled run still finds the work in
 the table. If a duplicate event arrives, the run claims an empty list and exits
 cheaply. The trigger is therefore **at-least-once**, which is the property we can
@@ -33,17 +33,24 @@ Two independent consumers process each change:
 A row therefore carries one claim/completion column pair per track, so one track
 finishing does not hide the change from the other.
 
-Concurrency: claiming is a plain ``UPDATE`` followed by a ``SELECT``. Trino/DuckDB
+Concurrency: claiming is a plain ``UPDATE`` followed by a ``SELECT``. Trino/iceberg
 offers no ``SELECT ... FOR UPDATE``, so two concurrent runs of the *same* track
 could claim overlapping rows. The streaming deployments are therefore created with
-a concurrency limit of 1 per track in ``streaming_setup.py``.
+a concurrency limit of 1 per track in ``serve_flows.py``.
+
+That limit does **not** serialize the two tracks against each other, and on iceberg
+they contend even though they write disjoint columns - see
+:func:`with_commit_retry` for why, and for what to do about it.
 """
 
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import NamedTuple
+from typing import NamedTuple, TypeVar
 
 from prefect.events import emit_event
-from sqlalchemy import Connection, text
+from sqlalchemy import Connection, Engine, text
+from sqlalchemy.exc import DBAPIError
 
 
 # --- Event names -------------------------------------------------------------
@@ -66,7 +73,7 @@ TRACK_KEYS = "keys"
 TRACK_NF = "nf"
 TRACKS = (TRACK_KEYS, TRACK_NF)
 
-PENDING_TABLE = "duckdb.staging.pending_changes"
+PENDING_TABLE = "iceberg.staging.pending_changes"
 
 
 class TableRef(NamedTuple):
@@ -75,6 +82,95 @@ class TableRef(NamedTuple):
     database: str
     schema: str
     table_name: str
+
+
+# --- Commit-conflict retries --------------------------------------------------
+
+# Trino's error name for an iceberg transaction that failed its commit-time
+# validation. Always safe to retry: nothing was written.
+COMMIT_CONFLICT_ERROR = "ICEBERG_COMMIT_ERROR"
+
+# How many times to re-run a conflicting statement, and the first backoff step.
+# Delays double per attempt (1s, 2s, 4s, 8s, 16s), which comfortably outlasts the
+# few seconds a competing claim/close statement needs to commit.
+COMMIT_RETRY_ATTEMPTS = 6
+COMMIT_RETRY_BASE_DELAY = 1.0
+
+T = TypeVar("T")
+
+
+def is_commit_conflict(error: BaseException) -> bool:
+    """Is this an iceberg commit-time conflict (as opposed to a real failure)?"""
+    orig = getattr(error, "orig", None)
+    if getattr(orig, "error_name", None) == COMMIT_CONFLICT_ERROR:
+        return True
+    # Older/other trino clients do not expose error_name on every error class.
+    return COMMIT_CONFLICT_ERROR in str(error)
+
+
+def with_commit_retry(
+    engine: Engine,
+    work: Callable[[Connection], T],
+    *,
+    attempts: int = COMMIT_RETRY_ATTEMPTS,
+    base_delay: float = COMMIT_RETRY_BASE_DELAY,
+) -> T:
+    """
+    Run ``work`` in a transaction, retrying iceberg commit conflicts on a fresh one.
+
+    Why this is needed
+    ------------------
+    The two tracks are woken by the *same* event, so their claim statements hit
+    ``pending_changes`` at the same moment. Iceberg commits optimistically: each
+    transaction reads a snapshot, writes files, then validates at commit that no
+    newer snapshot added files matching its own predicate. The ``keys`` claim
+    rewrites the very rows the ``nf`` claim is filtering on, so whichever commits
+    second fails with ``ICEBERG_COMMIT_ERROR``.
+
+    Conflict detection is per *file*, not per column, so splitting the claim state
+    into ``keys_*`` and ``nf_*`` columns does not prevent this. Retrying does: the
+    loser re-reads the winner's snapshot and commits cleanly, which is the intended
+    way to use optimistic concurrency.
+
+    Every statement in this module is idempotent under retry - claiming filters on
+    ``IS NULL``, completing and releasing filter on ``claimed_by = run_id`` - so a
+    replay against a newer snapshot is always correct, never a double-claim.
+
+    Note the retry needs its own transaction: a failed commit leaves the old one
+    dead, which is why this owns ``engine.begin()`` instead of taking a connection.
+
+    Args:
+        engine: Trino engine to open each attempt's transaction on.
+        work: Callable receiving an open connection; its return value is passed
+            through. Must be safe to run more than once.
+        attempts: Total tries, including the first.
+        base_delay: Seconds before the first retry; doubles each attempt.
+
+    Returns:
+        Whatever ``work`` returned.
+
+    Raises:
+        Anything ``work`` raises. Commit conflicts are re-raised once the attempts
+        are used up, so a genuinely stuck table still fails the flow loudly.
+    """
+    for attempt in range(attempts):
+        try:
+            with engine.begin() as conn:
+                return work(conn)
+        except DBAPIError as e:
+            if not is_commit_conflict(e) or attempt == attempts - 1:
+                raise
+            delay = base_delay * 2**attempt
+            print(
+                f"Commit conflict on {PENDING_TABLE} (another track committed first), "
+                f"retrying in {delay:.0f}s "
+                f"[attempt {attempt + 1}/{attempts - 1}]",
+            )
+            time.sleep(delay)
+
+    # Unreachable: the loop either returns or re-raises on the last attempt.
+    msg = f"with_commit_retry exhausted {attempts} attempts without returning"
+    raise RuntimeError(msg)
 
 
 def _now() -> str:
@@ -90,7 +186,7 @@ def _check_track(track: str) -> None:
 
 def ensure_pending_table(conn: Connection) -> None:
     """Create the pending-changes work list if it does not exist yet."""
-    conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.staging"))
+    conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
     conn.execute(
         text(f"""
             CREATE TABLE IF NOT EXISTS {PENDING_TABLE} (

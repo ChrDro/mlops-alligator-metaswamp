@@ -8,7 +8,7 @@ watermarks, which makes it the highest-value thing in this module to test - no T
 needed.
 
 The detector's known blind spot is asserted too: an in-place UPDATE that leaves the
-row and column count unchanged is invisible. That is a deliberate trade-off (DuckDB
+row and column count unchanged is invisible. That is a deliberate trade-off (iceberg
 over Trino has no WAL to tail), and a test is the right place to record it - if
 someone later adds a checksum column, this test is what tells them the contract
 changed on purpose.
@@ -22,8 +22,8 @@ from change_events import TableRef
 
 SNAPSHOT_COLUMNS = ["database", "schema", "table_name", "row_count", "column_count"]
 
-CUSTOMER = TableRef("duckdb", "new_predict_data", "customer")
-ORDERS = TableRef("duckdb", "new_predict_data", "orders")
+CUSTOMER = TableRef("iceberg", "new_predict_data", "customer")
+ORDERS = TableRef("iceberg", "new_predict_data", "orders")
 
 
 def _snapshot(*rows) -> pd.DataFrame:
@@ -111,7 +111,7 @@ def test_disappeared_tables_are_not_reported():
 
 def test_an_in_place_update_is_invisible():
     """
-    Documented blind spot, not an oversight: DuckDB through Trino offers no WAL, no
+    Documented blind spot, not an oversight: iceberg through Trino offers no WAL, no
     triggers and no LISTEN/NOTIFY, so the watermark is row_count + column_count. An
     UPDATE that changes values but neither count cannot be detected without adding a
     checksum to the snapshot query.
@@ -130,7 +130,7 @@ def test_tables_are_matched_on_the_full_three_part_name():
     Same table name in two schemas must not be conflated - otherwise loading
     `other_schema.customer` would mark `new_predict_data.customer` as changed.
     """
-    other_schema_customer = TableRef("duckdb", "other_schema", "customer")
+    other_schema_customer = TableRef("iceberg", "other_schema", "customer")
     current = _snapshot((CUSTOMER, 100, 8), (other_schema_customer, 999, 3))
     previous = _watermarks((CUSTOMER, 100, 8))
 
