@@ -38,14 +38,17 @@ statistics, it never reads real data — which keeps it fast and usable on regul
 | **1. Primary keys** | Is this column a single PK? part of a composite PK? | `pk_target`, `composite_pk_target` | ✅ implemented |
 | **2. Foreign keys** | Is this column a single FK? part of a composite FK? | `fk_target`, `composite_fk_target` | ✅ implemented |
 | **3. Normalization** | What is the highest normal form the table satisfies (0–3NF)? | `target_normal_form` | ✅ implemented |
-| **4. Domain grouping** | Group tables/schemas by naming and structural similarity. | — (unsupervised) | ⛔ out of scope |
+| **4. Domain grouping** | Which business domain (subject area) does this table belong to? | `subject_area` (discovered, not predefined) | ✅ implemented |
 
-> Task 4 is deliberately **not** part of this capstone. Effort is going into engineering
-> depth on Tasks 1–3, per the capstone brief ("keep the modelling simple; the point is
-> the engineering").
+> Task 4 has no ground truth, so it runs in two stages: subject areas are **discovered**
+> by clustering table and column names (embeddings → UMAP → HDBSCAN) and **named** by a
+> local open-weights LLM, then that labelling is distilled into a TF-IDF text classifier
+> which is what gets registered and served. Retraining can rename an area or add a new
+> one, so its label set is not fixed in code.
 
-Each task is a separate model, so five models are trained and served in total:
-`pk_model`, `composite_pk_model`, `fk_model`, `composite_fk_model`, `denormalization_model`.
+Each task is a separate model, so six models are trained and served in total:
+`pk_model`, `composite_pk_model`, `fk_model`, `composite_fk_model`,
+`denormalization_model`, `subject_area_model`.
 
 ---
 
@@ -114,6 +117,9 @@ python task_1/task_1_cpk_train_and_register.py   # composite primary key
 python task_2/task_2_fk_train_and_register.py    # single foreign key
 python task_2/task_2_cfk_train_and_register.py   # composite foreign key
 python task_3/task_3_denormalization_train_and_register.py  # normal form
+# Subject area. Needs the ollama service up (docker compose up -d ollama) to name the
+# clusters it discovers, and downloads a sentence-transformer on first run.
+python task_4/task_4_subject_area_train_and_register.py     # subject area
 ```
 
 ### 3. Run the full stack
@@ -167,9 +173,16 @@ form, not P(class=1)).
 | `POST` | `/predict_fk` | `fk_model` | single foreign key |
 | `POST` | `/predict_cfk` | `composite_fk_model` | composite foreign key |
 | `POST` | `/predict_normalform` | `denormalization_model` | normal form 0–3 |
+| `POST` | `/predict_subject_area` | `subject_area_model` | subject-area name |
 
 The request schema for each route is a Pydantic model in `webservice/data_model_*.py` —
 that file is the source of truth for the exact feature list.
+
+`/predict_subject_area` is the one endpoint whose request is text rather than column
+statistics (`table_name` plus a comma-separated `columns` string), and whose
+`prediction` is therefore a string rather than an int class. A table that fits no
+discovered area still gets the nearest one, so a low `probability` — not a special
+label — is the signal not to trust the answer.
 
 ---
 

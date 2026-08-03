@@ -1,0 +1,412 @@
+table_name,subject_area,topic_id
+diabetes,Diabetes Management,0
+kaggle_survey,Personal Finance Systems,13
+blood_metrics,Diabetes Management,0
+patient,Diabetes Management,0
+pedigree_outcome,Diabetes Management,0
+skin,Diabetes Management,0
+f1_constructor_standings_2000_2026,Auto Racing,4
+f1_driver_standings_2000_2026,Auto Racing,4
+f1_qualifying_2000_2026,Auto Racing,4
+f1_race_results_2000_2026,Auto Racing,4
+f1_races_2000_2026,Auto Racing,4
+fertility,outlier,-1
+life_exp_pop,outlier,-1
+chest_pain,Diabetes Management,0
+heart_attack_history,Diabetes Management,0
+pressure_vessels_angina,Diabetes Management,0
+age_bucket,Diabetes Management,0
+gender,Diabetes Management,0
+record,Diabetes Management,0
+king_county_house_details,Real Estate,18
+king_county_house_sales,Real Estate,18
+account,Finance,36
+bank_transaction,Finance,36
+flight,Airlines Operations,16
+messages,outlier,-1
+person,Diabetes Management,0
+phone_contract,outlier,-1
+dataset_fashion_store_campaigns,Fashion Retailing,24
+dataset_fashion_store_channels,Fashion Retailing,24
+dataset_fashion_store_customers,Fashion Retailing,24
+dataset_fashion_store_products,Fashion Retailing,24
+dataset_fashion_store_sales,Fashion Retailing,24
+dataset_fashion_store_salesitems,Fashion Retailing,24
+dataset_fashion_store_stock,Fashion Retailing,24
+categories,outlier,-1
+customers,Retail Commerce,23
+employees,Human Resources,3
+orderdetails,Order Management,6
+orders,Order Management,6
+products,Inventory Management,7
+shippers,Shipping Logistics,39
+suppliers,Retail Commerce,23
+owners,outlier,-1
+pets,Diabetes Management,0
+proceduredetails,Diabetes Management,0
+procedurehistory,Diabetes Management,0
+battery_systems,Personal Finance Systems,13
+billing_and_savings,Personal Finance Systems,13
+channel_attribution,Customer Information Management,21
+daily_generation_consumption,Personal Finance Systems,13
+dashboard_suggestions,Customer Reviews,8
+dispatch_events,Health Research,9
+households,Personal Finance Systems,13
+installation_pipeline,Clinical Trials Management,22
+metric_definitions,Inventory Management,7
+outage_events,Health Research,9
+portfolio_kpis_daily,Personal Finance Systems,13
+service_tickets,outlier,-1
+solar_systems,Personal Finance Systems,13
+subscriber_contracts,Customer Information Management,21
+utility_tariffs,Energy Territory Management,33
+vpp_program_enrollment,Academic Records,2
+cart_events,Health Research,9
+inventory_events,Health Research,9
+order_items,Order Management,6
+promotions,Travel Booking System,5
+refunds,Retail Management,11
+reviews,Customer Reviews,8
+sessions,Event Management,20
+prognostica_afo,Diabetes Management,0
+customer,Retail Commerce,23
+lineitem,Order Management,6
+nation,Sports Administration,1
+part,Retail Commerce,23
+partsupp,outlier,-1
+region,Event Facilities,31
+supplier,Retail Commerce,23
+food,Nutrition Studies,26
+food_category,Nutrition Studies,26
+food_nutrient,Nutrition Studies,26
+food_nutrient_conversion_factor,Nutrition Studies,26
+food_portion,Nutrition Studies,26
+nutrient,Nutrition Studies,26
+bestellung_periode_1,Retail Orders Management,15
+bestellung_periode_2,Retail Orders Management,15
+bestellung_periode_3,Retail Orders Management,15
+href_termintreue_periode_1,Retail Orders Management,15
+href_termintreue_periode_2,Retail Orders Management,15
+kunde_periode_1,Credit Card Transactions,27
+kunde_periode_2,Credit Card Transactions,27
+kunde_periode_3,Credit Card Transactions,27
+lieferadresse_periode_1,Customer Addresses,17
+lieferadresse_periode_2,Customer Addresses,17
+lieferadresse_periode_3,Customer Addresses,17
+lieferdienst_periode_1,Customer Addresses,17
+lieferdienst_periode_2,Customer Addresses,17
+lieferdienst_periode_3,Customer Addresses,17
+lieferung_periode_1,Retail Orders Management,15
+lieferung_periode_2,Retail Orders Management,15
+lieferung_periode_3,Retail Orders Management,15
+position_periode_1,Retail Management,14
+position_periode_2,Retail Management,14
+position_periode_3,Retail Management,14
+produkt_periode_1,Retail Management,14
+produkt_periode_2,Retail Management,14
+produkt_periode_3,Retail Management,14
+produktkategorie_periode_1,Retail Management,14
+produktkategorie_periode_2,Retail Management,14
+produktkategorie_periode_3,Retail Management,14
+ref_produkt_typ,Retail Management,14
+rs_bestellung_tag_1,Credit Card Transactions,27
+rs_bestellung_tag_2,Credit Card Transactions,27
+rs_bestellung_tag_3,Credit Card Transactions,27
+vereinspartner_periode_1,Retail Partnerships,38
+vereinspartner_periode_2,Retail Partnerships,38
+vereinspartner_periode_3,Retail Partnerships,38
+wohnort_periode_1,Customer Addresses,17
+wohnort_periode_2,Customer Addresses,17
+wohnort_periode_3,Customer Addresses,17
+admission_predict,Academic Records,2
+admission_predict_ver_1_1,Academic Records,2
+cost_analysis,Personal Finance Systems,13
+education_career_success,Academic Records,2
+personal_finance_tracker_dataset,Personal Finance Systems,13
+synthetic_personal_finance_dataset,Personal Finance Systems,13
+product,Inventory Management,7
+sales,Retail Management,11
+brands,Inventory Management,7
+staffs,Human Resources,3
+stocks,Inventory Management,30
+stores,outlier,-1
+circuits,IoT Monitoring,12
+constructor_results,Auto Racing,4
+constructor_standings,Auto Racing,4
+constructors,Auto Racing,4
+driver_standings,Auto Racing,4
+drivers,Auto Racing,4
+lap_times,Auto Racing,4
+pit_stops,Auto Racing,4
+qualifying,Auto Racing,4
+races,Auto Racing,4
+results,Auto Racing,4
+seasons,Retail Orders Management,15
+sprint_results,Auto Racing,4
+status,Diabetes Management,0
+award_winners,Sports Administration,1
+awards,Sports Administration,1
+bookings,Sports Administration,1
+confederations,Sports Administration,1
+goals,Sports Administration,1
+group_standings,Sports Administration,1
+groups,Sports Administration,1
+host_countries,Sports Administration,1
+manager_appearances,Sports Administration,1
+manager_appointments,Sports Administration,1
+managers,Sports Administration,1
+matches,Sports Administration,1
+penalty_kicks,Sports Administration,1
+player_appearances,Sports Administration,1
+players,Sports Administration,1
+qualified_teams,Sports Administration,1
+referee_appearances,Sports Administration,1
+referee_appointments,Sports Administration,1
+referees,Sports Administration,1
+squads,Sports Administration,1
+stadiums,Sports Administration,1
+substitutions,Sports Administration,1
+team_appearances,Sports Administration,1
+teams,Sports Administration,1
+tournament_stages,Sports Administration,1
+tournament_standings,Sports Administration,1
+tournaments,Sports Administration,1
+patients,Diabetes Management,0
+departments,outlier,-1
+doctors,Diabetes Management,0
+appointments,Diabetes Management,0
+diagnoses,Diabetes Management,0
+medications,Diabetes Management,0
+prescriptions,Diabetes Management,0
+dim_customer,Retail Commerce,23
+dim_product,Inventory Management,7
+dim_date,Retail Orders Management,15
+dim_store,outlier,-1
+fact_sales,Retail Management,11
+fact_returns,Retail Management,11
+student,Academic Records,2
+faculty,Academic Records,2
+course,Academic Records,2
+enrollment,Academic Records,2
+assignment,Academic Records,2
+submission,Academic Records,2
+citizen,Citizenship Records,35
+permit,Citizenship Records,35
+tax_record,Citizenship Records,35
+address,Citizenship Records,35
+vehicle,Automotive Logistics,37
+airports,Airlines Operations,16
+airlines,Airlines Operations,16
+aircraft_types,Airlines Operations,16
+flights,Airlines Operations,16
+passengers,Airlines Operations,16
+stations,outlier,-1
+train_types,outlier,-1
+trains,outlier,-1
+routes,Public Transport Network,19
+schedules,Public Transport Network,19
+tickets,outlier,-1
+vessels,Airlines Operations,16
+ports,Shipping Logistics,39
+operators,Airlines Operations,16
+voyages,Airlines Operations,16
+cargo_manifests,Airlines Operations,16
+port_calls,Shipping Logistics,39
+road_segments,Public Transport Network,19
+intersections,Public Transport Network,19
+sensors,IoT Monitoring,12
+traffic_counts,Automotive Logistics,37
+incidents,Health Research,9
+segment_connections,Public Transport Network,19
+cart_items,outlier,-1
+product_categories,Inventory Management,7
+wishlists,Travel Booking System,5
+promotion_products,Travel Booking System,5
+projects,Clinical Trials Management,22
+skills,Human Resources,3
+roles,Human Resources,3
+employee_skills,Human Resources,3
+project_assignments,Human Resources,3
+role_permissions,Human Resources,3
+salary_history,Human Resources,3
+team_members,Human Resources,32
+books,Book Publishing,10
+authors,Book Publishing,10
+members,Human Resources,32
+subjects,Book Publishing,10
+book_authors,Book Publishing,10
+book_subjects,Book Publishing,10
+loans,Academic Records,2
+reading_lists,Human Resources,32
+membership_services,Event Management,20
+users,Customer Information Management,21
+posts,Content Management,25
+follows,Human Resources,32
+post_likes,outlier,-1
+group_members,Human Resources,32
+blocked_users,Customer Information Management,21
+user_badges,Customer Information Management,21
+warehouses,Logistics Management,34
+kits,Hotel Management,29
+stock_levels,Inventory Management,30
+kit_components,Hotel Management,29
+supplier_products,Inventory Management,7
+reorder_rules,Order Management,6
+warehouse_zones,Logistics Management,34
+subscribers,Customer Information Management,21
+plans,Diabetes Management,0
+services,Human Resources,3
+plan_features,Diabetes Management,0
+bundle_items,outlier,-1
+roaming_partners,Retail Partnerships,38
+subscriber_services,Customer Information Management,21
+tariff_zones,Energy Territory Management,33
+accounts,Finance,36
+instruments,Human Resources,3
+account_holders,Finance,36
+portfolio_holdings,Inventory Management,30
+rate_cards,Travel Booking System,5
+standing_orders,Order Management,6
+product_fees,Inventory Management,7
+events,Health Research,9
+speakers,Health Research,9
+registrations,Event Management,20
+topics,Book Publishing,10
+venues,Event Facilities,31
+event_speakers,Health Research,9
+session_topics,Book Publishing,10
+attendee_sessions,Event Management,20
+venue_capacities,Logistics Management,34
+sponsor_tiers,Travel Booking System,5
+work_orders,Order Management,6
+components,Inventory Management,7
+work_order_ops,Order Management,6
+bill_of_materials,Inventory Management,7
+quality_inspections,Customer Reviews,8
+labor_records,Human Resources,3
+bom_requirements,outlier,-1
+bom_changes,Travel Booking System,5
+students,Academic Records,2
+courses,Academic Records,2
+instructors,Academic Records,2
+enrollments,Academic Records,2
+course_assessments,Academic Records,2
+grade_appeals,Academic Records,2
+attendance,Academic Records,2
+submissions,Academic Records,2
+submission_feedback,Customer Reviews,8
+clients,Retail Commerce,23
+task_assignments,Human Resources,3
+project_phases,Clinical Trials Management,22
+time_logs,Event Management,20
+expense_claims,Insurance Claims,28
+phase_deliverables,Clinical Trials Management,22
+phase_reviews,Customer Reviews,8
+transactions,Retail Management,11
+sale_items,Retail Management,11
+store_stock,Inventory Management,30
+item_returns,Retail Management,11
+warranty_claims,Insurance Claims,28
+stock_movements,Inventory Management,30
+replenishment_orders,Order Management,6
+leagues,Sports Administration,1
+match_lineups,Sports Administration,1
+league_standings,Sports Administration,1
+player_events,Health Research,9
+player_stats,Sports Administration,1
+standing_changes,Sports Administration,1
+team_penalties,Sports Administration,1
+rooms,Travel Booking System,5
+guests,outlier,-1
+packages,Hotel Management,29
+amenities,Hotel Management,29
+rate_plan_rooms,Travel Booking System,5
+amenity_packages,Hotel Management,29
+reservations,Event Management,20
+invoices,Event Management,20
+guest_package_items,Hotel Management,29
+package_charges,outlier,-1
+purchase_orders,Order Management,6
+po_lines,Retail Management,11
+goods_receipts,Retail Management,11
+invoice_lines,Retail Management,11
+contract_prices,Inventory Management,7
+contract_amendments,Real Estate,18
+publications,Book Publishing,10
+content_items,Content Management,25
+tags,Content Management,25
+publication_chapters,Book Publishing,10
+content_tags,Content Management,25
+chapter_revisions,Book Publishing,10
+chapter_comments,Book Publishing,10
+tag_analytics,Content Management,25
+tag_suggestions,Customer Reviews,8
+properties,Real Estate,18
+tenants,Real Estate,18
+agents,Human Resources,3
+leases,Real Estate,18
+property_features,Content Management,25
+lease_terms,Real Estate,18
+inspection_reports,Customer Reviews,8
+maintenance_requests,Vehicle Maintenance System,40
+lease_payments,Real Estate,18
+lease_amendments,Real Estate,18
+trials,Clinical Trials Management,22
+sites,Event Facilities,31
+investigators,Human Resources,3
+trial_arms,Clinical Trials Management,22
+patient_visits,Diabetes Management,0
+adverse_events,Health Research,9
+efficacy_measurements,Clinical Trials Management,22
+lab_results,Diabetes Management,0
+vital_signs,Diabetes Management,0
+policies,Travel Booking System,5
+claims,Insurance Claims,28
+coverage_tiers,Travel Booking System,5
+claim_items,Insurance Claims,28
+policy_coverages,Travel Booking System,5
+premium_adjustments,Travel Booking System,5
+claim_payments,Insurance Claims,28
+claim_disputes,Insurance Claims,28
+territories,Event Facilities,31
+content_licenses,Energy Territory Management,33
+subscription_features,Customer Information Management,21
+playback_events,Health Research,9
+geo_restrictions,Energy Territory Management,33
+plan_usage,Diabetes Management,0
+feature_feedback,Customer Reviews,8
+vehicles,Automotive Logistics,37
+depots,Logistics Management,34
+vehicle_maintenance,Vehicle Maintenance System,40
+route_assignments,Public Transport Network,19
+maintenance_parts,Vehicle Maintenance System,40
+maintenance_costs,Vehicle Maintenance System,40
+trip_records,Public Transport Network,19
+fuel_logs,Automotive Logistics,37
+restaurants,Customer Reviews,8
+couriers,Shipping Logistics,39
+menu_items,Customer Reviews,8
+order_lines,Order Management,6
+item_reviews,Customer Reviews,8
+promo_discounts,Travel Booking System,5
+order_modifications,Order Management,6
+refund_lines,Retail Management,11
+providers,Human Resources,3
+specialties,Human Resources,3
+clinics,Diabetes Management,0
+provider_schedules,Public Transport Network,19
+care_plans,Diabetes Management,0
+appointment_bookings,Diabetes Management,0
+session_notes,Event Management,20
+plan_tasks,Diabetes Management,0
+plan_progress,Diabetes Management,0
+devices,IoT Monitoring,12
+device_groups,IoT Monitoring,12
+rules,outlier,-1
+locations,Event Facilities,31
+device_sensors,IoT Monitoring,12
+alert_rules,IoT Monitoring,12
+sensor_readings,IoT Monitoring,12
+calibration_records,IoT Monitoring,12
+triggered_alerts,IoT Monitoring,12
+alert_resolutions,IoT Monitoring,12
