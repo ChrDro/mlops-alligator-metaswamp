@@ -231,6 +231,9 @@ dbt/target/
 evidently_service/references/
 data/holdouts/
 
+# alertmanager notification secret (keep the .example, ignore the real webhook URL)
+alertmanager/secrets/*
+!alertmanager/secrets/*.example
 # trino
 # DuckDB database behind the duckdb catalog plus its write-ahead log. DuckDB
 # recreates the file on first connect, the directory itself is kept by .gitkeep.
