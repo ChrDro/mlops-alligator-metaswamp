@@ -44,6 +44,7 @@ MODEL_CONTRACTS = [
     ("fk_model", "data_model_fk", "ForeignKey"),
     ("composite_fk_model", "data_model_cfk", "CompositeForeignKey"),
     ("denormalization_model", "data_model_denormalization", "NormalForm"),
+    ("subject_area_model", "data_model_subject_area", "SubjectArea"),
 ]
 
 REACHABILITY_TIMEOUT_SECONDS = 3

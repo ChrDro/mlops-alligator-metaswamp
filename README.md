@@ -38,14 +38,17 @@ statistics, it never reads real data — which keeps it fast and usable on regul
 | **1. Primary keys** | Is this column a single PK? part of a composite PK? | `pk_target`, `composite_pk_target` | ✅ implemented |
 | **2. Foreign keys** | Is this column a single FK? part of a composite FK? | `fk_target`, `composite_fk_target` | ✅ implemented |
 | **3. Normalization** | What is the highest normal form the table satisfies (0–3NF)? | `target_normal_form` | ✅ implemented |
-| **4. Domain grouping** | Group tables/schemas by naming and structural similarity. | — (unsupervised) | ⛔ out of scope |
+| **4. Domain grouping** | Which business domain (subject area) does this table belong to? | `subject_area` (discovered, not predefined) | ✅ implemented |
 
-> Task 4 is deliberately **not** part of this capstone. Effort is going into engineering
-> depth on Tasks 1–3, per the capstone brief ("keep the modelling simple; the point is
-> the engineering").
+> Task 4 has no ground truth, so it runs in two stages: subject areas are **discovered**
+> by clustering table and column names (embeddings → UMAP → HDBSCAN) and **named** by a
+> local open-weights LLM, then that labelling is distilled into a TF-IDF text classifier
+> which is what gets registered and served. Retraining can rename an area or add a new
+> one, so its label set is not fixed in code.
 
-Each task is a separate model, so five models are trained and served in total:
-`pk_model`, `composite_pk_model`, `fk_model`, `composite_fk_model`, `denormalization_model`.
+Each task is a separate model, so six models are trained and served in total:
+`pk_model`, `composite_pk_model`, `fk_model`, `composite_fk_model`,
+`denormalization_model`, `subject_area_model`.
 
 ---
 
@@ -102,6 +105,9 @@ cp env.template .env
 | `MLFLOW_MODEL_ALIAS` | Which registry alias the service serves. Defaults to `dev`. |
 | `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). `TRINO_IP_ADDRESS` is a host without a port - use `localhost` for the Trino container from `docker-compose.yaml`. The user is created in `password.db` by the credential script below. |
 | `TRINO_KEYSTORE_PASSWORD` / `TRINO_SHARED_SECRET` | Protect the generated TLS keystore and Trino's internal communication. Any non-empty values work locally. |
+| `OLLAMA_MODEL` / `OLLAMA_MODEL_FAMILY` | Which open-weights model names the task_4 subject areas. Defaults to `qwen2.5:3b`; use `qwen2.5:7b` if Docker has ≥8 GB RAM. Keep the two in sync — the container healthcheck greps for the family. |
+| `OLLAMA_HOST_PORT` / `OLLAMA_BASE_URL` | Set both to a free port if the host already runs Ollama natively on 11434. |
+
 
 Then generate Trino's credentials. It serves HTTPS with password auth, and the two
 files that needs — a TLS keystore holding a private key and a bcrypt password file —
@@ -129,6 +135,9 @@ python task_1/task_1_cpk_train_and_register.py   # composite primary key
 python task_2/task_2_fk_train_and_register.py    # single foreign key
 python task_2/task_2_cfk_train_and_register.py   # composite foreign key
 python task_3/task_3_denormalization_train_and_register.py  # normal form
+# Subject area. Needs the ollama service up (docker compose up -d ollama) to name the
+# clusters it discovers, and downloads a sentence-transformer on first run.
+python task_4/task_4_subject_area_train_and_register.py     # subject area
 ```
 
 ### 3. Run the full stack
@@ -151,6 +160,12 @@ takes the stack from a fresh clone to a working prediction in one command.
 | Prometheus | http://localhost:9090 |
 | Grafana (dashboard auto-provisioned) | http://localhost:3000 |
 | Evidently drift report | http://localhost:8085/report |
+| Ollama (task_4 subject-area labels) | http://localhost:11434 |
+
+On first start the `ollama` service pulls its model (~2 GB for the default
+`qwen2.5:3b`) into a named volume, so the container reports `starting` for a few
+minutes before it turns `healthy`. Every later `up` reuses the volume. This replaces
+the previous OpenRouter call — no API key, and label generation needs no internet.
 | MLflow | http://localhost:5000 |
 | Prefect | http://localhost:4200 |
 | MinIO console | http://localhost:9001 |
@@ -235,9 +250,16 @@ form, not P(class=1)).
 | `POST` | `/predict_fk` | `fk_model` | single foreign key |
 | `POST` | `/predict_cfk` | `composite_fk_model` | composite foreign key |
 | `POST` | `/predict_normalform` | `denormalization_model` | normal form 0–3 |
+| `POST` | `/predict_subject_area` | `subject_area_model` | subject-area name |
 
 The request schema for each route is a Pydantic model in `webservice/data_model_*.py` —
 that file is the source of truth for the exact feature list.
+
+`/predict_subject_area` is the one endpoint whose request is text rather than column
+statistics (`table_name` plus a comma-separated `columns` string), and whose
+`prediction` is therefore a string rather than an int class. A table that fits no
+discovered area still gets the nearest one, so a low `probability` — not a special
+label — is the signal not to trust the answer.
 
 ---
 

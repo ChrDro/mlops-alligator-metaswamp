@@ -134,6 +134,58 @@ services:
     networks:
       - ml-services-monitoring
 
+  # Open-weights LLM that names the task_4 subject areas. Replaces the OpenRouter
+  # call, so the stack needs no API key and no outbound network at label time.
+  ollama:
+    image: ollama/ollama:0.32.5
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      # Host port is configurable because a machine may already run Ollama natively
+      # on 11434; in-network callers always use ollama:11434.
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      # Named volume, so the model is pulled once instead of on every `up`.
+      - ollama_models:/root/.ollama
+    environment:
+      # Default is 5 min. Labelling is bursty; reloading the weights costs more
+      # than the generation itself.
+      - OLLAMA_KEEP_ALIVE=1h
+    # The image ships no models, so the pull happens here. Same shape as minio below.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        ollama_pid=$$!
+        until ollama list >/dev/null 2>&1; do
+          echo "Waiting for Ollama to accept connections...";
+          sleep 1;
+        done
+        ollama pull ${OLLAMA_MODEL:-qwen2.5:3b}
+        echo "Ollama ready."
+        wait "$$ollama_pid"
+    healthcheck:
+      # Matches the model, not just the server - a call during the pull gets a 404.
+      test: ["CMD-SHELL", "ollama list | grep -q ${OLLAMA_MODEL_FAMILY:-qwen2.5}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # Covers the initial pull (~2 GB for qwen2.5:3b).
+      start_period: 600s
+    # CPU-only by default, which is what keeps this portable: Docker Desktop on
+    # macOS/Windows cannot reach the GPU anyway. On a Linux host with the NVIDIA
+    # container toolkit, uncomment for a large speedup.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      - ml-services-monitoring
+
   minio:
     image: minio/minio:latest
     container_name: mlflow_minio
@@ -333,6 +385,7 @@ volumes:
   prometheus-data:
   minio_data:
   postgres_data:
+  ollama_models:
   nessie_data:
 
 networks:

@@ -194,6 +194,13 @@ wait_for_http "http://localhost:8080/" "model-service" 180
 # the first boot after a rebuild is slow. Its healthcheck allows 300s start period.
 wait_for_http "http://localhost:4200/api/health" "prefect" 420
 
+# The task_4 training script asks this service to name each discovered subject area,
+# so it has to be up before step 3. Its healthcheck only passes once the model is
+# pulled into the volume, which on a cold start means a multi-GB download.
+if [ "$SKIP_TRAIN" = false ]; then
+    wait_for_healthy ollama 900
+fi
+
 # --- 3. training -------------------------------------------------------------
 
 TRAIN_SCRIPTS=(
@@ -202,6 +209,11 @@ TRAIN_SCRIPTS=(
     "fk_model:task_2/task_2_fk_train_and_register.py"
     "composite_fk_model:task_2/task_2_cfk_train_and_register.py"
     "denormalization_model:task_3/task_3_denormalization_train_and_register.py"
+    # Slowest of the five on a cold cache: it downloads the sentence-transformer,
+    # embeds every table, and asks the ollama service to name each cluster. Step 5
+    # globs curl_tests/test_curl_predict_*.sh, so leaving this untrained would fail
+    # the smoke test rather than skip it.
+    "subject_area_model:task_4/task_4_subject_area_train_and_register.py"
 )
 
 step "3/7  Train and register models"
@@ -401,9 +413,12 @@ $BOLD$GREEN Stack is ready.$RESET
     Normalform Predict Data Drift Monitoring  /d/evidently-normalform-drift
     Normalform Model Performance Monitoring   /d/evidently-normalform-quality
 
+  Ollama        http://localhost:${OLLAMA_HOST_PORT:-11434}   (names the task_4 subject areas)
+
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
+  Subject area:         bash curl_tests/test_curl_predict_subject_area.sh
   Trigger Streaming:    bash trigger_prefect_pipeline.sh
-  Results:              iceberg.prediction_results.key_results / nf_results
+  Results:              iceberg.prediction_results.key_results / nf_results / subject_area_results
 
   Monitoring notes:
     Drift fills automatically from all 5 predict endpoints, one track per

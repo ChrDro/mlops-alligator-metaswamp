@@ -25,13 +25,16 @@ actually guarantee - so every consumer must be idempotent.
 
 Per-track claiming
 ------------------
-Two independent consumers process each change:
+Three independent consumers process each change:
 
-* ``keys`` - the pk/fk/cpk/cfk pipeline (``pk_fk_pipeline.py``)
-* ``nf``   - the normal-form pipeline (``normalform_pipeline.py``)
+* ``keys``         - the pk/fk/cpk/cfk pipeline (``pk_fk_pipeline.py``)
+* ``nf``           - the normal-form pipeline (``normalform_pipeline.py``)
+* ``subject_area`` - the subject-area pipeline (``subject_area_pipeline.py``)
 
-A row therefore carries one claim/completion column pair per track, so one track
-finishing does not hide the change from the other.
+A row therefore carries one claim/completion column trio per track, so one track
+finishing does not hide the change from the others. The DDL is generated from
+:data:`TRACKS`, so adding a fourth consumer means editing that tuple and nothing
+else here.
 
 Concurrency: claiming is a plain ``UPDATE`` followed by a ``SELECT``. Trino/iceberg
 offers no ``SELECT ... FOR UPDATE``, so two concurrent runs of the *same* track
@@ -71,9 +74,19 @@ EVENT_RESOURCE_ID = "alligator.metaswamp/new-predict-data"
 
 TRACK_KEYS = "keys"
 TRACK_NF = "nf"
-TRACKS = (TRACK_KEYS, TRACK_NF)
+TRACK_SUBJECT_AREA = "subject_area"
+TRACKS = (TRACK_KEYS, TRACK_NF, TRACK_SUBJECT_AREA)
 
 PENDING_TABLE = "iceberg.staging.pending_changes"
+
+# Split out because information_schema is per-catalog in Trino: probing the work
+# list's columns has to query the catalog the table actually lives in, and hardcoding
+# a second copy of the name is how that ended up pointing at duckdb after the move to
+# iceberg.
+PENDING_CATALOG, PENDING_SCHEMA, PENDING_NAME = PENDING_TABLE.split(".")
+
+# The three claim columns every track owns, in DDL order.
+CLAIM_SUFFIXES = ("claimed_by", "claimed_at", "completed_at")
 
 
 class TableRef(NamedTuple):
@@ -184,9 +197,59 @@ def _check_track(track: str) -> None:
         raise ValueError(msg)
 
 
+def claim_columns() -> list[str]:
+    """Every per-track claim column, derived from TRACKS so the two cannot drift."""
+    return [f"{track}_{suffix}" for track in TRACKS for suffix in CLAIM_SUFFIXES]
+
+
+def _add_missing_claim_columns(conn: Connection) -> list[str]:
+    """
+    Bring an existing pending_changes table up to the current track list.
+
+    ``CREATE TABLE IF NOT EXISTS`` leaves an existing table alone, so a work list
+    created before a track was added lacks that track's three columns - and the
+    claiming ``UPDATE`` would then fail on a missing column. The columns are added
+    instead of the table being dropped and recreated (which is what
+    pk_fk_pipeline does for its queue) because dropping this one loses work for
+    good: the watermarks are already persisted, so the detector would never flag
+    those tables again.
+    """
+    present = {
+        row[0]
+        for row in conn.execute(
+            text(f"""
+                SELECT column_name
+                FROM {PENDING_CATALOG}.information_schema.columns
+                WHERE table_schema = :schema AND table_name = :name
+            """),  # noqa: S608 - catalog comes from the PENDING_TABLE constant
+            {"schema": PENDING_SCHEMA, "name": PENDING_NAME},
+        ).fetchall()
+    }
+    missing = [column for column in claim_columns() if column not in present]
+
+    for column in missing:
+        try:
+            conn.execute(text(f"ALTER TABLE {PENDING_TABLE} ADD COLUMN {column} VARCHAR"))
+        except Exception as error:
+            msg = (
+                f"pending_changes is missing the column {column!r} and it could not be "
+                f"added ({error}). Its schema predates a track in TRACKS={TRACKS}. "
+                f"Resolve it by hand - once the open rows are drained or accepted as "
+                f"lost, DROP TABLE {PENDING_TABLE} and let the next run recreate it."
+            )
+            raise RuntimeError(msg) from error
+
+    if missing:
+        print(f"pending_changes: added {len(missing)} missing claim column(s): {missing}")
+    return missing
+
+
 def ensure_pending_table(conn: Connection) -> None:
-    """Create the pending-changes work list if it does not exist yet."""
+    """Create the pending-changes work list, or extend it for a newly added track."""
     conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
+    # Generated from TRACKS rather than written out, so this DDL and the
+    # claim/complete/release statements cannot drift apart when a track is added.
+    claim_ddl = ",\n                ".join(f"{column} VARCHAR" for column in claim_columns())
     conn.execute(
         text(f"""
             CREATE TABLE IF NOT EXISTS {PENDING_TABLE} (
@@ -196,15 +259,11 @@ def ensure_pending_table(conn: Connection) -> None:
                 change_type VARCHAR,
                 source VARCHAR,
                 detected_at VARCHAR,
-                keys_claimed_by VARCHAR,
-                keys_claimed_at VARCHAR,
-                keys_completed_at VARCHAR,
-                nf_claimed_by VARCHAR,
-                nf_claimed_at VARCHAR,
-                nf_completed_at VARCHAR
+                {claim_ddl}
             )
         """),
     )
+    _add_missing_claim_columns(conn)
 
 
 def record_pending_changes(
@@ -233,7 +292,12 @@ def record_pending_changes(
     ensure_pending_table(conn)
     detected_at = _now()
 
-    # One multi-row INSERT keeps this to a single round trip to Trino.
+    # One multi-row INSERT keeps this to a single round trip to Trino. The column
+    # list is explicit rather than positional: the claim columns are generated from
+    # TRACKS, and ones added later by _add_missing_claim_columns land at the end of
+    # an existing table, so position is not something to rely on.
+    insert_columns = ["database", "schema", "table_name", "change_type", "source", "detected_at"]
+
     value_rows = []
     params: dict[str, str] = {"detected_at": detected_at, "source": source}
     for i, (ref, change_type) in enumerate(changes):
@@ -242,14 +306,13 @@ def record_pending_changes(
         params[f"tb_{i}"] = ref.table_name
         params[f"ct_{i}"] = change_type
         value_rows.append(
-            f"(:db_{i}, :sc_{i}, :tb_{i}, :ct_{i}, :source, :detected_at, "
-            f"NULL, NULL, NULL, NULL, NULL, NULL)",
+            f"(:db_{i}, :sc_{i}, :tb_{i}, :ct_{i}, :source, :detected_at)",
         )
 
-    conn.execute(
-        text(f"INSERT INTO {PENDING_TABLE} VALUES {', '.join(value_rows)}"),  # noqa: S608 - values are bound parameters
-        params,
-    )
+    cols = ", ".join(insert_columns)
+    vals = ", ".join(value_rows)
+    query = f"INSERT INTO {PENDING_TABLE} ({cols}) VALUES {vals}"  # noqa: S608 - bound parameters
+    conn.execute(text(query), params)
     return len(changes)
 
 
