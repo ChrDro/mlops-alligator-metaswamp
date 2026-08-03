@@ -129,6 +129,41 @@ docker compose up --build
 | Grafana (dashboard auto-provisioned) | http://localhost:3000 |
 | Evidently drift report | http://localhost:8085/report |
 
+#### Alternative: start the stack from a container (Docker-out-of-Docker)
+
+```bash
+./scripts/run_stack_in_container.sh
+```
+
+This runs the compose CLI inside a container that has the host's Docker socket
+mounted, so the services it starts are siblings of the launcher on the host
+daemon — same published ports, same named volumes, same image cache as
+`docker compose up`. There is no nested Docker daemon and no `privileged: true`.
+Useful when the machine that orchestrates the stack should not need a Python
+environment or a compose plugin of its own, only a socket.
+
+Arguments are passed straight through to `docker compose` inside the launcher:
+
+```bash
+./scripts/run_stack_in_container.sh ps
+./scripts/run_stack_in_container.sh logs -f grafana
+./scripts/run_stack_in_container.sh up -d prometheus grafana
+./scripts/run_stack_in_container.sh down
+```
+
+Works on macOS, Linux and Windows (Git Bash or WSL2) with Docker Desktop. The
+launcher has to mount the repo at the **same absolute path the Docker daemon
+uses for it** — the host path on macOS and Linux, `/mnt/<drive>/...` under
+Docker Desktop for Windows: the relative bind mounts in `docker-compose.yaml`
+are resolved by the CLI in the launcher but mounted by the host daemon, so a
+wrong path would silently start Prometheus and Grafana without their
+configuration. The script probes this before starting anything and aborts with
+the detected path if the daemon cannot see the repo; override it with
+`PROJECT_DIR=... ./scripts/run_stack_in_container.sh` for an unusual setup.
+
+Mounting the Docker socket is equivalent to root on the host — this is meant for
+local development and CI, not for running untrusted code.
+
 ### 4. Make a prediction
 
 ```bash
@@ -445,6 +480,7 @@ evidently_service/     drift-monitoring service + reference builder
 prometheus/            scrape config + alert rules
 grafana/               provisioned datasource + dashboard
 test/                  API, prediction and data-quality tests
+scripts/               stack setup + Docker-out-of-Docker launcher
 data/                  training CSVs
 documentation/         MLOps plan, presentations
 ```
