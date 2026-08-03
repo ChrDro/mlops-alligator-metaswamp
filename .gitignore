@@ -230,3 +230,7 @@ dbt/target/
 
 evidently_service/references/
 data/holdouts/
+
+# alertmanager notification secret (keep the .example, ignore the real webhook URL)
+alertmanager/secrets/*
+!alertmanager/secrets/*.example
