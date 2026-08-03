@@ -242,7 +242,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Error Handling mit `HTTPException` (400 bei Input-/Predict-Fehlern) in [app.py](../webservice/app.py)
   - [x] Smoke-Tests per curl: [curl_tests/](../curl_tests/)
   - [ ] API Versioning (`/api/v1/…`) — Doku [STREAMING_PREDICTION_APPROACHES.md](STREAMING_PREDICTION_APPROACHES.md) beschreibt bereits v1-Pfade, Code nutzt sie nicht
-  - [ ] Health-Check erweitern: `/health/live` + `/health/ready` (heute nur `GET /` mit Statischer Message)
+  - [x] Health-Check erweitern: `/health/live` + `/health/ready` in [app.py](../webservice/app.py) — Liveness ohne Registry-Zugriff, Readiness meldet pro Modell die Version hinter dem Alias (`ok` / `degraded` / `unavailable`, 503 nur wenn nichts auflöst). Der `model-service`-Healthcheck in [docker-compose.yaml](../docker-compose.yaml) hängt an `/health/ready`; Tests in [test/test_api/test_health.py](../test/test_api/test_health.py)
   - [ ] `/model/info` Endpoint (Modellname, Version, Alias)
   - [ ] OpenAPI-Schema anreichern (Beschreibungen, `examples`, Tags)
   - [ ] Auskommentierten Evidently-Block in `app.py` entfernen oder reaktivieren

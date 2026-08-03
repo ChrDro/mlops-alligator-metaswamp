@@ -2,11 +2,13 @@
 
 This module owns the public API surface used in the monitoring tutorial:
 - GET / for a simple health message
+- GET /health/live and /health/ready as probes
 - POST /predict for model inference plus monitoring side effects
 - /metrics through prometheus-fastapi-instrumentator for service telemetry
 """
 
 import traceback
+from http import HTTPStatus
 
 import pandas as pd
 from data_model_cfk import CompositeForeignKey, CompositeForeignKeyPrediction
@@ -14,11 +16,12 @@ from data_model_cpk import CompositePrimaryKey, CompositePrimaryKeyPrediction
 from data_model_denormalization import NormalForm, NormalFormPrediction
 from data_model_events import NewDataAccepted, NewDataNotification
 from data_model_fk import ForeignKey, ForeignKeyPrediction
+from data_model_health import LivenessStatus, ReadinessStatus
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from event_publisher import EventPublishError, publish_new_data_event
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
 from monitoring_client import forward_to_monitoring
-from predict import predict
+from predict import MODEL_ALIAS, predict, resolve_model_versions
 from prometheus_fastapi_instrumentator import Instrumentator
 
 
@@ -33,6 +36,58 @@ def index() -> dict:
     # Keep the root route simple so users can tell the container is alive
     # before testing the full prediction path.
     return {"message": "PK, FK Candidate and Normalform Prediction"}
+
+
+@app.get("/health/live", response_model=LivenessStatus)
+def health_live() -> LivenessStatus:
+    """
+    Liveness: the process is up and answering HTTP.
+
+    Touches nothing external on purpose. A liveness probe that failed while MLflow
+    was down would restart a container that is perfectly capable of serving the
+    models it has already cached, and throw that cache away for nothing.
+    """
+    return LivenessStatus()
+
+
+@app.get("/health/ready", response_model=ReadinessStatus)
+def health_ready(response: Response) -> ReadinessStatus:
+    """
+    Readiness: whether the registry currently resolves the models to be served.
+
+    Returns 200 while at least one model resolves - with `status` distinguishing
+    `ok` from `degraded`, because a missing alias on one of the five still leaves
+    the other four servable. Only a registry that resolves nothing at all is a
+    503, which is the point at which sending traffic here is pointless.
+    """
+    versions = resolve_model_versions()
+    unresolved = sorted(name for name, version in versions.items() if version is None)
+    resolved_count = len(versions) - len(unresolved)
+
+    if not unresolved:
+        readiness = "ok"
+        detail = f"All {len(versions)} models resolve for alias '{MODEL_ALIAS}'."
+    elif resolved_count:
+        readiness = "degraded"
+        detail = (
+            f"{resolved_count} of {len(versions)} models resolve for alias "
+            f"'{MODEL_ALIAS}'. Not resolving: {', '.join(unresolved)}."
+        )
+    else:
+        readiness = "unavailable"
+        detail = (
+            f"No model resolves for alias '{MODEL_ALIAS}'. Either the registry is "
+            f"unreachable or nothing has been registered yet - run the training "
+            f"scripts, or ./scripts/setup_stack.sh."
+        )
+        response.status_code = HTTPStatus.SERVICE_UNAVAILABLE
+
+    return ReadinessStatus(
+        status=readiness,
+        alias=MODEL_ALIAS,
+        models=versions,
+        detail=detail,
+    )
 
 
 @app.post("/predict_pk", response_model=PrimaryKeyPrediction)
