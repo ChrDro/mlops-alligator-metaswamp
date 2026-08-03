@@ -345,14 +345,18 @@ else
 
     # Dropping the watermark table makes the detector treat every table as new, so
     # the run below actually has work to do instead of finding nothing changed.
+    # Import the table name from the detector instead of repeating it: this line
+    # said duckdb.staging.source_watermarks long after the catalog became iceberg,
+    # so the DROP silently hit nothing (the duckdb catalog still exists) and the
+    # reset below quietly did nothing at all.
     docker compose exec -T prefect python -c "
-from change_detector import get_trino_engine
+from change_detector import WATERMARK_TABLE, get_trino_engine
 from sqlalchemy import text
 with get_trino_engine().begin() as conn:
-    conn.execute(text('DROP TABLE IF EXISTS duckdb.staging.source_watermarks'))
-print('Watermarks reseted')
+    conn.execute(text(f'DROP TABLE IF EXISTS {WATERMARK_TABLE}'))
+print(f'Watermarks reset ({WATERMARK_TABLE})')
 " || fail "Trino unreachable. Check network."
-    ok "Watermarks reseted — next run will assume all talbes als "new""
+    ok "Watermarks reset — next run treats every table as new"
 
     bash trigger_prefect_pipeline.sh >/dev/null 2>&1 \
         || fail "Webhook call failed."
@@ -385,7 +389,7 @@ $BOLD$GREEN Stack is ready.$RESET
 
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
   Trigger Streaming:    bash trigger_prefect_pipeline.sh
-  Results:              duckdb.prediction_results.key_results / nf_results
+  Results:              iceberg.prediction_results.key_results / nf_results
 
   Monitoring notes:
     Drift fills automatically from all 5 predict endpoints, one track per
