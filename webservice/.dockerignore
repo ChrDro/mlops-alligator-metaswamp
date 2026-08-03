@@ -1,0 +1,21 @@
+# Build context is `webservice` (see docker-compose.yaml), not the repo root, so
+# Docker reads THIS file and would ignore a .dockerignore placed at the root.
+#
+# Everything listed here either invalidates the build cache for no reason or has
+# no business inside the image.
+
+# Byte-compiled / cache directories
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets: docker-compose.yaml passes the real values in via `env_file` at run
+# time. A copy baked into the image would be both stale and a leak.
+.env
+.env.*
+
+# Local noise
+.DS_Store
+*.log

@@ -1,0 +1,22 @@
+# Build context is `evidently_service` (see docker-compose.yaml), not the repo
+# root, so Docker reads THIS file and would ignore a .dockerignore at the root.
+#
+# Note what is deliberately NOT ignored: references/ has to go into the image,
+# because config.yaml resolves the reference CSVs from the image filesystem. That
+# is also why scripts/setup_stack.sh rebuilds this service after every baseline
+# build - mounting references/ as a volume instead is a separate open item (3.3).
+
+# Byte-compiled / cache directories
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets: passed in at run time, never baked in.
+.env
+.env.*
+
+# Local noise
+.DS_Store
+*.log

@@ -20,6 +20,7 @@ in the SQL that gets built, not in what Trino does with it.
 import re
 from datetime import UTC, datetime
 
+import change_events
 import pytest
 from change_events import (
     PENDING_TABLE,
@@ -32,16 +33,19 @@ from change_events import (
     complete_pending_changes,
     count_unclaimed_changes,
     ensure_pending_table,
+    is_commit_conflict,
     record_pending_changes,
     release_pending_changes,
     release_stale_claims,
+    with_commit_retry,
 )
+from sqlalchemy.exc import DBAPIError
 
-from .conftest import FakeConnection
+from .conftest import FakeConnection, FakeEngine, trino_error
 
 
 RUN_ID = "run-abc-123"
-OTHER_TABLE = TableRef("duckdb", "new_predict_data", "customer")
+OTHER_TABLE = TableRef("iceberg", "new_predict_data", "customer")
 
 # The claim columns a work list had before the subject-area track was added. Written
 # out rather than derived from TRACKS: the point is to pin the *old* shape, so adding
@@ -57,7 +61,7 @@ LEGACY_CLAIM_COLUMNS = [
 
 # A table name that would break out of a string literal if it were interpolated
 # instead of bound. Not a realistic table name - that is the point.
-HOSTILE_TABLE = TableRef("duckdb", "new_predict_data", "orders'); DROP TABLE staging--")
+HOSTILE_TABLE = TableRef("iceberg", "new_predict_data", "orders'); DROP TABLE staging--")
 
 
 # --- track validation ---------------------------------------------------------
@@ -93,7 +97,7 @@ def test_unknown_track_is_rejected_before_any_sql_runs(function, unknown_track):
 
 @pytest.mark.parametrize("track", TRACKS)
 def test_known_tracks_are_accepted(track):
-    connection = FakeConnection(rows=[("duckdb", "new_predict_data", "customer")])
+    connection = FakeConnection(rows=[("iceberg", "new_predict_data", "customer")])
 
     assert claim_pending_changes(connection, track, RUN_ID) == [OTHER_TABLE]
 
@@ -116,8 +120,8 @@ def test_recording_appends_one_insert_for_all_changes():
     """
     connection = FakeConnection()
     changes = [
-        (TableRef("duckdb", "new_predict_data", "customer"), "new_table"),
-        (TableRef("duckdb", "new_predict_data", "orders"), "row_count_changed"),
+        (TableRef("iceberg", "new_predict_data", "customer"), "new_table"),
+        (TableRef("iceberg", "new_predict_data", "orders"), "row_count_changed"),
     ]
 
     recorded = record_pending_changes(connection, changes, source="poller")
@@ -134,7 +138,7 @@ def test_recording_creates_the_work_list_if_missing():
 
     record_pending_changes(connection, [(OTHER_TABLE, "new_table")], source="poller")
 
-    assert connection.statements("CREATE SCHEMA IF NOT EXISTS duckdb.staging")
+    assert connection.statements("CREATE SCHEMA IF NOT EXISTS iceberg.staging")
     assert connection.statements("CREATE TABLE IF NOT EXISTS")
 
 
@@ -246,7 +250,7 @@ def test_recording_stores_the_source_and_a_detection_timestamp():
 
 
 def test_claiming_marks_open_rows_then_reads_back_its_own():
-    connection = FakeConnection(rows=[("duckdb", "new_predict_data", "customer")])
+    connection = FakeConnection(rows=[("iceberg", "new_predict_data", "customer")])
 
     claimed = claim_pending_changes(connection, TRACK_KEYS, RUN_ID)
 
@@ -268,7 +272,7 @@ def test_claiming_deduplicates_tables_via_distinct():
     the reader is what collapses them - otherwise a table reloaded five times would be
     profiled five times in one run.
     """
-    connection = FakeConnection(rows=[("duckdb", "new_predict_data", "customer")])
+    connection = FakeConnection(rows=[("iceberg", "new_predict_data", "customer")])
 
     claim_pending_changes(connection, TRACK_KEYS, RUN_ID)
 
@@ -415,9 +419,97 @@ def test_work_list_carries_one_claim_column_pair_per_track():
             assert f"{track}_{column}" in create_sql
 
 
+# --- commit-conflict retries --------------------------------------------------
+
+
+def test_work_runs_in_a_transaction_and_its_result_is_passed_through():
+    engine = FakeEngine()
+
+    result = with_commit_retry(engine, lambda conn: claim_pending_changes(conn, TRACK_NF, RUN_ID))
+
+    assert result == []
+    assert engine.attempts == 1
+
+
+def test_commit_conflict_is_retried_on_a_fresh_transaction(no_sleep):
+    """
+    The core of the fix: both tracks are woken by one event and claim the same rows,
+    so on iceberg whichever commits second fails validation. The loser must re-run
+    against the winner's snapshot rather than failing the flow.
+    """
+    engine = FakeEngine(commit_errors=[trino_error("ICEBERG_COMMIT_ERROR")])
+
+    claimed = with_commit_retry(
+        engine,
+        lambda conn: claim_pending_changes(conn, TRACK_NF, RUN_ID),
+    )
+
+    assert claimed == []
+    assert engine.attempts == 2
+    # A dead transaction cannot be reused, so the retry needs its own connection.
+    assert engine.connections[0] is not engine.connections[1]
+    for connection in engine.connections:
+        assert connection.statements(f"SET {TRACK_NF}_claimed_by")
+
+
+def test_retry_backoff_doubles_and_starts_at_the_base_delay(no_sleep):
+    engine = FakeEngine(commit_errors=[trino_error("ICEBERG_COMMIT_ERROR")] * 3)
+
+    with_commit_retry(engine, lambda conn: claim_pending_changes(conn, TRACK_NF, RUN_ID))
+
+    assert no_sleep == [1.0, 2.0, 4.0]
+
+
+def test_a_conflict_that_never_clears_still_fails_the_flow(no_sleep):
+    """
+    Retrying forever would hide a genuinely stuck table and hold the claim open. The
+    flow's own error path (release, then retry next detection pass) is the fallback.
+    """
+    engine = FakeEngine(commit_errors=[trino_error("ICEBERG_COMMIT_ERROR")] * 10)
+
+    with pytest.raises(DBAPIError):
+        with_commit_retry(
+            engine,
+            lambda conn: claim_pending_changes(conn, TRACK_NF, RUN_ID),
+            attempts=3,
+        )
+
+    assert engine.attempts == 3
+
+
+def test_other_database_errors_are_not_retried(no_sleep):
+    """Only a commit-time conflict is safe to replay; a real failure must surface."""
+    engine = FakeEngine(commit_errors=[trino_error("TABLE_NOT_FOUND")])
+
+    with pytest.raises(DBAPIError):
+        with_commit_retry(engine, lambda conn: claim_pending_changes(conn, TRACK_NF, RUN_ID))
+
+    assert engine.attempts == 1
+    assert no_sleep == []
+
+
+def test_conflict_is_recognised_from_the_message_when_error_name_is_absent():
+    """Not every trino client exposes error_name, so the string fallback matters."""
+    error = DBAPIError("UPDATE …", {}, Exception("...name=ICEBERG_COMMIT_ERROR, message=..."))
+
+    assert is_commit_conflict(error)
+
+
+def test_unrelated_errors_are_not_mistaken_for_conflicts():
+    assert not is_commit_conflict(DBAPIError("UPDATE …", {}, Exception("connection refused")))
+
+
 # --- helpers ------------------------------------------------------------------
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Record the backoff delays instead of waiting them out."""
+    delays: list[float] = []
+    monkeypatch.setattr(change_events.time, "sleep", delays.append)
+    return delays
 
 
 def _parse_timestamp(value: str) -> datetime:
