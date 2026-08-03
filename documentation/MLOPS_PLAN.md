@@ -166,7 +166,9 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 ## 2. DETAILLIERTE TODO-LISTE
 
 > **Stand: 30. Juli 2026** — abgeglichen mit dem tatsächlichen Repo-Zustand
-> (Branch `feature/env_example`, 1 Commit vor `origin/dev`).
+> (Branch `dev` auf `e170ae1`, Arbeitsverzeichnis sauber). Zahlen aus einem echten Lauf:
+> `pytest --cov` → 273 passed / 86,38 %, `docker images`, `curl localhost:8080/metrics`
+> gegen den laufenden Stack.
 > Legende: `[x]` erledigt · `[~]` teilweise erledigt (Details im Unterpunkt) · `[ ]` offen · ~~durchgestrichen~~ = bewusst verworfen.
 
 **Fortschritt auf einen Blick**
@@ -232,7 +234,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] **Kein `dev`-Extra mehr, alles in `dependencies` (30.07.)** — das gesamte Test-Tooling (`pytest`, `pytest-cov`, `pytest-mock`, `httpx2`, `ruff`, `pre-commit`) steht in `dependencies`, damit ein blankes `uv sync` linten, testen **und** Coverage messen kann, ohne dass sich jemand ein Flag merken muss. Nachprüfbar: `uv export` und `uv export --extra dev` liefern identische Paketmengen. Preis ist, dass ein Consumer das Test-Tooling mitinstalliert — bewusst in Kauf genommen
     - `[project.optional-dependencies] dev = []` bleibt als **leerer Alias** stehen, damit CIs `uv pip install -e ".[dev]"` weiter auflöst. Ein unbekanntes Extra würde uv nur **warnen** statt zu scheitern — genau so blieb vorher unbemerkt, dass `pytest-cov` fehlte und die Codecov-/HTML-Upload-Steps nie etwas zu laden hatten. Alias und CI-Zeile gemeinsam in 2.3 entfernen
 
-- [x] **2.2** Unit Tests schreiben — **erledigt am 30.07.**, 56 → 273 Tests, 86 % Coverage im gemessenen Scope. Vollständiger Katalog: **[TEST_SUITE.md](TEST_SUITE.md)** (was jeder der 217 neuen Tests prüft und warum)
+- [x] **2.2** Unit Tests schreiben — **erledigt am 30.07.**, 56 → 273 Tests, 86 % Coverage im gemessenen Scope. ⚠️ Der Verweis auf `TEST_SUITE.md` ist ein toter Link: `documentation/` enthält nur diese Datei und `flowchart.md`. Das Dokument entweder anlegen oder den Verweis entfernen — sonst wiederholt sich das Muster der 7 nie committeten Begleit-Dokumente (7.2)
   - [x] Datenqualitäts-Tests für Trainingsdaten: [test_training_data_quality.py](../test/test_data/test_training_data_quality.py), [..._nf.py](../test/test_data/test_training_data_quality_nf.py), [..._subject_area.py](../test/test_data/test_training_data_quality_subject_area.py)
   - [x] Schema-Contract-Tests über alle 5 Modelle: [test_model_schema_contract.py](../test/test_models/test_model_schema_contract.py) (Menge **und** Reihenfolge der Features, MLflow-Signatur vs. Pydantic)
   - [x] **Prediction-Logik**: [test/test_webservice/test_predict.py](../test/test_webservice/test_predict.py) — 12 Tests, MLflow-Model durch `FakePyFuncModel` ersetzt (behält die Trennung pyfunc ↔ rohes sklearn-Modell, weil genau die der 27.07.-Bug war). Der Multiclass-Test ist so gebaut, dass altes `probabilities[0][1]` (0,20) und korrektes `max(proba)` (0,55) **verschiedene** Zahlen liefern — ein wiedereingeführter fixer Klassenindex fällt sofort auf. `_align_to_signature` in beide Richtungen: Umsortierung *und* Fehlermeldung mit Feldnamen
@@ -250,7 +252,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [~] Matrix Testing vorhanden, aber nur `['3.11']` → um 3.12 erweitern oder Matrix entfernen
   - [ ] Coverage Badge zu README hinzufügen
   - [ ] `push`/`pull_request` horchen auf `develop`; der Integrationsbranch heißt `dev` → direkte Pushes auf `dev` und PRs *nach* `dev` laufen ohne CI. Entweder `develop` → `dev` umbenennen oder beides listen
-  - [ ] `origin/main` steht auf `e203865 Initial commit`, `origin/dev` ist **90 Commits** weiter → der Branch-Schutz („Tests grün vor Merge") greift heute faktisch nirgends; `dev` → `main` mergen und `main` als Default-Ziel etablieren
+  - [ ] `origin/main` steht auf `e203865 Initial commit`, `origin/dev` ist **100 Commits** weiter → der Branch-Schutz („Tests grün vor Merge") greift heute faktisch nirgends; `dev` → `main` mergen und `main` als Default-Ziel etablieren
 
 - [ ] **2.4** Docker Build & GHCR Pipeline  *(offen — TODO „Docker build über github actions")*
   - [ ] `.github/workflows/docker-build.yml` erstellen
@@ -268,7 +270,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Pydantic Models für **alle 5** Endpoints: [data_model_pk.py](../webservice/data_model_pk.py), `_cpk`, `_fk`, `_cfk`, [data_model_denormalization.py](../webservice/data_model_denormalization.py)
   - [x] Endpoints `/predict_pk`, `/predict_cpk`, `/predict_fk`, `/predict_cfk`, `/predict_normalform` inkl. Probability im Response
   - [x] Error Handling mit `HTTPException` (400 bei Input-/Predict-Fehlern) in [app.py](../webservice/app.py)
-  - [x] Smoke-Tests per curl: [curl_tests/](../curl_tests/) — 5 Predict-Skripte + `test_curl_notify_new_data.sh`
+  - [x] Smoke-Tests per curl: [curl_tests/](../curl_tests/) — 5 Predict-Skripte. Der Streaming-Trigger heißt seit dem 30.07. [trigger_prefect_pipeline.sh](../trigger_prefect_pipeline.sh) und liegt im **Repo-Root**, nicht in `curl_tests/` → entweder zu den anderen Skripten zurückverschieben oder in der README als eigener Einstiegspunkt dokumentieren
   - [x] `POST /events/new-data` als Push-Trigger für die Streaming-Pipeline (202 / 503 mit Hinweis auf den Cron-Fallback)
   - [x] **Drift-Forwarding aus dem Serving-Pfad aktiv**: jeder der 5 Endpoints hängt `forward_to_monitoring(response, "<track>")` an `BackgroundTasks`, d.h. nach dem Senden der Response. Der frühere auskommentierte Evidently-Block ist damit ersetzt, nicht nur reaktiviert
   - [ ] API Versioning (`/api/v1/…`) — Code nutzt weiterhin flache Pfade
@@ -311,8 +313,8 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] ~~Models für Data Transformation~~ — bewusst verworfen: die Feature-Extraktion liegt in Prefect, weil dbt-trino keine Python-Models unterstützt (siehe Docstring in [pk_fk_pipeline.py:10](../prefect/pk_fk_pipeline.py#L10))
   - [x] ~~Seeds für Test-Daten~~ — mit `ad3ccdf` („Removed queue.csv and yaml as dbt seeds") **entfernt**
   - [ ] **Ist-Zustand: von dbt sind nur noch `dbt_project.yml`, `profiles.yml` und `.user.yml` getrackt.** Keine Models, keine Seeds, keine Tests, kein Aufruf aus Prefect, Compose oder `setup_stack.sh`. Der einzige verbleibende Bezug im Code ist ein erklärender Kommentar. Damit ist dbt derzeit reine Konfiguration ohne Wirkung — eine der beiden Richtungen muss gewählt werden:
-    - **(a) reaktivieren** entlang [workflow_idea.txt](../workflow_idea.txt): `dbt` lädt `tpch.customer` als CSV-Seed nach `new_predict_data` in Trino, das triggert per Watermark-Diff die Streaming-Pipeline. Das gäbe dem Demo-Pfad ein realistisches Ingestion-Frontend und würde „dbt" im Stack ehrlich machen
-      - `workflow_idea.txt` selbst ist **untracked** (aus 1.3 hierher verschoben, weil es kein Aufräum-Thema ist): bei (a) mit-committen, weil es dann die Quelle des Demo-Pfads ist — bei (b) löschen. Ebenso die untracked `dbt/seeds/employee_3.csv`, `dbt/seeds/employee_not_3.csv` und `dbt/test/.gitkeep`, die offenbar in Richtung (a) angelegt wurden, obwohl `ad3ccdf` die Seeds gerade entfernt hatte
+    - **(a) reaktivieren** entlang der Demo-Idee: `dbt` lädt `tpch.customer` als CSV-Seed nach `new_predict_data` in Trino, das triggert per Watermark-Diff die Streaming-Pipeline. Das gäbe dem Demo-Pfad ein realistisches Ingestion-Frontend und würde „dbt" im Stack ehrlich machen
+      - ⚠️ Diese Idee stand nur in einer untracked `workflow_idea.txt` im Repo-Root, die beim Aufräumen am 30.07. **gelöscht** wurde — sie ist damit nur noch hier festgehalten. Ebenso sind die zwischenzeitlich angelegten `dbt/seeds/*.csv` und `dbt/test/` wieder verschwunden. Wenn (a) gewählt wird, gehören Seeds und Demo-Beschreibung diesmal ins Repo, nicht ins Arbeitsverzeichnis
     - **(b) entfernen** und `dbt-core`/`dbt-trino`/`prefect-dbt` aus `pyproject.toml` streichen — drei nicht genutzte Abhängigkeiten samt Transitivem
   - [ ] Solange (a) nicht umgesetzt ist: die Zeile „Data pipeline | Prefect + dbt" in der README-Stack-Tabelle korrigieren (Prefect ist fertig, dbt nicht vorhanden)
 
@@ -320,7 +322,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Schema-/Datendokumentation: [test/test_data/README.md](../test/test_data/README.md), `README_NF.md`, `README_SubjectArea.md`
   - [x] Datenqualitätstests — als **pytest**-Suite umgesetzt (nicht als dbt tests), läuft gegen die CSVs in [data/](../data/)
   - [x] Holdout-/Referenz-Generierung für das Monitoring: [build_monitoring_references.py](../evidently_service/build_monitoring_references.py) splittet die gelabelten Trainingsdaten in Referenz + Holdout, stratifiziert je Zielspalte
-  - [ ] ~~dbt Seed-Dateien~~ — entfernt, siehe 4.1
+  - [x] ~~dbt Seed-Dateien~~ — entfernt, siehe 4.1
   - [ ] Python-Script zur erweiterten Datengenerierung (synthetische Tabellen mit bekannten PK/FK/Normalform-Eigenschaften) — bisher hängt alles am eingefrorenen, handgelabelten Datensatz
 
 - [~] **4.3** Prefect Orchestration Setup
@@ -361,14 +363,15 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Event-getriggerte Deployments inkl. Cron-Fallback (alle 15 min) und Concurrency-Limits: [serve_flows.py](../prefect/serve_flows.py)
   - [x] Re-Prediction geänderter Tabellen: Dedup-Sperre in beiden Pipelines aufgehoben, Ergebnisse werden historisiert (append)
   - [x] Recovery verwaister Claims nach hartem Prozessabbruch
+  - [x] **Bugfix 31.07. — `ICEBERG_COMMIT_ERROR` beim Claiming**: beide Pipelines hängen am selben Event, ihre Claim-`UPDATE`s trafen `staging.pending_changes` also gleichzeitig. Iceberg committet optimistisch und prüft beim Commit, ob ein neuerer Snapshot Dateien hinzugefügt hat, die auf das eigene Prädikat passen — der `keys`-Claim schreibt genau die Zeilen neu, auf die der `nf`-Claim filtert, also scheitert der zweite Commit. Die Konflikterkennung arbeitet auf **Datei-**, nicht auf Spaltenebene, die Trennung in `keys_*`/`nf_*`-Spalten schützt hier also nicht. Unter DuckDB fiel das nie auf. Fix: [`with_commit_retry`](../prefect/change_events.py) — Retry mit exponentiellem Backoff auf einer **neuen** Transaktion (eine gescheiterte ist unbrauchbar); alle Statements des Moduls sind unter Retry idempotent (`claim` filtert auf `IS NULL`, `complete`/`release` auf `claimed_by = run_id`). Verwendet in beiden Pipelines und im Detector, dessen Stale-Claim-Sweep dieselbe Tabelle schreibt
   - [x] `prefect`-Service ins `ml-services-monitoring`-Netz geholt und um den `serve()`-Runner erweitert (Server + Flow-Runner in einem Container)
   - [x] Prefect-Serverstate in Postgres statt SQLite: eigene DB `prefect` neben `mlflow_db`, angelegt von [ensure_database.py](../prefect/ensure_database.py) — überlebt jetzt `docker compose down`
   - [x] `prefect`-DB ins stündliche S3-Backup aufgenommen: eigener Service `prefect_postgres_backup` (Prefix `prefect_db_backups`, 7 Tage Retention) — das Image sichert nur je eine DB pro Container
   - [ ] **`prefect/Dockerfile` bauen** — der Service installiert `asyncpg`, `sqlalchemy`, `trino`, `pandas`, `python-dotenv`, `requests` beim Containerstart per `pip install`. Deshalb braucht der Healthcheck `start_period: 300s`, und jeder `docker compose up` zahlt die Installation erneut. Die Versionen sind hier ein zweites Mal gepinnt, unabhängig von `pyproject.toml` → Driftquelle
   - [ ] Event Logging zu Monitoring (Prometheus-Metriken für empfangene Events, Detection-Latenz, Backlog-Tiefe) — Prefect ist **kein** Scrape-Target in [prometheus.yaml](../prometheus/prometheus.yaml), die Streaming-Pipeline ist damit die einzige Komponente ohne Telemetrie
   - [ ] Housekeeping-Job: abgeschlossene `pending_changes`-Zeilen nach N Tagen löschen
-  - [ ] Automatisierte Tests für Detector und Claim-Logik (bisher nur sqlglot-Parse + TestClient-Check)
-  - [ ] **Noch nie end-to-end gegen echte Trino-Daten gelaufen** — offen seit dem letzten Abgleich; `workflow_idea.txt` skizziert den Demo-Pfad dafür (siehe 4.1a)
+  - [x] **Automatisierte Tests für Detector und Claim-Logik (30.07.)** — [test/test_pipelines/](../test/test_pipelines/), 70 Tests ohne Trino: `diff_snapshots` inkl. blindem Fleck, Claim-Protokoll gegen eine mitschreibende `FakeConnection`, `recompute_table_stats`. Details in 2.2
+  - [ ] **Noch nie end-to-end gegen echte Trino-Daten gelaufen** — offen seit dem letzten Abgleich; der Demo-Pfad dafür ist in 4.1a beschrieben
 
 ---
 
@@ -422,11 +425,16 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] `prometheus-fastapi-instrumentator` aktiviert, `/metrics` exponiert
   - [x] [prometheus/prometheus.yaml](../prometheus/prometheus.yaml) scraped `prometheus`, `model-service`, `evidently_service`
   - [x] Der Evidently-Service exportiert eigene Gauges über `prometheus_client` + `DispatcherMiddleware` auf `/metrics` — inkl. `evidently_reference_dataset_hash`, das [setup_stack.sh](../scripts/setup_stack.sh) als Beweis auswertet, dass der Service mit einer nutzbaren Baseline hochgekommen ist
-  - [ ] Custom Metrics im Model-Service hinzufügen — **existieren nicht**; die README behauptet ein `webservice/metrics.py`, das nie geschrieben wurde:
-    - [ ] Prediction Counter (by model type: pk/cpk/fk/cfk/normalform)
-    - [ ] Prediction Duration Histogram (Model-Inferenz getrennt vom HTTP-Overhead)
-    - [ ] Error Counter
-    - [ ] Model Version Gauge (macht Rollbacks in Grafana sichtbar und ist Voraussetzung für 5.3)
+  - [~] **Custom Metrics angelegt (30.07.)**: [webservice/metrics.py](../webservice/metrics.py) definiert vier `model_*`-Metriken plus die Helfer `record_success()` und `record_error()`. `prometheus_client` kommt transitiv über den Instrumentator, also ohne neue Abhängigkeit
+    - [x] Error Counter — `model_prediction_errors_total{model,error_type}`, wird in allen fünf `except`-Blöcken über `record_error()` befüllt
+    - [~] Prediction Counter — `model_predictions_total{model,predicted_class}` **deklariert, aber nie befüllt**
+    - [~] Prediction Duration Histogram — `model_prediction_duration_seconds{model}` **deklariert, aber nie befüllt**
+    - [~] Confidence Histogram — `model_prediction_probability{model}` **deklariert, aber nie befüllt**
+    - [ ] Model Version Gauge (macht Rollbacks in Grafana sichtbar und ist Voraussetzung für 5.3) — noch nicht angelegt
+  - [ ] 🐛 **`record_success()` wird nirgends aufgerufen.** [app.py](../webservice/app.py) importiert nur `record_error`; der Erfolgspfad der fünf Endpoints ruft keinen Recorder auf. Damit bleiben drei der vier Metriken dauerhaft ohne Datenpunkt. **Am laufenden Stack verifiziert:** `/metrics` liefert die vier `# HELP`-Zeilen (das Modul ist also geladen), aber `curl -s localhost:8080/metrics | grep -c '^model_'` gibt **0** zurück — auch unmittelbar nach einem erfolgreichen `POST /predict_pk`. Die Coverage-Lücke zeigte genau darauf: `metrics.py` 73 %, fehlende Zeilen 54–56 = der Rumpf von `record_success`. Folgen:
+    - `ModelAlwaysPredictsOneClass` und `PredictionConfidenceCollapsed` (6.4) können **nie feuern** — ihre Zeitreihen existieren nicht
+    - das Ziel „Model-Inferenz getrennt vom HTTP-Overhead" ist unerfüllt, obwohl das Histogram bereitsteht
+    - Fix ist klein: Dauer um den `predict()`-Aufruf messen und `record_success(model, prediction_value, probability, duration)` vor dem `return` aufrufen — in allen fünf Handlern, bzw. einmal, wenn sie vorher wie in 3.1 vorgeschlagen zusammengefasst werden
   - [ ] Prefect-Flows als Scrape-Target oder Pushgateway anbinden (siehe 4.5)
 
 - [~] **6.2** Golden Signals implementieren
@@ -454,16 +462,17 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Panel für Model Version / Prediction-Klassenverteilung — braucht die Custom Metrics aus 6.1
 
 - [~] **6.4** Alerting
-  - [x] [prometheus/alert.yaml](../prometheus/alert.yaml) mit **7 Regeln** in 2 Gruppen (`service-health`, `golden-signals`):
+  - [x] [prometheus/alert.yaml](../prometheus/alert.yaml) mit **10 Regeln** in **3 Gruppen** (`service-health`, `golden-signals`, `model-health`):
     - [x] `HighServerErrorRate` (5xx >5%) / `HighClientErrorRate` (4xx >25%)
     - [x] `HighRequestLatencyP95` (>500ms)
     - [x] `NoTrafficReceived` + `InstanceDown` + `ModelServiceUnreachable`
     - [x] `HighMemoryUsage` (>1.5GB)
+    - [x] **Gruppe `model-health` neu (30.07.)**: `ModelAlwaysPredictsOneClass` (30 min nur eine Klasse bei >50 Requests), `PredictionConfidenceCollapsed` (mittlere Confidence <0,6 über 15 min), `PredictionErrorsSpiking` (>0,1 Fehler/s)
   - [x] Alertmanager konfiguriert und an Prometheus angebunden ([alertmanager.yml](../alertmanager/alertmanager.yml), UI auf :9093)
+  - [ ] ⚠️ **2 der 3 neuen Modell-Alerts können nie feuern**: `ModelAlwaysPredictsOneClass` braucht `model_predictions_total`, `PredictionConfidenceCollapsed` braucht `model_prediction_probability_sum`/`_count` — beide Serien existieren nicht, weil `record_success()` nicht aufgerufen wird (siehe 6.1). Nur `PredictionErrorsSpiking` ist funktionsfähig. Die Regeln sind korrekt formuliert, ihnen fehlt nur die Datenquelle
   - [ ] Notification Channels — Receiver `default` ist bewusst leer (null receiver); Slack/E-Mail via `*_file`-Secrets nachziehen
   - [ ] Einen Alert end-to-end testen und das Ergebnis dokumentieren *(bleibt das einzige „mindestens 1 funktionaler Alert"-Kriterium, das noch offen ist)*
   - [ ] Modell-Alerts auf die Evidently-Gauges legen (F1-Einbruch, anhaltender `drifted_share`) — liefert gleichzeitig das Trigger-Signal für 5.4
-  - [ ] README korrigieren: dort stehen „11 alert rules", es sind 7
 
 - [~] **6.5** Evidently Model Monitoring — **vom Tutorial-Stand auf produktiv umgebaut (28.07.2026)**
   - [x] Evidently-Service läuft als Container ([evidently_service/](../evidently_service/), Port 8085) und exponiert `/metrics`
@@ -499,24 +508,27 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] README hat einen Quickstart (Environment → Train → Stack → Predict)
   - [ ] Zwei Abweichungen zwischen `.env.example` und dem tatsächlich gelesenen Environment: `.env.example` nennt `MONITORING_URL`, der Code liest `MONITORING_BASE_URL` ([monitoring_client.py](../webservice/monitoring_client.py), [model_quality_backtest.py](../prefect/model_quality_backtest.py)). Nicht genutzte Variablen aus der Vorlage streichen, genutzte ergänzen (`MONITORING_ENABLED`, `MONITORING_TIMEOUT_SECONDS`, `MODEL_API_URL`, `HOLDOUT_DIR`)
   - [ ] Die Schritt-Überschriften 4 und 7 im Setup-Skript sind noch deutsch/gemischt („Check Registry und Pydantic schema contract prüfen", „Streaming-Trigger")
-  - [ ] `docker-compose.yaml` und `scripts/setup_stack.sh` sind uncommitted (Holdout-Kommentar bzw. Summary-Text) → committen
+  - [x] ~~`docker-compose.yaml` und `scripts/setup_stack.sh` uncommitted~~ — committet, Arbeitsverzeichnis ist sauber
 
 - [ ] **7.2** Dokumentation aktuell halten — **🔴 der schlechteste Bereich im Projekt**
   - [ ] **Die README beschreibt Dateien und Zahlen, die es nicht gibt.** Belegte Abweichungen:
 
-    | README sagt | Realität |
+    | README sagt | Realität (30.07.) |
     |---|---|
-    | `webservice/metrics.py` mit Model-Metriken | existiert nicht (siehe 6.1) |
+    | `webservice/metrics.py` mit Model-Metriken | ✅ **existiert jetzt** — die README war der Umsetzung voraus, nicht falsch. Aber: 3 der 4 Metriken werden nie befüllt (6.1) |
+    | „pytest with coverage" / `pytest --cov-report=term-missing` | ✅ **stimmt jetzt** — `pytest-cov` ist installiert, 273 Tests / 86 % |
     | `grafana/dashboards/golden-signals.json` | heißt `model_service_golden_signals.json` |
     | `evidently_service/build_reference.py` | heißt `build_monitoring_references.py` |
-    | `test/test_api/` deckt die API-Oberfläche ab | existiert nicht; es gibt `test/test_data/` und `test/test_models/` |
-    | „11 alert rules" | 7 Regeln |
-    | „pytest with coverage" / `pytest --cov-report=term-missing` | `pytest-cov` ist nicht installiert, der Befehl schlägt fehl |
+    | `test/test_api/` deckt die API-Oberfläche ab | heißt `test/test_webservice/`; die 75 API-Tests liegen dort |
+    | „11 alert rules" | 10 Regeln in 3 Gruppen |
     | „Data pipeline · Prefect + dbt · 🔜 planned" | Prefect-Pipelines laufen inkl. 4 Deployments; dbt hat keine Models/Seeds |
     | „Retraining · `reload_models()` hook in place" | kein solcher Hook im Code |
     | „Model monitoring · input drift" | untertrieben: 5 Tracks, Drift **und** Classification Quality |
 
-    Das ist gefährlicher als eine lückenhafte README: wer sie liest, sucht nach Dateien, die nie existierten, und hält Fertiges für geplant.
+    Zwei der neun Punkte haben sich zwischen 29. und 30.07. von selbst erledigt — die README war
+    dort der Umsetzung *voraus*, nicht hinterher. Die restlichen sieben bleiben: falsche Dateinamen
+    und Zahlen, Fertiges als „geplant" markiert. Wer die README liest, sucht nach Dateien unter
+    falschem Namen und unterschätzt, was schon läuft.
   - [ ] **7 Begleit-Dokumente wurden nie committet und liegen nicht mehr im Arbeitsverzeichnis**: `STREAMING_PIPELINE.md`, `STREAMING_PREDICTION_APPROACHES.md`, `FEATURE_PIPELINE_README.md`, `TRAIN_AND_PREDICT_FLOW.md`, `NORMALFORM_PREDICTION.md`, `PYDANTIC_PREFECT_DBT_FIX.md`, `INCREMENTAL_FEATURE_PROCESSING.md`. Sie existieren nur noch in einem Stash (`9fbb699`). `documentation/` enthält heute ausschließlich diese Datei und `flowchart.md` — alle Verweise darauf in früheren Planversionen waren tote Links. Entweder aus dem Stash zurückholen und committen oder die Inhalte in README/Modul-Docstrings überführen und die Dokumente als erledigt abhaken
   - [ ] [flowchart.md](flowchart.md) an den Ist-Stand anpassen (Postgres/MinIO-Backend, Prefect statt dbt-Python-Models, zwei Prediction-Pipelines, Evidently mit 5 Tracks, Backtest-Flow)
   - [ ] Monitoring-Architektur dokumentieren — die entscheidende Trennung „Drift ohne Labels aus dem Serving-Pfad **vs.** Classification Quality mit Labels aus dem Backtest" steht heute nur in Docstrings und in der Compose-/Setup-Ausgabe
@@ -557,6 +569,29 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 >   mit getrennten Drift- und Classification-Quality-Pfaden.
 > - MLflow **Stages** (Arbeitspaket 7/8) sind in MLflow 3.x deprecated → das Projekt nutzt **Aliase**.
 
+**Abgleich Arbeitspakete 1–5 gegen den Code (30.07.2026)** — Details jeweils im „Ist-Stand"-Block
+unter dem Arbeitspaket. 9 von 15 Deliverables erfüllt.
+
+| AP | Deliverable 1 | Deliverable 2 | Deliverable 3 | Fazit |
+|----|---------------|---------------|---------------|-------|
+| **1** Foundation | Ruff fehlerfrei ✅ | ≥10 Tests / >50% Cov ✅ **273 / 86%** | CI auf jedem Push 🟡 | 🟢 **erledigt**, Testziel weit übertroffen |
+| **2** Docker & Registry | Image <500MB ❌ **1,65 GB** | GHCR-Push ❌ | Compose auf GHCR ❌ | 🔴 **nicht begonnen** |
+| **3** API Enhancement | OpenAPI vollständig ❌ | Alle Endpoints getestet ✅ | Health Checks ❌ | 🟡 Modelle + Tests fertig, Endpoint-Liste offen |
+| **4** Data Pipeline | dbt generiert Test-Daten ❌ | Prefect Server ✅ | Flow orchestriert dbt ❌ *(verworfen)* | 🟡 Prefect-Hälfte fertig, dbt zurückgebaut |
+| **5** Batch Pipeline | Training Flow automatisch ❌ | Batch Prediction per CSV ❌ | Flows schedulbar ✅ | 🟡 Scheduling steht, Training + CSV fehlen |
+
+Drei Muster fallen dabei auf:
+
+1. **Testing ist von der Schlusslicht- zur Vorzeigedisziplin geworden** — AP1 war beim letzten
+   Abgleich die größte Lücke und ist heute mit 273 Tests und 86 % Coverage übererfüllt.
+2. **Was orchestriert werden musste, läuft; was Training betrifft, nicht.** Prediction-Pipelines,
+   Event-Kette, Scheduling und Monitoring stehen — die fünf Trainings-Skripte sind die einzigen
+   Komponenten, die Prefect nie erreicht haben (`grep -l prefect task_*/*.py` ist leer). Das ist
+   dieselbe Lücke wie 5.4 und sollte einmal gebaut werden, nicht zweimal.
+3. **Zwei Deliverables wurden bewusst anders gelöst als geplant** (dbt-Models → Prefect,
+   Message Queue → Prefect Events) und sind keine Schulden. Zwei weitere sind es sehr wohl:
+   Docker-Härtung (AP2) und der CSV-Eingang (AP5).
+
 ### ARBEITSPAKET 1: Foundation (Woche 1)
 
 **Ziel**: Clean Code, Testing-Infrastruktur, Basis CI/CD
@@ -595,6 +630,22 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - ✅ Ruff läuft ohne Fehler
 - ✅ Mindestens 10 Unit Tests mit >50% Coverage
 - ✅ CI Pipeline läuft auf jedem Push
+
+> #### 🟢 Ist-Stand AP1 (30.07.2026): erledigt, Testziel deutlich übertroffen
+>
+> | Deliverable | Ist | Nachweis |
+> |---|---|---|
+> | Ruff läuft ohne Fehler | ✅ | `ruff check` + `ruff format --check` grün in CI **und** als pre-commit-Hook |
+> | ≥10 Unit Tests, >50% Coverage | ✅ **273 Tests, 86,38%** | `pytest --cov` → „273 passed in 7.06s", `fail_under = 80` erreicht |
+> | CI läuft auf jedem Push | 🟡 | Feature-Branches ja, `dev` selbst nein (Trigger horcht auf `develop`) |
+>
+> **Abweichungen von der Planung — alle bewusst:**
+> - Ruff-Konfiguration liegt in [ruff.toml](../ruff.toml), nicht in `pyproject.toml [tool.ruff]`. Inhaltlich erfüllt sie den Plan und geht darüber hinaus: `line-length = 100` ✓, `target-version = "py311"` ✓, `select` enthält die geplanten `E, F, I, N, W, B, Q` **plus** `C90`, `UP`, `ANN` u.a.
+> - Testverzeichnis heißt `test/` statt `tests/` und hat **vier** Pakete statt der geplanten drei: `test_data/`, `test_models/`, `test_pipelines/`, `test_webservice/`. Die Rolle des geplanten `test_api/` erfüllt [test_webservice/test_api_endpoints.py](../test/test_webservice/test_api_endpoints.py) (75 Tests).
+> - `pytest-asyncio` wurde **nicht** installiert und ist nicht nötig — die Endpoints sind synchron, `TestClient` reicht. Stattdessen `httpx2` als `TestClient`-Backend.
+> - Kein `dev`-Extra: das Test-Tooling steht in `dependencies` (Begründung in 2.1).
+>
+> **Restpunkte** (in 2.3 geführt): Coverage-Badge fehlt; CI ruft `pytest` **ohne** `--cov`, weshalb die beiden Upload-Steps weiterhin nicht existierende `coverage.xml`/`htmlcov/` hochladen — die Coverage-Konfiguration ist da, CI nutzt sie nur nicht.
 
 ---
 
@@ -636,6 +687,23 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - ✅ Automatischer Push zu GHCR bei main-Branch
 - ✅ Docker Compose nutzt GHCR Images
 
+> #### 🔴 Ist-Stand AP2 (30.07.2026): nichts davon umgesetzt
+>
+> | Deliverable | Ist | Nachweis |
+> |---|---|---|
+> | Docker Image <500MB | ❌ **1,65 GB** | `docker images` → `model-service:latest` 1,65 GB, `evidently_service:latest` 1,2 GB. Faktor **3,3** über dem Ziel |
+> | Automatischer Push zu GHCR | ❌ | `.github/workflows/` enthält nur `ci.yml` |
+> | Compose nutzt GHCR Images | ❌ | beide Services haben `build:`-Blöcke, keine `image:`-Referenzen |
+>
+> **Nicht umgesetzte Teilschritte:** Multi-stage Build, non-root User, `HEALTHCHECK`, `.dockerignore`
+> (existiert in **keinem** der drei möglichen Pfade), Image-Tagging, GHCR-Secret.
+>
+> **Zwei Beobachtungen für die Umsetzung:**
+> - In [webservice/Dockerfile](../webservice/Dockerfile) steht `COPY . /app` **vor** `pip install`. Jede Code-Änderung invalidiert damit die komplette Dependency-Installation — der Build ist unnötig teuer, und ohne `.dockerignore` wandert `__pycache__/` mit ins Image. Beides trägt direkt zu den 1,65 GB bei.
+> - Das `CMD` im Beispiel-Snippet oben (`uvicorn webservice.app:app`) passt **nicht** zum Projekt: der Build-Kontext ist `webservice/` selbst, `WORKDIR` ist `/app`, und die Module importieren sich flach (`from predict import predict`). Korrekt ist `app:app`. Beim Übernehmen des Snippets nicht mitkopieren.
+>
+> Bleibt Priorität 5 der „Nächsten 5 Schritte" — nach der Doku, dem Merge-Gate und dem Retraining-Pfad.
+
 ---
 
 ### ARBEITSPAKET 3: API Enhancement (Woche 2)
@@ -665,6 +733,34 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - ✅ Alle Endpoints mit Tests
 - ✅ Health Checks funktionieren
 
+> #### 🟡 Ist-Stand AP3 (30.07.2026): Modelle und Tests fertig, die Endpoint-Liste nicht
+>
+> | Deliverable | Ist | Nachweis |
+> |---|---|---|
+> | OpenAPI Docs vollständig | ❌ | nur [data_model_events.py](../webservice/data_model_events.py) nutzt `Field(description=…)` und `json_schema_extra.examples`. Die **fünf Predict-Modelle haben keine Beschreibungen und keine Examples** — `/docs` zeigt dort nur nackte Feldnamen |
+> | Alle Endpoints mit Tests | ✅ | [test_api_endpoints.py](../test/test_webservice/test_api_endpoints.py), 75 Tests: alle 5 Routen ×(200, Echo, Modellname, Track, Feature-Reihenfolge, 400, 422), dazu `GET /`, `/metrics`, `POST /events/new-data` (202/503) |
+> | Health Checks funktionieren | ❌ | es gibt nur `GET /` mit statischer Message |
+>
+> **Endpoint-Liste des Plans vs. Code** — keiner der sechs geplanten Pfade existiert:
+>
+> | Geplant | Im Code |
+> |---|---|
+> | `/api/v1/predict/pk` · `/fk` · `/normalization` | `/predict_pk`, `/predict_cpk`, `/predict_fk`, `/predict_cfk`, `/predict_normalform` — flach, ohne Version |
+> | `/api/v1/health/live` · `/health/ready` | ❌ nicht vorhanden |
+> | `/api/v1/model/info` | ❌ nicht vorhanden |
+>
+> Zusätzlich existiert `POST /events/new-data`, das im Plan nicht vorgesehen war (AP6).
+>
+> **Teilschritt „Error Handling":** 🟡 einheitlich `HTTPException` (400 bei Predict-/Input-Fehlern,
+> 503 beim Event-Publish) und seit dem 30.07. `record_error(<model>, error)` in jedem der fünf
+> `except`-Blöcke. Es gibt aber **keinen** `@app.exception_handler` und kein Fehler-Response-Modell —
+> Fehler sind ein `detail`-String, keine strukturierte Antwort.
+>
+> **Ein Health-Check hätte hier konkreten Nutzen** und ist nicht nur Formalität: `model-service` ist
+> der einzige Compose-Service ohne `healthcheck`, und die Modelle werden lazy beim ersten Request
+> geladen (3.2). Ein `/health/ready`, das die MLflow-Erreichbarkeit prüft, würde beides sichtbar machen
+> und `depends_on: service_healthy` auf den Service ermöglichen.
+
 ---
 
 ### ARBEITSPAKET 4: Data Pipeline Foundation (Woche 2-3)
@@ -693,6 +789,30 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - ✅ Prefect Server läuft lokal
 - ✅ Erster Flow orchestriert dbt
 
+> #### 🟡 Ist-Stand AP4 (30.07.2026): Prefect-Hälfte fertig, dbt-Hälfte zurückgebaut
+>
+> | Deliverable | Ist | Nachweis |
+> |---|---|---|
+> | dbt läuft und generiert Test-Daten | ❌ | von dbt sind nur `dbt_project.yml`, `profiles.yml`, `.user.yml` getrackt. `models/` leer, `seeds/` **entfernt** (`ad3ccdf`), keine Tests |
+> | Prefect Server läuft lokal | ✅ | Service `prefect` in Compose auf :4200, Postgres-Backend, `healthy` |
+> | Erster Flow orchestriert dbt | ❌ **bewusst verworfen** | dbt-trino unterstützt keine Python-Models; die Feature-Extraktion liegt in [pk_fk_pipeline.py](../prefect/pk_fk_pipeline.py) |
+>
+> **Abweichungen:** `dbt-trino` statt `dbt-duckdb` (DuckDB wird als Trino-Katalog angesprochen);
+> Prefect läuft nicht via `prefect server start` von Hand, sondern als Compose-Service mit
+> `serve()`-Runner im selben Container.
+>
+> **Der dritte Teilschritt „Test Data Generation" ist offen:** keine dbt-Seeds mehr, kein
+> Generator-Skript. Teilweise abgedeckt durch
+> [build_monitoring_references.py](../evidently_service/build_monitoring_references.py), das den
+> gelabelten Datensatz stratifiziert in Referenz + Holdout splittet — das ist aber
+> **Monitoring**-Datenerzeugung, kein Ersatz für synthetische Testtabellen mit bekannten
+> PK/FK/Normalform-Eigenschaften. Alles hängt weiter am eingefrorenen, handgelabelten Datensatz.
+>
+> ⚠️ **Grundsatzentscheidung fällig (siehe 4.1):** dbt ist derzeit Konfiguration ohne Wirkung —
+> kein Aufruf aus Prefect, Compose oder `setup_stack.sh`. Entweder entlang
+> der Demo-Idee reaktivieren (tpch → `new_predict_data` → triggert die Streaming-Pipeline, siehe
+> 4.1a) oder `dbt-core`/`dbt-trino`/`prefect-dbt` aus `pyproject.toml` streichen.
+
 ---
 
 ### ARBEITSPAKET 5: Batch Pipeline (Woche 3)
@@ -719,6 +839,30 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 - ✅ Training Flow läuft automatisch
 - ✅ Batch Prediction akzeptiert CSV
 - ✅ Flows sind schedulbar
+
+> #### 🟡 Ist-Stand AP5 (30.07.2026): Scheduling steht, Training und CSV-Eingang fehlen
+>
+> | Deliverable | Ist | Nachweis |
+> |---|---|---|
+> | Training Flow läuft automatisch | ❌ | **kein** Trainings-Skript importiert Prefect (`grep -l prefect task_*/*.py` → leer). Die fünf `task_*_train_and_register.py` laufen standalone |
+> | Batch Prediction akzeptiert CSV | ❌ | `grep read_csv prefect/*.py` findet **nur** [model_quality_backtest.py:75](../prefect/model_quality_backtest.py#L75) — und das liest Holdout-Labels fürs Monitoring, ist keine Batch-Prediction. Beide Prediction-Flows nehmen nur `target_schemas` / `use_pending_changes` und lesen aus Trino |
+> | Flows sind schedulbar | ✅ | 4 Deployments in [serve_flows.py](../prefect/serve_flows.py), Cron `*/15 * * * *` und `17 * * * *`, dazu Event-Trigger und Concurrency-Limits |
+>
+> **Teilschritt 1 (Batch Training Flow)** ist damit komplett offen: keine Flow-Definition, keine
+> Integration des Trainings-Codes, kein orchestriertes MLflow-Logging, kein Error Handling.
+> Wichtig: das Training *loggt* bereits vollständig nach MLflow und registriert das beste Modell —
+> es fehlt ausschließlich die Orchestrierung. Deckungsgleich mit **5.4** (Retraining), das denselben
+> Flow braucht; beide sollten in einem Zug gebaut werden, nicht zweimal.
+>
+> **Teilschritt 2 (Batch Prediction Flow)** ist zur Hälfte da, aber anders als geplant: Batch-Prediction
+> über **Trino** läuft (Feature-Extraktion aus `information_schema`, Prediction-Queue,
+> `fetch_new_rows`/`predict_batch`, Ergebnisse nach `duckdb.prediction_results.key_results` /
+> `nf_results`). Was fehlt, ist der **CSV-Eingang samt Input-Validation** — der Plan sah CSV als
+> Quelle, umgesetzt wurde ein Datenbank-Pfad.
+>
+> **Teilschritt 3 (Scheduling)** ist vollständig und geht über den Plan hinaus: neben Cron auch
+> Event-Trigger, Concurrency-Limits mit bewusst gewählten Kollisionsstrategien und ein Cron-Fallback
+> als Sicherheitsnetz (Details in 4.3).
 
 ---
 
