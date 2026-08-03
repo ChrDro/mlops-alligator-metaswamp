@@ -3,7 +3,7 @@ Prefect flow for orchestrating the feature engineering and prediction pipeline.
 
 This flow follows 3 steps:
 1. Extracts column-level features from information_schema (plain Python/pandas)
-   and writes them to duckdb.staging.stg_column_features in Trino.
+   and writes them to iceberg.staging.stg_column_features in Trino.
 2. Populates the prediction queue from the extracted features.
 3. Triggers the prediction flow to call the ML model APIs and store results.
 
@@ -28,11 +28,13 @@ from change_events import (
     claim_pending_changes,
     complete_pending_changes,
     release_pending_changes,
+    with_commit_retry,
 )
 from dotenv import load_dotenv
+from model_health import diagnose, failure_detail
 from prefect.cache_policies import NONE as NO_CACHE
 from prefect.runtime import flow_run
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
 
 from prefect import flow, task
 
@@ -66,7 +68,7 @@ EXPECTED_TYPE_COLS = [
 def get_trino_engine() -> Engine:
     """Create and return a Trino engine instance."""
     return create_engine(
-        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/duckdb",
+        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/iceberg",
         connect_args={
             "http_scheme": "https",
             "verify": False,
@@ -285,7 +287,7 @@ def extract_features(
 ) -> int:
     """
     Extract column-level features from information_schema and write them to
-    duckdb.staging.stg_column_features (rebuilt each run).
+    iceberg.staging.stg_column_features (rebuilt each run).
 
     Args:
         target_schemas: Schemas to scan for tables/columns.
@@ -303,7 +305,7 @@ def extract_features(
     for schema in target_schemas:
         with engine.connect() as conn:
             create_schema = text(f"""
-                CREATE SCHEMA IF NOT EXISTS duckdb.{schema}
+                CREATE SCHEMA IF NOT EXISTS iceberg.{schema}
             """)
 
             conn.execute(create_schema)
@@ -313,8 +315,8 @@ def extract_features(
     discovery_query = text(f"""
         SELECT t.table_catalog, t.table_schema, t.table_name,
                c.column_name, c.data_type, c.ordinal_position
-        FROM duckdb.information_schema.tables AS t
-        INNER JOIN duckdb.information_schema.columns AS c
+        FROM iceberg.information_schema.tables AS t
+        INNER JOIN iceberg.information_schema.columns AS c
             ON t.table_catalog = c.table_catalog
             AND t.table_schema = c.table_schema
             AND t.table_name = c.table_name
@@ -428,7 +430,7 @@ def extract_features(
 
     # Step 4: Write the feature table (rebuild each run, like a dbt table model).
     with engine.begin() as connection:
-        connection.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.staging"))
+        connection.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
         df_final.to_sql(
             "stg_column_features",
             connection,
@@ -437,7 +439,7 @@ def extract_features(
             index=False,
         )
 
-    print(f"Wrote {len(df_final)} rows to duckdb.staging.stg_column_features")
+    print(f"Wrote {len(df_final)} rows to iceberg.staging.stg_column_features")
     return len(df_final)
 
 
@@ -494,8 +496,11 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         # Note: id is INTEGER (predictions.py marks rows processed via int(id)), and the
         # numeric columns are BIGINT/DOUBLE to match the types pandas.to_sql writes to the
         # staging table, avoiding INSERT type-coercion errors.
+
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.predictions"))
+
         create_queue_table = text("""
-            CREATE TABLE IF NOT EXISTS duckdb.predictions.queue (
+            CREATE TABLE IF NOT EXISTS iceberg.predictions.queue (
                 id INTEGER,
                 database VARCHAR,
                 schema VARCHAR,
@@ -553,7 +558,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         queue_exists = (
             conn.execute(
                 text("""
-                    SELECT COUNT(*) FROM duckdb.information_schema.tables
+                    SELECT COUNT(*) FROM iceberg.information_schema.tables
                     WHERE table_schema = 'predictions' AND table_name = 'queue'
                 """),
             ).scalar()
@@ -562,7 +567,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         has_new_columns = (
             conn.execute(
                 text("""
-                    SELECT COUNT(*) FROM duckdb.information_schema.columns
+                    SELECT COUNT(*) FROM iceberg.information_schema.columns
                     WHERE table_schema = 'predictions' AND table_name = 'queue'
                       AND column_name = 'table_integer_column_count'
                 """),
@@ -574,7 +579,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 "Queue table predates the CPK feature expansion (missing 7 columns); "
                 "dropping and recreating. Previously-processed rows will be re-predicted.",
             )
-            conn.execute(text("DROP TABLE duckdb.predictions.queue"))
+            conn.execute(text("DROP TABLE iceberg.predictions.queue"))
 
         conn.execute(create_queue_table)
         print("Queue table verified/created")
@@ -583,7 +588,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         # across runs (Trino has no auto-increment / sequences).
         max_id = (
             conn.execute(
-                text("SELECT COALESCE(MAX(id), 0) FROM duckdb.predictions.queue"),
+                text("SELECT COALESCE(MAX(id), 0) FROM iceberg.predictions.queue"),
             ).scalar()
             or 0
         )
@@ -591,7 +596,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         # Insert new rows from staging that aren't already processed in the queue.
         # Column list is explicit so the projection is matched by name, not position.
         insert_query = text(f"""
-            INSERT INTO duckdb.predictions.queue (
+            INSERT INTO iceberg.predictions.queue (
                 id, database, schema, table_name, column_name,
                 number_unique_values, count, null_count, null_ratio, is_unique,
                 ordinal_position, unique_ratio, is_non_null,
@@ -659,10 +664,10 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 FALSE AS processed,
                 CAST(NULL AS VARCHAR) AS processed_at,
                 CAST(CURRENT_TIMESTAMP AS VARCHAR) AS created_at
-            FROM duckdb.staging.stg_column_features AS f
+            FROM iceberg.staging.stg_column_features AS f
             WHERE NOT EXISTS (
                 SELECT 1
-                FROM duckdb.predictions.queue AS q
+                FROM iceberg.predictions.queue AS q
                 WHERE q.database = f.database
                   AND q.schema = f.schema
                   AND q.table_name = f.table_name
@@ -672,7 +677,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
             AND (
                 NOT EXISTS (
                     SELECT 1
-                    FROM duckdb.predictions.queue AS q
+                    FROM iceberg.predictions.queue AS q
                     WHERE q.database = f.database
                       AND q.schema = f.schema
                       AND q.table_name = f.table_name
@@ -693,7 +698,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 COUNT(*) as total_rows,
                 SUM(CASE WHEN processed = FALSE THEN 1 ELSE 0 END) as unprocessed,
                 SUM(CASE WHEN processed = TRUE THEN 1 ELSE 0 END) as processed
-            FROM duckdb.predictions.queue
+            FROM iceberg.predictions.queue
         """)
 
         status = conn.execute(status_query).fetchone()
@@ -714,7 +719,7 @@ def check_queue_status() -> dict:
                 COUNT(*) as total_rows,
                 SUM(CASE WHEN processed = FALSE THEN 1 ELSE 0 END) as unprocessed,
                 SUM(CASE WHEN processed = TRUE THEN 1 ELSE 0 END) as processed
-            FROM duckdb.predictions.queue
+            FROM iceberg.predictions.queue
         """)
 
         result = conn.execute(query).fetchone()
@@ -756,7 +761,7 @@ def fetch_new_rows(batch_size: int = 100) -> pd.DataFrame:
             name_is_singular_table_id,
             name_length, column_type_boolean, column_type_date, column_type_decimal,
             column_type_double, column_type_integer, column_type_varchar
-        FROM duckdb.predictions.queue
+        FROM iceberg.predictions.queue
         WHERE processed = FALSE
         LIMIT :batch_size
     """)
@@ -766,9 +771,15 @@ def fetch_new_rows(batch_size: int = 100) -> pd.DataFrame:
 
 
 @task(name="predict-batch", retries=2, retry_delay_seconds=10)
-def predict_batch(rows: pd.DataFrame) -> list[dict]:
-    """Call the pk/fk/cpk/cfk endpoints for each queued row."""
+def predict_batch(rows: pd.DataFrame) -> tuple[list[dict], list[str]]:
+    """
+    Call the pk/fk/cpk/cfk endpoints for each queued row.
+
+    Returns the predictions plus the distinct reasons calls failed, so a run that
+    predicted nothing can say why instead of only that it happened.
+    """
     predictions = []
+    failure_reasons: set[str] = set()
 
     for _idx, row in rows.iterrows():
         row_data = row.to_dict()
@@ -801,8 +812,13 @@ def predict_batch(rows: pd.DataFrame) -> list[dict]:
                 if prediction_value is None:
                     all_predictions_successful = False
                     print(f"Warning: {model_type} prediction returned None for row {row['id']}")
+                    failure_reasons.add(f"{model_type}: the service answered with no prediction")
             except (requests.RequestException, requests.Timeout, requests.HTTPError) as e:
-                print(f"Error predicting {model_type} for row {row['id']}: {e}")
+                # The status line alone ("400 Bad Request") is the one part of the
+                # response that carries no information - keep what the service said.
+                detail = failure_detail(e)
+                print(f"Error predicting {model_type} for row {row['id']}: {detail}")
+                failure_reasons.add(detail)
                 row_predictions[f"{model_type}_prediction"] = None
                 row_predictions[f"{model_type}_confidence"] = 0.0
                 all_predictions_successful = False
@@ -819,7 +835,7 @@ def predict_batch(rows: pd.DataFrame) -> list[dict]:
         )
         predictions.append(row_predictions)
 
-    return predictions
+    return predictions, sorted(failure_reasons)
 
 
 @task(name="store-predictions", cache_policy=NO_CACHE)
@@ -867,7 +883,7 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
             df[col] = df[col].fillna("NULL").astype(str)
 
     with trino_engine.connect() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.prediction_results"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.prediction_results"))
         df.to_sql(
             "key_results",
             conn,
@@ -886,7 +902,7 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
         params["current_timestamp"] = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
         update_query = text(f"""
-            UPDATE duckdb.predictions.queue
+            UPDATE iceberg.predictions.queue
             SET processed = TRUE,
                 processed_at = :current_timestamp
             WHERE id IN ({placeholders})
@@ -920,7 +936,7 @@ def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
 
     query = text(f"""
         SELECT COUNT(*)
-        FROM duckdb.predictions.queue
+        FROM iceberg.predictions.queue
         WHERE processed = FALSE
           AND ({" OR ".join(predicates)})
     """)  # noqa: S608 - predicates are built from bound parameters
@@ -931,23 +947,34 @@ def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
 
 @task(name="claim-key-changes", cache_policy=NO_CACHE)
 def claim_key_changes(run_id: str) -> list[TableRef]:
-    """Claim the tables the change detector flagged for the pk/fk track."""
-    with get_trino_engine().begin() as conn:
-        return claim_pending_changes(conn, TRACK_KEYS, run_id)
+    """
+    Claim the tables the change detector flagged for the pk/fk track.
+
+    Retried on commit conflicts: the normalform track is woken by the same event and
+    claims the same rows, so on iceberg one of the two loses the commit race.
+    """
+    return with_commit_retry(
+        get_trino_engine(),
+        lambda conn: claim_pending_changes(conn, TRACK_KEYS, run_id),
+    )
 
 
 @task(name="close-key-changes", cache_policy=NO_CACHE)
 def close_key_changes(run_id: str, *, succeeded: bool) -> int:
     """Complete the claim on success, release it on failure so the next run retries."""
-    with get_trino_engine().begin() as conn:
+
+    def close(conn: Connection) -> int:
         if succeeded:
             return complete_pending_changes(conn, TRACK_KEYS, run_id)
         return release_pending_changes(conn, TRACK_KEYS, run_id)
 
+    return with_commit_retry(get_trino_engine(), close)
 
-def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
+
+def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> tuple[int, list[str]]:
     """
-    Predict unprocessed queue rows and return how many predictions were made.
+    Predict unprocessed queue rows and return how many predictions were made,
+    together with the distinct reasons any calls failed.
 
     With ``drain_queue`` the loop keeps going until the backlog is empty. It stops
     early when a batch fails to reduce the unprocessed count - rows whose model call
@@ -956,6 +983,7 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
     """
     predictions_made = 0
     previous_unprocessed = None
+    failure_reasons: set[str] = set()
 
     while True:
         queue_stats = check_queue_status()
@@ -967,8 +995,9 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
 
         if previous_unprocessed is not None and unprocessed >= previous_unprocessed:
             print(
-                f"Stopping: {unprocessed} rows still unprocessed after a full batch "
-                "(their model calls are failing). Check the model service.",
+                f"Stopping: {unprocessed} rows still unprocessed after a full batch, "
+                f"because their model calls are failing.\n"
+                f"{diagnose(failure_reasons, MODEL_API_URL)}",
             )
             break
         previous_unprocessed = unprocessed
@@ -979,7 +1008,8 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
         if rows.empty:
             break
 
-        predictions = predict_batch(rows)
+        predictions, batch_failures = predict_batch(rows)
+        failure_reasons.update(batch_failures)
         store_predictions_to_trino(predictions)
         predictions_made += len(predictions)
         print(f"Processed {len(predictions)} predicts in {round(time.time() - start_time, 1)}s")
@@ -987,7 +1017,7 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
         if not drain_queue:
             break
 
-    return predictions_made
+    return predictions_made, sorted(failure_reasons)
 
 
 @flow(name="key-prediction-pipeline")
@@ -1030,7 +1060,7 @@ def feature_engineering_pipeline(
 
     succeeded = False
     try:
-        # Step 1: Extract features into duckdb.staging.stg_column_features
+        # Step 1: Extract features into iceberg.staging.stg_column_features
         print("Step 1: Extracting features from information_schema...")
         rows_written = extract_features(
             target_schemas=target_schemas,
@@ -1050,7 +1080,7 @@ def feature_engineering_pipeline(
         rows_inserted = populate_prediction_queue(requeue_tables=only_tables)
 
         # Step 3: Predict unprocessed rows and store the results.
-        predictions_made = _drain_queue(prediction_batch_size, drain_queue)
+        predictions_made, failure_reasons = _drain_queue(prediction_batch_size, drain_queue)
 
         # Step 4: A run only counts as done once the claimed tables actually have
         # predictions. Without this check a run whose every model call returned an
@@ -1059,10 +1089,16 @@ def feature_engineering_pipeline(
         if use_pending_changes:
             leftover = count_unprocessed_for_tables(only_tables)
             if leftover:
+                # Lead with the cause: retriggering is pointless until it is fixed,
+                # and the row count alone has sent people looking at the queue.
                 msg = (
-                    f"{leftover} queue rows for the claimed tables are still "
-                    f"unpredicted (model calls failing). Releasing the changes so the "
-                    f"next detection pass retries them."
+                    f"Nothing could be predicted - {leftover} queue "
+                    f"{'row' if leftover == 1 else 'rows'} for the claimed tables are "
+                    f"still unpredicted.\n"
+                    f"{diagnose(failure_reasons, MODEL_API_URL)}\n"
+                    f"  Note:  retriggering this flow changes nothing until the above is "
+                    f"fixed. The claimed changes are released, so the next detection pass "
+                    f"picks these tables up again automatically."
                 )
                 print(msg)
                 raise RuntimeError(msg)
