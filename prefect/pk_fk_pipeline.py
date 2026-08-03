@@ -284,6 +284,7 @@ def extract_features(
     target_schemas: list[str],
     batch_size: int = 30,
     only_tables: list[TableRef] | None = None,
+    skip_tables: set[tuple[str, str, str]] | None = None,
 ) -> int:
     """
     Extract column-level features from information_schema and write them to
@@ -296,10 +297,16 @@ def extract_features(
             trigger so a run only pays for what actually changed instead of
             re-profiling the whole schema. None = profile everything (the
             original behaviour, kept for manual/full runs).
+        skip_tables: (database, schema, table_name) triples whose columns are all
+            queued already, so profiling them would produce nothing the queue
+            dedup does not immediately discard. Mirrors the normalform track's
+            skip_tables; see get_fully_queued_tables for how the set is built.
+            Ignored when only_tables is given - see the filter below for why.
 
     Returns:
         Number of feature rows written.
     """
+    skip_tables = skip_tables or set()
     engine = get_trino_engine()
 
     for schema in target_schemas:
@@ -337,6 +344,9 @@ def extract_features(
 
     # Step 2b: Narrow to the changed tables when the streaming trigger scoped the run.
     if only_tables is not None:
+        # Streaming mode: the change detector already decided what needs work, so the
+        # already-queued filter must NOT apply - a reloaded table is meant to be
+        # profiled again even though the queue holds older rows for its columns.
         wanted = {tuple(ref) for ref in only_tables}
         grouped = {key: cols for key, cols in grouped.items() if key in wanted}
         missing = wanted - set(grouped)
@@ -344,6 +354,10 @@ def extract_features(
             # A table was flagged as changed but is gone from information_schema by
             # the time we got here (dropped between detection and processing).
             print(f"{len(missing)} flagged tables no longer exist, skipping them")
+    elif skip_tables:
+        before = len(grouped)
+        grouped = {key: cols for key, cols in grouped.items() if key not in skip_tables}
+        print(f"Skipping {before - len(grouped)} already-queued tables")
 
     print(f"Processing {len(grouped)} tables")
 
@@ -418,7 +432,13 @@ def extract_features(
         all_table_features.append(df_table)
 
     if not all_table_features:
-        print("No data available - check tables and connection.")
+        # Distinguish the healthy case (everything was filtered out, which is the
+        # normal outcome of a full-scan run once every table is queued) from the
+        # genuine fault, so the steady state does not print like a failure.
+        if not grouped:
+            print("No tables left to profile after filtering - nothing to extract.")
+        else:
+            print("No data available - check tables and connection.")
         return 0
 
     df_final = pd.concat(all_table_features, ignore_index=True)
@@ -945,6 +965,88 @@ def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
         return conn.execute(query, params).scalar() or 0
 
 
+@task(name="get-fully-queued-tables", cache_policy=NO_CACHE)
+def get_fully_queued_tables(target_schemas: list[str]) -> set[tuple[str, str, str]]:
+    """
+    Return the tables whose every current column already has a queue row.
+
+    These are exactly the tables that profiling would gain nothing from on a
+    full-scan run: populate_prediction_queue's dedup discards any column that
+    already has a row (unprocessed, or processed and not flagged for requeue), so
+    the COUNT(DISTINCT) work would be paid and then thrown away. This mirrors the
+    normalform track's get_processed_tables, which skips at table grain because it
+    stores one row per table.
+
+    Matching on *columns* rather than tables is what makes this safe: a table that
+    gained a column has an unmatched column and is therefore not skipped, so the
+    new column still gets profiled and queued.
+
+    Returns an empty set when the queue does not exist yet (first ever run).
+    """
+    engine = get_trino_engine()
+    schema_filter = "', '".join(target_schemas)
+
+    with engine.connect() as conn:
+        queue_exists = conn.execute(
+            text("""
+                SELECT COUNT(*) FROM iceberg.information_schema.tables
+                WHERE table_schema = 'predictions' AND table_name = 'queue'
+            """),
+        ).scalar()
+        if not queue_exists:
+            print("No queue table yet - nothing to skip.")
+            return set()
+
+        # LEFT JOIN + "no column went unmatched": a column with several queue rows
+        # (one per reload) multiplies the join, which the COUNT_IF is unaffected by.
+        rows = conn.execute(
+            text(f"""
+                SELECT c.table_catalog, c.table_schema, c.table_name
+                FROM iceberg.information_schema.columns AS c
+                LEFT JOIN iceberg.predictions.queue AS q
+                    ON q.database = c.table_catalog
+                    AND q.schema = c.table_schema
+                    AND q.table_name = c.table_name
+                    AND q.column_name = c.column_name
+                WHERE c.table_schema IN ('{schema_filter}')
+                GROUP BY c.table_catalog, c.table_schema, c.table_name
+                HAVING COUNT_IF(q.column_name IS NULL) = 0
+            """),  # noqa: S608 - schema names are operator-supplied config, not user input
+        ).fetchall()
+
+    return {(r[0], r[1], r[2]) for r in rows}
+
+
+@task(name="count-unprocessed-total", cache_policy=NO_CACHE)
+def count_unprocessed_total() -> int:
+    """
+    How many queue rows are waiting to be predicted, across all tables.
+
+    Used to decide whether "nothing new to profile" also means "nothing to do".
+    It does not: an earlier run may have queued rows the model service was too
+    broken to predict, and those must still be drained. Tolerates a missing queue
+    table so a first run on an empty schema does not fail here.
+    """
+    engine = get_trino_engine()
+
+    with engine.connect() as conn:
+        queue_exists = conn.execute(
+            text("""
+                SELECT COUNT(*) FROM iceberg.information_schema.tables
+                WHERE table_schema = 'predictions' AND table_name = 'queue'
+            """),
+        ).scalar()
+        if not queue_exists:
+            return 0
+
+        return (
+            conn.execute(
+                text("SELECT COUNT(*) FROM iceberg.predictions.queue WHERE processed = FALSE"),
+            ).scalar()
+            or 0
+        )
+
+
 @task(name="claim-key-changes", cache_policy=NO_CACHE)
 def claim_key_changes(run_id: str) -> list[TableRef]:
     """
@@ -1046,6 +1148,7 @@ def feature_engineering_pipeline(
         target_schemas = ["new_predict_data"]
 
     only_tables: list[TableRef] | None = None
+    skip_tables: set[tuple[str, str, str]] | None = None
     run_id = str(flow_run.get_id())
 
     if use_pending_changes:
@@ -1057,6 +1160,13 @@ def feature_engineering_pipeline(
             print("No pending changes to process - nothing to do.")
             return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0, "tables": 0}
         print(f"Claimed {len(only_tables)} changed tables")
+    else:
+        # Full-scan mode: don't re-profile tables whose columns are all queued
+        # already. The queue dedup would discard those rows anyway, so the
+        # COUNT(DISTINCT) per column would be paid for nothing.
+        print("Step 0: Checking which tables are already fully queued...")
+        skip_tables = get_fully_queued_tables(target_schemas)
+        print(f"{len(skip_tables)} tables are fully queued already")
 
     succeeded = False
     try:
@@ -1066,18 +1176,32 @@ def feature_engineering_pipeline(
             target_schemas=target_schemas,
             batch_size=batch_size,
             only_tables=only_tables,
+            skip_tables=skip_tables,
         )
 
-        if rows_written == 0:
+        rows_inserted = 0
+        if rows_written:
+            # Step 2: Populate the prediction queue
+            print("Step 2: Populating prediction queue...")
+            rows_inserted = populate_prediction_queue(requeue_tables=only_tables)
+        elif use_pending_changes:
             print("No features extracted - stopping pipeline.")
             # Nothing to predict, but the claim is genuinely handled: the flagged
             # tables are unreadable or gone, so retrying them would loop forever.
             succeeded = True
             return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0}
-
-        # Step 2: Populate the prediction queue
-        print("Step 2: Populating prediction queue...")
-        rows_inserted = populate_prediction_queue(requeue_tables=only_tables)
+        else:
+            # Everything was skipped, which is the healthy steady state of a full
+            # run. It does NOT mean there is nothing to do: an earlier run may have
+            # queued rows that the model service was too broken to predict, and
+            # those still need draining. Returning here would strand them until a
+            # table happened to change.
+            backlog = count_unprocessed_total()
+            if backlog == 0:
+                print("Nothing new to profile and no backlog - nothing to do.")
+                succeeded = True
+                return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0}
+            print(f"Nothing new to profile; draining {backlog} unprocessed rows.")
 
         # Step 3: Predict unprocessed rows and store the results.
         predictions_made, failure_reasons = _drain_queue(prediction_batch_size, drain_queue)
