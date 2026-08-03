@@ -79,6 +79,12 @@ TRACKS = (TRACK_KEYS, TRACK_NF, TRACK_SUBJECT_AREA)
 
 PENDING_TABLE = "iceberg.staging.pending_changes"
 
+# Split out because information_schema is per-catalog in Trino: probing the work
+# list's columns has to query the catalog the table actually lives in, and hardcoding
+# a second copy of the name is how that ended up pointing at duckdb after the move to
+# iceberg.
+PENDING_CATALOG, PENDING_SCHEMA, PENDING_NAME = PENDING_TABLE.split(".")
+
 # The three claim columns every track owns, in DDL order.
 CLAIM_SUFFIXES = ("claimed_by", "claimed_at", "completed_at")
 
@@ -211,11 +217,12 @@ def _add_missing_claim_columns(conn: Connection) -> list[str]:
     present = {
         row[0]
         for row in conn.execute(
-            text("""
+            text(f"""
                 SELECT column_name
-                FROM duckdb.information_schema.columns
-                WHERE table_schema = 'staging' AND table_name = 'pending_changes'
-            """),
+                FROM {PENDING_CATALOG}.information_schema.columns
+                WHERE table_schema = :schema AND table_name = :name
+            """),  # noqa: S608 - catalog comes from the PENDING_TABLE constant
+            {"schema": PENDING_SCHEMA, "name": PENDING_NAME},
         ).fetchall()
     }
     missing = [column for column in claim_columns() if column not in present]
@@ -238,8 +245,11 @@ def _add_missing_claim_columns(conn: Connection) -> list[str]:
 
 
 def ensure_pending_table(conn: Connection) -> None:
-    """Create the pending-changes work list if it does not exist yet."""
+    """Create the pending-changes work list, or extend it for a newly added track."""
     conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
+    # Generated from TRACKS rather than written out, so this DDL and the
+    # claim/complete/release statements cannot drift apart when a track is added.
+    claim_ddl = ",\n                ".join(f"{column} VARCHAR" for column in claim_columns())
     conn.execute(
         text(f"""
             CREATE TABLE IF NOT EXISTS {PENDING_TABLE} (

@@ -103,11 +103,11 @@ cp env.template .env
 | :--- | :--- |
 | `MLFLOW_TRACKING_URI` | Where the service and training scripts reach MLflow (e.g. `http://127.0.0.1:5000`). **Required.** |
 | `MLFLOW_MODEL_ALIAS` | Which registry alias the service serves. Defaults to `dev`. |
-| `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). |
-| `OLLAMA_MODEL` / `OLLAMA_MODEL_FAMILY` | Which open-weights model names the task_4 subject areas. Defaults to `qwen2.5:3b`; use `qwen2.5:7b` if Docker has ≥8 GB RAM. Keep the two in sync — the container healthcheck greps for the family. |
-| `OLLAMA_HOST_PORT` / `OLLAMA_BASE_URL` | Set both to a free port if the host already runs Ollama natively on 11434. |
 | `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). `TRINO_IP_ADDRESS` is a host without a port - use `localhost` for the Trino container from `docker-compose.yaml`. The user is created in `password.db` by the credential script below. |
 | `TRINO_KEYSTORE_PASSWORD` / `TRINO_SHARED_SECRET` | Protect the generated TLS keystore and Trino's internal communication. Any non-empty values work locally. |
+| `OLLAMA_MODEL` / `OLLAMA_MODEL_FAMILY` | Which open-weights model names the task_4 subject areas. Defaults to `qwen2.5:3b`; use `qwen2.5:7b` if Docker has ≥8 GB RAM. Keep the two in sync — the container healthcheck greps for the family. |
+| `OLLAMA_HOST_PORT` / `OLLAMA_BASE_URL` | Set both to a free port if the host already runs Ollama natively on 11434. |
+
 
 Then generate Trino's credentials. It serves HTTPS with password auth, and the two
 files that needs — a TLS keystore holding a private key and a bcrypt password file —
