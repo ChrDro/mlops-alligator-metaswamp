@@ -141,10 +141,6 @@ def _align_to_signature(
     return model_input[expected]
 
 
-def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
-    _configure_tracking()
-
-
 def predict_domain(model_name: str, data: pd.DataFrame) -> tuple[str, float]:
     """Predict domain from text features and return (label, confidence).
 
@@ -157,7 +153,7 @@ def predict_domain(model_name: str, data: pd.DataFrame) -> tuple[str, float]:
     The label is whatever class the model was trained on - here a subject-area name -
     so this returns a str rather than the int the numeric models return.
     """
-    _set_tracking_uri()
+    _configure_tracking()
 
     if not isinstance(data, pd.DataFrame):
         msg_type_error_dataframe = f"Expected DataFrame, got {type(data)}"
@@ -179,7 +175,7 @@ def predict_domain(model_name: str, data: pd.DataFrame) -> tuple[str, float]:
 
 
 def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
-    _set_tracking_uri()
+    _configure_tracking()
 
     # Ensure data is a DataFrame and convert to proper dtypes
     if not isinstance(data, pd.DataFrame):
