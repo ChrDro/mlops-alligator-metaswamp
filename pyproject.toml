@@ -17,7 +17,9 @@ dependencies = [
     "mlflow>=3.5.0",
     "fastapi>=0.139.1",
     "uvicorn>=0.51.0",
-    "prometheus-fastapi-instrumentator>=8.1.0",
+    # Imported by webservice/app.py at module level, so test/test_api/ cannot
+    # import the app without it. Kept in sync with webservice/requirements.txt.
+    "prometheus-fastapi-instrumentator>=7.1.0",
     "lightgbm>=4.7.0",
     "dbt-core>=1.7.9,<1.8.0",
     "dbt-trino>=1.5.1",

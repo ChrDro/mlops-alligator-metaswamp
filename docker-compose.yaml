@@ -22,6 +22,16 @@ services:
       # host shell, and Git Bash rewrites it to C:/... which compose then reads as
       # extra colons in the volume spec.
       - ./mlruns:/app/mlruns
+    # Readiness rather than liveness: "healthy" is only worth reading in
+    # `compose ps` if it means the registry actually resolves the models. A 503
+    # from /health/ready makes urlopen raise, which is what marks it unhealthy.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health/ready')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # Long enough for MLflow and MinIO to come up first.
+      start_period: 60s
     networks:
       - ml-services-monitoring
 
@@ -80,7 +90,11 @@ services:
       - ml-services-monitoring
 
   prefect:
-    image: prefecthq/prefect:3.6.25-python3.11
+    # Extends prefecthq/prefect:3.6.25-python3.11 with the flows' dependencies,
+    # which used to be pip-installed on every container start.
+    build:
+      context: prefect
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
@@ -110,10 +124,6 @@ services:
       - -lc
       - |
         set -e
-        pip install --no-cache-dir \
-          asyncpg==0.31.0 \
-          "sqlalchemy>=2.0.51" "trino[sqlalchemy]>=0.338.0" \
-          "pandas>=2.0.0,<3.0.0" python-dotenv requests
         python ensure_database.py
         prefect server start --host 0.0.0.0 &
         echo "Waiting for the Prefect API to come up..."
@@ -129,8 +139,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-      # Lets pip install above finish before the server starts.
-      start_period: 300s
+      # Dependencies now come from the image, so this only has to cover the
+      # database migration and the server's own startup.
+      start_period: 90s
     networks:
       - ml-services-monitoring
 
@@ -315,6 +326,11 @@ services:
       - MLFLOW_S3_IGNORE_TLS=true
       # MLflow 3.x rejects Host headers not in its allowlist (DNS-rebinding protection).
       - MLFLOW_SERVER_ALLOWED_HOSTS=mlflow:*,localhost:*,127.0.0.1:*
+      # The job runner spawns a Huey consumer pool for GenAI evaluation, online
+      # scoring and webhooks - none of which this project uses. Together with
+      # --workers 1 below it takes the server from 18 processes and a 2.3 GiB
+      # peak down to 5 processes and ~350 MiB.
+      - MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false
     depends_on:
       minio:
         condition: service_healthy
@@ -322,6 +338,7 @@ services:
         condition: service_healthy
     command: >
       mlflow server
+      --workers 1
       --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       --default-artifact-root s3://mlflow/
       --host 0.0.0.0

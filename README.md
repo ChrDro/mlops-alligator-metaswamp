@@ -243,8 +243,10 @@ form, not P(class=1)).
 | Method | Route | Model | Returns |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/` | — | liveness message |
-| `GET` | `/health` | — | which models resolved (`ok` / `degraded`) |
+| `GET` | `/health/live` | — | `alive` as soon as the process serves HTTP; touches nothing external |
+| `GET` | `/health/ready` | — | per-model registry versions and `ok` / `degraded` / `unavailable` (503 only when nothing resolves) |
 | `GET` | `/metrics` | — | Prometheus scrape target |
+| `POST` | `/events/new-data` | — | push trigger for the streaming pipeline (202) |
 | `POST` | `/predict_pk` | `pk_model` | single primary key |
 | `POST` | `/predict_cpk` | `composite_pk_model` | composite primary key |
 | `POST` | `/predict_fk` | `fk_model` | single foreign key |
@@ -492,7 +494,7 @@ gate** that refuses to register a model whose test F1 falls below the current ba
 | Concern | Tool | Status |
 | :--- | :--- | :--- |
 | Experiment tracking & registry | MLflow | ✅ params, metrics, signature, feature list; alias-based deploy |
-| Model service | FastAPI + Docker | ✅ 5 typed endpoints, `/health`, `/metrics` |
+| Model service | FastAPI + Docker | ✅ 5 typed endpoints, `/health/live` + `/health/ready`, `/metrics` |
 | CI | GitHub Actions | ✅ Ruff lint/format + pytest with coverage |
 | Service monitoring | Prometheus + Grafana | ✅ golden signals, 10 alert rules, 5 provisioned dashboards |
 | Model monitoring | Evidently | ✅ input drift against a real reference set |
@@ -523,9 +525,13 @@ pytest --cov-report=term-missing    # see uncovered lines
 ruff check . && ruff format --check .
 ```
 
-`test/test_api/` covers the API surface (routing, validation, error mapping, `/metrics`,
-`/health`) and the prediction helper (including a regression test for the multi-class
-probability bug). `test/test_data/` validates the training CSVs.
+`test/test_api/` covers the health probes against an in-process app, including the
+degraded and unavailable states. `test/test_models/` checks the model/schema contract
+between the Pydantic request models and the registered MLflow signatures, skipping when
+no stack is reachable. `test/test_data/` validates the training CSVs.
+
+The five predict routes, request validation and `/metrics` are not covered yet — they are
+open items under **2.2** in [documentation/MLOPS_PLAN.md](documentation/MLOPS_PLAN.md).
 
 ---
 

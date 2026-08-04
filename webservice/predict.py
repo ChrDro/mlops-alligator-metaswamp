@@ -5,17 +5,97 @@ from functools import lru_cache
 
 import mlflow
 import pandas as pd
+import requests
 from dotenv import load_dotenv
+from mlflow.exceptions import MlflowException
 from mlflow.pyfunc import PyFuncModel
+from mlflow.tracking import MlflowClient
+
+
+# Every registered model the API serves, and the alias it serves them under. The
+# health endpoint reports on exactly this set, so a new model has to be listed here
+# to show up in readiness.
+MODEL_NAMES = (
+    "pk_model",
+    "composite_pk_model",
+    "fk_model",
+    "composite_fk_model",
+    "denormalization_model",
+)
+MODEL_ALIAS = "dev"
+
+# Budget for the reachability check below. Short on purpose: it exists to keep a
+# readiness probe inside a probe-sized deadline, not to wait out a slow server.
+REGISTRY_PROBE_TIMEOUT_SECONDS = 2
+
+
+def _configure_tracking() -> str:
+    """Point the MLflow client at the configured tracking server, and return its URI."""
+    load_dotenv()
+    mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if not mlflow_tracking_uri:
+        msg_tracking_uri = "MLFLOW_TRACKING_URI is not set."
+        raise RuntimeError(msg_tracking_uri)
+
+    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    return mlflow_tracking_uri
+
+
+def _registry_reachable(tracking_uri: str) -> bool:
+    """
+    Cheap check that the tracking server answers at all.
+
+    Without this a readiness probe against a stopped MLflow does not fail, it
+    *hangs*: the MLflow client retries connection errors with exponential backoff,
+    once per model, and the request outlives any probe timeout worth setting. Ask
+    once with a short deadline instead, and treat silence as "nothing to serve".
+    """
+    try:
+        requests.get(
+            f"{tracking_uri.rstrip('/')}/health",
+            timeout=REGISTRY_PROBE_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException:
+        return False
+
+    return True
 
 
 @lru_cache(maxsize=5)
 def load_model(model_name: str) -> PyFuncModel:
-    alias = "dev"
-    model_uri = f"models:/{model_name}@{alias}"
+    model_uri = f"models:/{model_name}@{MODEL_ALIAS}"
 
     model = mlflow.pyfunc.load_model(model_uri)
     return model
+
+
+def resolve_model_versions() -> dict[str, str | None]:
+    """
+    Ask the registry which version the serving alias points at, per model.
+
+    Deliberately does not download artifacts: a readiness probe has to stay cheap,
+    and it must not warm the lru_cache in load_model as a side effect. It answers
+    "is there something to serve", not "is it already in memory".
+    """
+    tracking_uri = _configure_tracking()
+    if not _registry_reachable(tracking_uri):
+        return dict.fromkeys(MODEL_NAMES)
+
+    client = MlflowClient()
+
+    versions: dict[str, str | None] = {}
+    for model_name in MODEL_NAMES:
+        try:
+            versions[model_name] = client.get_model_version_by_alias(
+                model_name,
+                MODEL_ALIAS,
+            ).version
+        except (MlflowException, OSError):
+            # Model not registered, alias not set, or the registry is unreachable.
+            # All three mean the same thing to a caller: nothing to serve here.
+            versions[model_name] = None
+
+    return versions
 
 
 def _align_to_signature(
@@ -61,14 +141,8 @@ def _align_to_signature(
     return model_input[expected]
 
 
-def _set_tracking_uri() -> None:
-    load_dotenv()
-    mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
-    if not mlflow_tracking_uri:
-        msg_tracking_uri = "MLFLOW_TRACKING_URI is not set."
-        raise RuntimeError(msg_tracking_uri)
-
-    mlflow.set_tracking_uri(mlflow_tracking_uri)
+def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
+    _configure_tracking()
 
 
 def predict_domain(model_name: str, data: pd.DataFrame) -> tuple[str, float]:
