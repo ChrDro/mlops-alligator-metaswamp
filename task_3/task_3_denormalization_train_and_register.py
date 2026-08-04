@@ -124,6 +124,7 @@ def train_data_train_test_split(
 ]:
     print("\n------Train Test Split------")
 
+    # Identifiers, the target, and the leakage guard. 50 -> 44 features.
     columns_to_drop = [
         "database",
         "schema",
@@ -133,7 +134,49 @@ def train_data_train_test_split(
         "table_contains_1nf_violation",
     ]
 
-    X = df.drop(columns=columns_to_drop)
+    # Phase 0 of TASK_3_PLAN.md: 21 features carry no information of their own. Dropping
+    # them left the holdout weighted-F1 unchanged (0.9935 -> 0.9939), so this buys
+    # interpretable feature importances, not accuracy. 44 -> 29 features.
+    #
+    # NOT dropped: the table-level aggregates (table_ratio_1nf_violations,
+    # table_has_partial_dependency, table_avg_unique_ratio, table_ratio_composite_key_cols).
+    # They look derivable via groupby, but the model sees ONE row per call and cannot
+    # aggregate - dropping them collapses F1 to 0.7710.
+    redundant_columns_to_drop = [
+        # Constant in nf_test_analyse.csv (no NULLs and no name matches anywhere), so
+        # they carry zero bits. See TASK_3_PLAN.md 1.1 and 1.5.
+        "null_count",
+        "null_ratio",
+        "is_non_null",
+        "table_avg_null_ratio",
+        "name_contains_key",
+        "name_contains_table_name",
+        "name_is_singular_table_id",
+        # Bit-for-bit identical to another column in this dataset.
+        "count",  # == table_row_count
+        "null_ratio_rank",  # == ordinal_position (no NULLs -> only the tiebreaker ranks)
+        "table_non_null_column_count",  # == table_column_count (dito)
+        # Threshold derivations of a single value in the SAME row - a tree can split on
+        # the source column itself, so these add nothing.
+        "is_first_column",  # == (ordinal_position == 1)
+        "is_least_null_in_table",  # == (null_ratio_rank == 1)
+        "is_unique",  # == (unique_ratio == 1 and null_count == 0)
+        "table_has_unique_column",  # == (table_unique_column_count > 0)
+        "table_has_no_single_pk_candidate",  # == 1 - table_has_unique_column
+        # Differences of two features that both stay in the set.
+        "other_unique_columns_in_table",  # == table_unique_column_count - is_unique
+        "other_near_unique_columns_in_table",  # == table_near_unique_column_count - ...
+        # Raw value whose ratio is kept; the ratio is the informative half because trees
+        # cannot divide.
+        "ordinal_position",  # -> relative_ordinal_position
+        "number_unique_values",  # -> unique_ratio
+        "table_unique_column_count",  # -> table_ratio_of_pk_candidates
+        "unique_ratio_relative_to_max",  # == unique_ratio / table_max_unique_ratio
+        # "table_ratio_1nf_violations",
+        # "table_has_partial_dependency",
+    ]
+
+    X = df.drop(columns=columns_to_drop + redundant_columns_to_drop)
 
     y = df["target_normal_form"].astype(int)
 

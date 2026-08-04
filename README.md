@@ -374,17 +374,40 @@ Features are engineered per column and per table. There are two feature sets, ge
 directly from the training scripts:
 
 - **Tasks 1 & 2 — 31 features** (identical set; only the target differs)
-- **Task 3 — 50 features** (adds normalization-specific signals and a few columns Tasks 1
-  & 2 drop)
+- **Task 3 — 29 features** (adds normalization-specific signals; drops several columns
+  Tasks 1 & 2 keep)
 
 Identifier columns (`database`, `schema`, `table_name`, `column_name`) and raw
 `min_value` / `max_value` are never used as features — only for grouping and traceability.
 
-> **Note on Task 3 features.** `is_this_col_violating_1nf`, `is_composite_key_part` and
-> `is_this_col_partial_dependency` are close to the *definitions* of 1NF/2NF, so the model
-> partly learns from labels derived the same way the target is. `target_normal_form` and
-> `table_contains_1nf_violation` are dropped from the features to avoid direct leakage.
-> This is a known limitation we call out rather than hide.
+**Task 3 was cut from 50 to 29 features.** A feature audit found that 21 carried no
+information of their own; removing them left the holdout weighted-F1 unchanged
+(0.9935 → 0.9939), so this buys interpretable feature importances rather than accuracy.
+They fall into four groups:
+
+| Why dropped | Features |
+| :--- | :--- |
+| **Constant** in the training data (it contains no NULLs and no name matches at all) | `null_count`, `null_ratio`, `is_non_null`, `table_avg_null_ratio`, `name_contains_key`, `name_contains_table_name`, `name_is_singular_table_id` |
+| **Bit-for-bit identical** to another column | `count` (= `table_row_count`), `null_ratio_rank` (= `ordinal_position`), `table_non_null_column_count` (= `table_column_count`) |
+| **Threshold derivation** of one value in the same row — a tree can split the source column itself | `is_first_column`, `is_least_null_in_table`, `is_unique`, `table_has_unique_column`, `table_has_no_single_pk_candidate`, `other_unique_columns_in_table`, `other_near_unique_columns_in_table` |
+| **Raw value whose ratio is kept** — the ratio is the informative half, because trees cannot divide | `ordinal_position`, `number_unique_values`, `table_unique_column_count`, `unique_ratio_relative_to_max` |
+
+The table-level aggregates (`table_ratio_1nf_violations`, `table_has_partial_dependency`,
+`table_avg_unique_ratio`, `table_ratio_composite_key_cols`) look derivable by a `groupby`
+but were **kept**: the model sees one column row per request and cannot aggregate.
+Dropping them collapses F1 to 0.7710.
+
+> **Note on Task 3 features — a known and unresolved limitation.**
+> `is_this_col_violating_1nf`, `is_composite_key_part` and `is_this_col_partial_dependency`
+> are close to the *definitions* of 1NF/2NF, so the model partly learns from labels derived
+> the same way the target is. `target_normal_form` and `table_contains_1nf_violation` are
+> dropped from the features, but that guard **does not work**:
+> `table_ratio_1nf_violations > 0` is bit-identical to the dropped
+> `table_contains_1nf_violation`, and together with `table_has_partial_dependency` it fixes
+> the class of 46.2 % of all rows outright. On the 29-feature set those seven
+> definition-adjacent features carry **90.6 %** of the model's gain importance; without
+> them the score drops to **0.7117**, and that is the honest baseline. See
+> [TASK_3_PLAN.md](TASK_3_PLAN.md) for the measurements and the fix.
 
 <details>
 <summary><b>Full metadata &amp; statistics dictionary</b> (click to expand)</summary>
@@ -402,37 +425,37 @@ but not used as a training feature.
 | `column_type` | Raw data type (one-hot encoded for training) | "int" | — |
 | `min_value` | Minimum value of the column | "18" | — |
 | `max_value` | Maximum value of the column | "44" | — |
-| `number_unique_values` | Count of distinct values in the column | "23" | T1, T2, T3 |
-| `count` | Number of rows in the table | "25" | T1, T2, T3 |
-| `null_count` | Raw count of null values in the column | "0" | T3 |
-| `null_ratio` | `null_count / count` | "0.0" | T3 |
-| `is_unique` | Column values are fully unique | 0 or 1 | T1, T2, T3 |
-| `ordinal_position` | Position of the column in the table (1-based) | "2" | T1, T2, T3 |
+| `number_unique_values` | Count of distinct values in the column | "23" | T1, T2 |
+| `count` | Number of rows in the table | "25" | T1, T2 |
+| `null_count` | Raw count of null values in the column | "0" | — (dropped, redundant) |
+| `null_ratio` | `null_count / count` | "0.0" | — (dropped, redundant) |
+| `is_unique` | Column values are fully unique | 0 or 1 | T1, T2 |
+| `ordinal_position` | Position of the column in the table (1-based) | "2" | T1, T2 |
 | `unique_ratio` | `number_unique_values / count` | "0.177" | T1, T2, T3 |
-| `is_non_null` | Column has no null values | 0 or 1 | T3 |
-| `is_first_column` | Column is the first in the table | 0 or 1 | T1, T2, T3 |
+| `is_non_null` | Column has no null values | 0 or 1 | — (dropped, redundant) |
+| `is_first_column` | Column is the first in the table | 0 or 1 | T1, T2 |
 | `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | T1, T2, T3 |
 | `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | T1, T2, T3 |
 | `table_column_count` | Total columns in the table | "9" | T1, T2, T3 |
-| `table_unique_column_count` | Number of fully unique columns in the table | "0" | T1, T2, T3 |
+| `table_unique_column_count` | Number of fully unique columns in the table | "0" | T1, T2 |
 | `table_row_count` | Number of rows in the table | "768" | T1, T2, T3 |
-| `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | T3 |
-| `table_has_unique_column` | Table has at least one unique column | 0 or 1 | T1, T2, T3 |
-| `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | T1, T2, T3 |
+| `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | — (dropped, redundant) |
+| `table_has_unique_column` | Table has at least one unique column | 0 or 1 | T1, T2 |
+| `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | T1, T2 |
 | `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | T1, T2, T3 |
 | `table_id_named_column_count` | Number of ID-named columns in the table | "0" | T1, T2, T3 |
-| `table_non_null_column_count` | Number of non-null columns in the table | "9" | T1, T2, T3 |
+| `table_non_null_column_count` | Number of non-null columns in the table | "9" | T1, T2 |
 | `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | T1, T2, T3 |
 | `table_integer_column_count` | Number of integer-typed columns in the table | "7" | T3 |
 | `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | T1, T2, T3 |
-| `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | T1, T2, T3 |
-| `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | T1, T2, T3 |
-| `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | T1, T2, T3 |
-| `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | T3 |
+| `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | T1, T2 |
+| `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | T1, T2 |
+| `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | T1, T2 |
+| `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | — (dropped, redundant) |
 | `name_ends_with_id` | Column name ends with "id" | 0 or 1 | T1, T2, T3 |
-| `name_contains_key` | Column name contains "key" | 0 or 1 | T3 |
-| `name_contains_table_name` | Column name contains the table name | 0 or 1 | T1, T2, T3 |
-| `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | T1, T2, T3 |
+| `name_contains_key` | Column name contains "key" | 0 or 1 | — (dropped, redundant) |
+| `name_contains_table_name` | Column name contains the table name | 0 or 1 | T1, T2 |
+| `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | T1, T2 |
 | `name_length` | Length of the column name | "7" | T1, T2, T3 |
 | `column_type_boolean` | One-hot: boolean | 0 or 1 | T1, T2 |
 | `column_type_char` | One-hot: char | 0 or 1 | T3 |
@@ -446,7 +469,7 @@ but not used as a training feature.
 | `is_composite_key_part` | Column is part of a composite primary key | 0 or 1 | T3 |
 | `is_this_col_partial_dependency` | Column partially depends on the composite PK | 0 or 1 | T3 |
 | `table_avg_unique_ratio` | Mean `unique_ratio` across the table's columns | "0.312" | T3 |
-| `table_avg_null_ratio` | Mean `null_ratio` across the table's columns | "0.05" | T3 |
+| `table_avg_null_ratio` | Mean `null_ratio` across the table's columns | "0.05" | — (dropped, redundant) |
 | `table_std_unique_ratio` | Std dev of `unique_ratio` across the table | "0.21" | T3 |
 | `table_ratio_of_pk_candidates` | Ratio of PK-candidate columns to total columns | "0.11" | T3 |
 | `table_has_composite_pk` | Table uses a composite primary key | 0 or 1 | T3 |
@@ -471,8 +494,10 @@ The current pipeline covers standard scalar types. Future work should add types 
 
 ## Model & results
 
-Every task uses a **RandomForestClassifier** with `class_weight="balanced"` and otherwise
-default hyperparameters. The train/test split is **grouped by database** (`StratifiedGroupKFold`),
+Task 1 and Task 2 both use a **RandomForestClassifier** with `class_weight="balanced"` and otherwise
+default hyperparameters. The train/test split is **grouped by database** (`StratifiedGroupKFold`).
+
+Task 3 trains four XGBoost-/LightGBM-Candidates is the train/test split is **grouped by table_name**.
 so columns from one database never appear on both sides — otherwise the model memorises a
 naming convention and the test score lies.
 

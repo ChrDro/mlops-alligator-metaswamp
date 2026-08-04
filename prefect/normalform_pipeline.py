@@ -5,11 +5,11 @@ Separate from the pk/fk/cpk/cfk pipeline on purpose (see
 documentation/NORMALFORM_PREDICTION.md):
 - the model (denormalization_model) is MULTICLASS 0-3 (0=violates 1NF, 1/2/3=pure NF),
 - the label is a TABLE-level property inferred from per-column feature rows,
-- it uses a different, larger (50) feature set.
+- it uses a different, larger (29) feature set.
 
 This flow:
 1. Skips tables already present in nf_results (each table is processed only once).
-2. Discovers + profiles the remaining columns and builds the exact 50 features the
+2. Discovers + profiles the remaining columns and builds the exact 29 features the
    registered model expects (feature logic ported verbatim from
    get_trino_summaries_task_3_training.py so inference matches training), writing them
    to iceberg.staging.stg_normalform_features for inspection.
@@ -38,6 +38,11 @@ from change_events import (
 )
 from dotenv import load_dotenv
 from model_health import diagnose, failure_detail
+from nf_features import (
+    LIST_VALUE_MIN_SHARE,
+    LIST_VALUE_PATTERN,
+    is_freetext_name,
+)
 from prefect.cache_policies import NONE as NO_CACHE
 from prefect.runtime import flow_run
 from sqlalchemy import Connection, Engine, create_engine, text
@@ -68,46 +73,54 @@ EXPECTED_TYPE_COLS = [
     "column_type_varchar",
 ]
 
-# The 50 features the registered model / NormalForm pydantic schema expect, in order.
+# The 29 features the registered model / NormalForm pydantic schema expect, in order.
 # Kept inline (like pk_fk_pipeline's feature set) so the pipeline has no runtime dependency
 # on features_normalform.json. If the model is retrained with a different feature set, this
 # list and the extraction logic below must be updated to match.
+#
+# Phase 0 of TASK_3_PLAN.md: 21 redundant features are commented out rather than deleted so
+# the previous set stays readable and the drop reason travels with the code. They are still
+# COMPUTED - recompute_table_features derives kept features from them - only the final
+# selection in extract_normalform_features leaves them out. The commented-out block must
+# stay in sync with `redundant_columns_to_drop` in the training script.
 MODEL_FEATURES: list[str] = [
-    "number_unique_values",
-    "count",
-    "null_count",
-    "null_ratio",
-    "is_unique",
-    "ordinal_position",
+    # "number_unique_values",              # raw value behind unique_ratio
+    # "count",                             # == table_row_count
+    # "null_count",                        # constant 0 in the training set
+    # "null_ratio",                        # constant 0 in the training set
+    # "is_unique",                         # == (unique_ratio == 1 and null_count == 0)
+    # "ordinal_position",                  # raw value behind relative_ordinal_position
     "unique_ratio",
-    "is_non_null",
-    "is_first_column",
+    # "is_non_null",                       # constant 1 in the training set
+    # "is_first_column",                   # == (ordinal_position == 1)
     "relative_ordinal_position",
     "is_first_unique_column",
     "table_column_count",
-    "table_unique_column_count",
+    # "table_unique_column_count",         # raw value behind table_ratio_of_pk_candidates
     "table_row_count",
-    "other_unique_columns_in_table",
-    "table_has_unique_column",
-    "table_has_no_single_pk_candidate",
+    # "other_unique_columns_in_table",     # == table_unique_column_count - is_unique
+    # "table_has_unique_column",           # == (table_unique_column_count > 0)
+    # "table_has_no_single_pk_candidate",  # == 1 - table_has_unique_column
     "table_near_unique_column_count",
     "table_id_named_column_count",
-    "table_non_null_column_count",
+    # "table_non_null_column_count",       # == table_column_count (no NULLs in training)
     "table_max_unique_ratio",
     "table_integer_column_count",
     "unique_ratio_rank",
-    "null_ratio_rank",
-    "is_least_null_in_table",
-    "unique_ratio_relative_to_max",
-    "other_near_unique_columns_in_table",
+    # "null_ratio_rank",                   # == ordinal_position (no NULLs in training)
+    # "is_least_null_in_table",            # == is_first_column (dito)
+    # "unique_ratio_relative_to_max",      # == unique_ratio / table_max_unique_ratio
+    # "other_near_unique_columns_in_table",# == table_near_unique_column_count - (ur > 0.95)
     "name_ends_with_id",
-    "name_contains_key",
-    "name_contains_table_name",
-    "name_is_singular_table_id",
+    # "name_contains_key",                 # constant 0 in the training set
+    # "name_contains_table_name",          # constant 0 in the training set
+    # "name_is_singular_table_id",         # constant 0 in the training set
     "name_length",
     "table_avg_unique_ratio",
-    "table_avg_null_ratio",
+    # "table_avg_null_ratio",              # constant 0 in the training set
     "table_ratio_of_pk_candidates",
+    # Table-level aggregates below are deliberately KEPT. They look derivable via groupby,
+    # but the model sees one row per call and cannot aggregate - see TASK_3_PLAN.md 1.1.
     "is_this_col_violating_1nf",
     "is_composite_key_part",
     "table_has_composite_pk",
@@ -126,20 +139,100 @@ MODEL_FEATURES: list[str] = [
 ]
 
 # Features the API expects as float (NormalForm pydantic); everything else numeric
-# is int, and column_type_* are bool.
+# is int, and column_type_* are bool. Entries for dropped features are commented out
+# alongside MODEL_FEATURES - _row_to_payload only looks at names it finds there, so a
+# stale entry would be silently ignored rather than error.
 FLOAT_FEATURES = {
-    "null_ratio",
+    # "null_ratio",                        # dropped, see MODEL_FEATURES
     "unique_ratio",
     "relative_ordinal_position",
     "table_max_unique_ratio",
-    "unique_ratio_relative_to_max",
+    # "unique_ratio_relative_to_max",      # dropped, see MODEL_FEATURES
     "table_avg_unique_ratio",
-    "table_avg_null_ratio",
+    # "table_avg_null_ratio",              # dropped, see MODEL_FEATURES
     "table_ratio_of_pk_candidates",
     "table_ratio_composite_key_cols",
     "table_ratio_1nf_violations",
     "table_std_unique_ratio",
 }
+
+
+# --- 1NF detection (Phase 0.5 of TASK_3_PLAN.md) ------------------------------------
+#
+# The old test was `COUNT_IF(value LIKE '%,%') > 0`: a SINGLE row containing a comma set
+# the flag. Because table_ratio_1nf_violations > 0 maps to class 0 in 100% of the training
+# rows, one comment row was enough to flip a whole table to 0NF. Precision on this flag
+# matters more than recall - hence three conditions instead of one.
+#
+# A list column differs from prose in that the WHOLE value is a separator-list of short
+# tokens, and that this holds for nearly every row - not in "contains a comma somewhere".
+#
+# The pattern lives here rather than inline because union_parts is built with an f-string,
+# where `{1,40}` would be silently evaluated as the tuple `(1, 40)` and quietly corrupt the
+# regex. Interpolating a variable sidesteps that. Deliberately backslash-free.
+# The pattern, the share threshold and the free-text name veto now live in nf_features -
+# the module Phase 2b built for the training set. They were duplicated here, which is the
+# shape of skew described in finding 1.6: two copies of one formula that agree until one
+# of them is edited. Imported, not copied (Phase 0.5, "shared module").
+#
+# Deliberately NOT shared: the mean-length guard below. nf_features measures it per token
+# rather than per value, which is a better rule - a list of 80 part ids is 355 characters
+# long and every piece of it is 4, so the per-value cap of 120 rejects a genuine 1NF
+# violation as prose (measured on nf_026 of the generated set). Changing it here would
+# change what the *currently registered* model is served, so it waits for Phase 4.
+LIST_VALUE_MAX_MEAN_LENGTH = 120
+
+
+def build_1nf_violation_expr(column: str) -> str:
+    """
+    SQL for is_this_col_violating_1nf: 1 only if the column looks like a repeating group.
+
+    Three conditions, each catching a different failure of the old `LIKE '%,%'` test:
+    - the share threshold kills the single-row false positive (the main damage),
+    - the anchored pattern rejects prose with a comma mid-sentence,
+    - the mean-length guard rejects long comments that happen to start list-shaped.
+
+    Known gap: short prose without sentence punctuation ("Danke, bis morgen") still matches
+    the pattern. Only the share threshold and the name veto catch that case.
+    """
+    quoted = f'"{column}"'
+    return f"""
+                        CASE
+                            WHEN COUNT_IF({quoted} IS NOT NULL) = 0 THEN 0
+                            WHEN CAST(COUNT_IF(
+                                     regexp_like(CAST({quoted} AS VARCHAR),
+                                                 '{LIST_VALUE_PATTERN}')
+                                 ) AS DOUBLE)
+                                 / COUNT_IF({quoted} IS NOT NULL) >= {LIST_VALUE_MIN_SHARE}
+                             AND AVG(LENGTH(CAST({quoted} AS VARCHAR)))
+                                 <= {LIST_VALUE_MAX_MEAN_LENGTH}
+                            THEN 1
+                            ELSE 0
+                        END AS is_this_col_violating_1nf"""
+
+
+def apply_freetext_veto(df_table: pd.DataFrame) -> pd.DataFrame:
+    """
+    Force is_this_col_violating_1nf to 0 for columns whose NAME marks them as free text.
+
+    Second line of defence behind build_1nf_violation_expr. A veto can only suppress false
+    positives, never create new ones - the right direction for a flag where one false
+    positive flips an entire table to 0NF.
+
+    The column itself stays in the frame on purpose: removing it would shrink
+    table_column_count and shift relative_ordinal_position, table_avg_unique_ratio and
+    table_ratio_of_pk_candidates for every other column, i.e. describe a table that does
+    not exist. Only this one flag is overridden.
+
+    Must run BEFORE recompute_table_features - that is where table_ratio_1nf_violations is
+    derived from this column.
+    """
+    vetoed = df_table["column_name"].map(is_freetext_name)
+    suppressed = vetoed & (df_table["is_this_col_violating_1nf"] == 1)
+    for name in df_table.loc[suppressed, "column_name"]:
+        print(f"  1NF veto (free-text column name): {name}")
+    df_table.loc[vetoed, "is_this_col_violating_1nf"] = 0
+    return df_table
 
 
 def get_trino_engine() -> Engine:
@@ -436,7 +529,7 @@ def extract_normalform_features(
     only_tables: list[TableRef] | None = None,
 ) -> pd.DataFrame:
     """
-    Profile all columns in the target schema(s) and produce the 50 model features
+    Profile all columns in the target schema(s) and produce the 29 model features
     (plus id columns database/schema/table_name/column_name for aggregation).
 
     Args:
@@ -519,11 +612,7 @@ def extract_normalform_features(
                                 AND COUNT_IF("{column}" IS NULL) = 0 THEN 1
                                 ELSE 0
                             END AS is_unique,
-                        '{ordinal_position}' AS ordinal_position,
-                        CASE
-                            WHEN COUNT_IF(CAST("{column}" AS VARCHAR) LIKE '%,%') > 0 THEN 1
-                            ELSE 0
-                        END AS is_this_col_violating_1nf
+                        '{ordinal_position}' AS ordinal_position,{build_1nf_violation_expr(column)}
                     FROM {database}.{schema}.{table}
                 """)  # noqa: S608 - identifiers come from catalog metadata, not user input
 
@@ -544,6 +633,9 @@ def extract_normalform_features(
 
         df_table = pd.concat(table_dfs, ignore_index=True)
         df_table["ordinal_position"] = df_table["ordinal_position"].astype(int)
+        # Before recompute_table_features: that is where table_ratio_1nf_violations is
+        # averaged from is_this_col_violating_1nf.
+        df_table = apply_freetext_veto(df_table)
         df_table = recompute_table_features(df_table)
         df_table = _encode_type_dummies(df_table)
         all_table_features.append(df_table)
@@ -554,7 +646,9 @@ def extract_normalform_features(
 
     df_final = pd.concat(all_table_features, ignore_index=True)
 
-    # Keep id columns (for aggregation) + exactly the 50 model features.
+    # Keep id columns (for aggregation) + exactly the 29 model features. Everything the
+    # extractor computed for intermediate use (count, ordinal_position, is_unique, ...) is
+    # dropped here, not earlier - recompute_table_features needs it.
     id_cols = ["database", "schema", "table_name", "column_name"]
     missing = [f for f in MODEL_FEATURES if f not in df_final.columns]
     if missing:
@@ -566,7 +660,7 @@ def extract_normalform_features(
 
     # Persist the extracted features (rebuilt each run) so they can be inspected without
     # running prediction, mirroring pk_fk_pipeline's stg_column_features. This is its OWN
-    # table: the normalform feature set (50 cols) differs from the pk/fk one, so the two
+    # table: the normalform feature set (29 cols) differs from the pk/fk one, so the two
     # must never share a staging table.
     with engine.begin() as connection:
         connection.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
@@ -749,7 +843,7 @@ def normalform_prediction_pipeline(
     use_pending_changes: bool = False,
 ) -> dict:
     """
-    Complete normalform track: pick the tables to process -> extract 50 features ->
+    Complete normalform track: pick the tables to process -> extract 29 features ->
     predict per column -> majority-vote aggregate to one NF class per table -> store.
 
     Args:

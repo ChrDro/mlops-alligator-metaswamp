@@ -2555,7 +2555,7 @@ requires-dist = [
     { name = "prefect", specifier = ">=3.7.8,<4.0.0" },
     { name = "prefect-dbt", extras = ["trino"], specifier = ">=0.4.3" },
     { name = "prefect-sqlalchemy", specifier = ">=0.6.0" },
-    { name = "prometheus-fastapi-instrumentator", specifier = ">=8.1.0" },
+    { name = "prometheus-fastapi-instrumentator", specifier = ">=7.1.0" },
     { name = "protobuf", specifier = "<5.0.0" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
