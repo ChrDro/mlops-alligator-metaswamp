@@ -39,6 +39,40 @@ or use `scripts/setup_stack.sh`.
 Replacing the keystore needs `docker compose restart trino`; the coordinator loads it
 at startup and does not notice the file changing underneath.
 
+## Connecting with a SQL client (DBeaver, DataGrip)
+
+The certificate is self-signed and generated per clone, so a client that validates TLS
+properly fails with:
+
+```text
+javax.net.ssl.SSLHandshakeException: (certificate_unknown) PKIX path building failed
+```
+
+That is expected, not a misconfiguration - nothing signed this certificate. The
+generator writes the public half of it next to the keystore for exactly this case:
+
+```text
+etc/trino-cert.crt          the certificate on its own
+etc/trino-truststore.jks    the same certificate in a JKS, password = TRINO_KEYSTORE_PASSWORD
+```
+
+Point the client at the truststore rather than switching verification off:
+
+| Trino driver property | Value |
+| :--- | :--- |
+| `SSL` | `true` |
+| `SSLTrustStorePath` | absolute path to `etc/trino-truststore.jks` |
+| `SSLTrustStorePassword` | `TRINO_KEYSTORE_PASSWORD` from `.env` |
+
+Both files are git-ignored and re-derived whenever the keystore is written, so the
+client setting survives a `--force` regeneration - the path stays the same and the
+contents are refreshed in place. `SSLVerification=NONE` also works but has to be
+repeated by every person on every machine, and it turns the check off rather than
+satisfying it.
+
+Everything inside the repo (prefect, dbt, `src/check_trino_connection.py`, the Trino
+CLI) skips verification instead, which is why those clients never needed this.
+
 Two things that used to be separate are now shared with the rest of the stack:
 
 - **MinIO** - the `storage` container from the old script is gone. Iceberg writes to

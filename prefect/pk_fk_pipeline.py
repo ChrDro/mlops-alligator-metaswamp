@@ -1052,8 +1052,8 @@ def claim_key_changes(run_id: str) -> list[TableRef]:
     """
     Claim the tables the change detector flagged for the pk/fk track.
 
-    Retried on commit conflicts: the normalform track is woken by the same event and
-    claims the same rows, so on iceberg one of the two loses the commit race.
+    Retried on commit conflicts: all three tracks are woken by the same event and
+    claim the same rows, so on iceberg two of the three lose the commit race.
     """
     return with_commit_retry(
         get_trino_engine(),
