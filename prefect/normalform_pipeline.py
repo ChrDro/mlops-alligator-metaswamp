@@ -12,10 +12,10 @@ This flow:
 2. Discovers + profiles the remaining columns and builds the exact 50 features the
    registered model expects (feature logic ported verbatim from
    get_trino_summaries_task_3_training.py so inference matches training), writing them
-   to duckdb.staging.stg_normalform_features for inspection.
+   to iceberg.staging.stg_normalform_features for inspection.
 3. Calls POST /predict_normalform per column via the model API.
 4. Aggregates per table by MAJORITY VOTE -> one normal-form class per table.
-5. Stores ONE row per table in duckdb.prediction_results.nf_results.
+5. Stores ONE row per table in iceberg.prediction_results.nf_results.
 
 Retraining is intentionally out of scope: the training data is frozen and was
 mostly hand-labeled (no label generator exists in the repo).
@@ -34,11 +34,13 @@ from change_events import (
     claim_pending_changes,
     complete_pending_changes,
     release_pending_changes,
+    with_commit_retry,
 )
 from dotenv import load_dotenv
+from model_health import diagnose, failure_detail
 from prefect.cache_policies import NONE as NO_CACHE
 from prefect.runtime import flow_run
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
 
 from prefect import flow, task
 
@@ -143,7 +145,7 @@ FLOAT_FEATURES = {
 def get_trino_engine() -> Engine:
     """Create and return a Trino engine instance."""
     return create_engine(
-        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/duckdb",
+        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/iceberg",
         connect_args={
             "http_scheme": "https",
             "verify": False,
@@ -410,7 +412,7 @@ def recompute_table_features(df_table: pd.DataFrame) -> pd.DataFrame:
 
 
 def _normalize_type(raw: str) -> str:
-    """Normalize a Trino/DuckDB data type to one of the model's column_type categories."""
+    """Normalize a Trino/iceberg data type to one of the model's column_type categories."""
     t = re.sub(r"\(.*\)", "", str(raw)).strip().lower()
     if t == "int":
         t = "integer"
@@ -454,8 +456,8 @@ def extract_normalform_features(
     discovery_query = text(f"""
         SELECT t.table_catalog, t.table_schema, t.table_name,
                c.column_name, c.data_type, c.ordinal_position
-        FROM duckdb.information_schema.tables AS t
-        INNER JOIN duckdb.information_schema.columns AS c
+        FROM iceberg.information_schema.tables AS t
+        INNER JOIN iceberg.information_schema.columns AS c
             ON t.table_catalog = c.table_catalog
             AND t.table_schema = c.table_schema
             AND t.table_name = c.table_name
@@ -567,7 +569,7 @@ def extract_normalform_features(
     # table: the normalform feature set (50 cols) differs from the pk/fk one, so the two
     # must never share a staging table.
     with engine.begin() as connection:
-        connection.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.staging"))
+        connection.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
         df_final.to_sql(
             "stg_normalform_features",
             connection,
@@ -578,7 +580,7 @@ def extract_normalform_features(
 
     print(
         f"Extracted features for {len(df_final)} columns across {n_tables} tables "
-        "(written to duckdb.staging.stg_normalform_features)",
+        "(written to iceberg.staging.stg_normalform_features)",
     )
     return df_final
 
@@ -598,14 +600,16 @@ def _row_to_payload(row: pd.Series) -> dict:
 
 
 @task(name="predict-normalform", retries=2, retry_delay_seconds=10, cache_policy=NO_CACHE)
-def predict_normalform(features: pd.DataFrame) -> pd.DataFrame:
+def predict_normalform(features: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
     Call POST /predict_normalform for each column row. Returns the input frame with
-    per-column `prediction` (NF class) and `confidence` columns added.
+    per-column `prediction` (NF class) and `confidence` columns added, plus the
+    distinct reasons any calls failed so a run that predicted nothing can say why.
     """
     url = f"{MODEL_API_URL}/predict_normalform"
     predictions = []
     confidences = []
+    failure_reasons: set[str] = set()
 
     for _idx, row in features.iterrows():
         try:
@@ -616,14 +620,17 @@ def predict_normalform(features: pd.DataFrame) -> pd.DataFrame:
             confidences.append(result.get("probability", 0.0))
         except (requests.RequestException, requests.Timeout, requests.HTTPError) as e:
             loc = f"{row['schema']}.{row['table_name']}.{row['column_name']}"
-            print(f"Error predicting normalform for {loc}: {e}")
+            # Keep the service's explanation, not just "400 Bad Request".
+            detail = failure_detail(e)
+            print(f"Error predicting normalform for {loc}: {detail}")
+            failure_reasons.add(detail)
             predictions.append(None)
             confidences.append(0.0)
 
     out = features.copy()
     out["prediction"] = predictions
     out["confidence"] = confidences
-    return out
+    return out, sorted(failure_reasons)
 
 
 @task(name="aggregate-normalform", cache_policy=NO_CACHE)
@@ -661,7 +668,7 @@ def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
 
 @task(name="store-normalform-results", cache_policy=NO_CACHE)
 def store_results(results: pd.DataFrame) -> int:
-    """Append one row per table to duckdb.prediction_results.nf_results."""
+    """Append one row per table to iceberg.prediction_results.nf_results."""
     if results.empty:
         print("No normalform results to store.")
         return 0
@@ -671,7 +678,7 @@ def store_results(results: pd.DataFrame) -> int:
 
     engine = get_trino_engine()
     with engine.begin() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.prediction_results"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.prediction_results"))
         results.to_sql(
             "nf_results",
             conn,
@@ -694,7 +701,7 @@ def get_processed_tables() -> set[tuple[str, str, str]]:
     with engine.connect() as conn:
         table_exists = conn.execute(
             text(
-                "SELECT COUNT(*) FROM duckdb.information_schema.tables "
+                "SELECT COUNT(*) FROM iceberg.information_schema.tables "
                 "WHERE table_schema = 'prediction_results' AND table_name = 'nf_results'",
             ),
         ).scalar()
@@ -703,7 +710,7 @@ def get_processed_tables() -> set[tuple[str, str, str]]:
         rows = conn.execute(
             text(
                 "SELECT DISTINCT database, schema, table_name "
-                "FROM duckdb.prediction_results.nf_results",
+                "FROM iceberg.prediction_results.nf_results",
             ),
         ).fetchall()
     return {(r[0], r[1], r[2]) for r in rows}
@@ -711,18 +718,28 @@ def get_processed_tables() -> set[tuple[str, str, str]]:
 
 @task(name="claim-nf-changes", cache_policy=NO_CACHE)
 def claim_nf_changes(run_id: str) -> list[TableRef]:
-    """Claim the tables the change detector flagged for the normalform track."""
-    with get_trino_engine().begin() as conn:
-        return claim_pending_changes(conn, TRACK_NF, run_id)
+    """
+    Claim the tables the change detector flagged for the normalform track.
+
+    Retried on commit conflicts: all three tracks are woken by the same event and
+    claim the same rows, so on iceberg two of the three lose the commit race.
+    """
+    return with_commit_retry(
+        get_trino_engine(),
+        lambda conn: claim_pending_changes(conn, TRACK_NF, run_id),
+    )
 
 
 @task(name="close-nf-changes", cache_policy=NO_CACHE)
 def close_nf_changes(run_id: str, *, succeeded: bool) -> int:
     """Complete the claim on success, release it on failure so the next run retries."""
-    with get_trino_engine().begin() as conn:
+
+    def close(conn: Connection) -> int:
         if succeeded:
             return complete_pending_changes(conn, TRACK_NF, run_id)
         return release_pending_changes(conn, TRACK_NF, run_id)
+
+    return with_commit_retry(get_trino_engine(), close)
 
 
 @flow(name="normalform-prediction-pipeline")
@@ -781,7 +798,7 @@ def normalform_prediction_pipeline(
             return {"tables": 0}
 
         print("Step 3: Predicting normal form per column...")
-        predicted = predict_normalform(features)
+        predicted, failure_reasons = predict_normalform(features)
 
         print("Step 4: Aggregating to one row per table...")
         table_results = aggregate_to_table(predicted)
@@ -796,8 +813,11 @@ def normalform_prediction_pipeline(
         if use_pending_changes and stored < expected:
             msg = (
                 f"Only {stored} of {expected} profiled tables produced a normalform "
-                f"result (model calls failing). Releasing the changes so the next "
-                f"detection pass retries them."
+                f"result.\n"
+                f"{diagnose(failure_reasons, MODEL_API_URL)}\n"
+                f"  Note:  retriggering this flow changes nothing until the above is "
+                f"fixed. The claimed changes are released, so the next detection pass "
+                f"picks these tables up again automatically."
             )
             print(msg)
             raise RuntimeError(msg)

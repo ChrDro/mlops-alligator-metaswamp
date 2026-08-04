@@ -99,17 +99,24 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # Ordering only, deliberately not service_healthy: the Prefect server is
+      # worth having even when Trino is down, and its own startup (pip install
+      # below) takes far longer than Trino needs to accept queries anyway.
+      trino:
+        condition: service_started
     env_file:
       - .env
     environment:
       - PREFECT_API_URL=http://localhost:4200/api
       - MODEL_API_URL=http://model-service:8080
+      - TRINO_IP_ADDRESS=trino
       # Persist server state in Postgres instead of SQLite in the container
       - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
     volumes:
       - ./prefect:/opt/flows
       # Read-only: model_quality_backtest.py replays the labelled holdout rows in
-      # data/pk_holdout.csv. Nothing in prefect/ writes to this directory.
+      # data/holdouts/ (one CSV per monitored model). Nothing in prefect/ writes
+      # to this directory.
       - ./data:/opt/data:ro
     working_dir: /opt/flows
     command:
@@ -135,6 +142,58 @@ services:
       # Dependencies now come from the image, so this only has to cover the
       # database migration and the server's own startup.
       start_period: 90s
+    networks:
+      - ml-services-monitoring
+
+  # Open-weights LLM that names the task_4 subject areas. Replaces the OpenRouter
+  # call, so the stack needs no API key and no outbound network at label time.
+  ollama:
+    image: ollama/ollama:0.32.5
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      # Host port is configurable because a machine may already run Ollama natively
+      # on 11434; in-network callers always use ollama:11434.
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      # Named volume, so the model is pulled once instead of on every `up`.
+      - ollama_models:/root/.ollama
+    environment:
+      # Default is 5 min. Labelling is bursty; reloading the weights costs more
+      # than the generation itself.
+      - OLLAMA_KEEP_ALIVE=1h
+    # The image ships no models, so the pull happens here. Same shape as minio below.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        ollama_pid=$$!
+        until ollama list >/dev/null 2>&1; do
+          echo "Waiting for Ollama to accept connections...";
+          sleep 1;
+        done
+        ollama pull ${OLLAMA_MODEL:-qwen2.5:3b}
+        echo "Ollama ready."
+        wait "$$ollama_pid"
+    healthcheck:
+      # Matches the model, not just the server - a call during the pull gets a 404.
+      test: ["CMD-SHELL", "ollama list | grep -q ${OLLAMA_MODEL_FAMILY:-qwen2.5}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # Covers the initial pull (~2 GB for qwen2.5:3b).
+      start_period: 600s
+    # CPU-only by default, which is what keeps this portable: Docker Desktop on
+    # macOS/Windows cannot reach the GPU anyway. On a Linux host with the NVIDIA
+    # container toolkit, uncomment for a large speedup.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     networks:
       - ml-services-monitoring
 
@@ -166,6 +225,8 @@ services:
         done
         mc mb --ignore-existing myminio/mlflow
         mc mb --ignore-existing myminio/postgres-backups
+        # Iceberg warehouse for the Trino/Nessie catalog
+        mc mb --ignore-existing myminio/warehouse
         echo "MinIO buckets ready."
         wait "$$minio_pid"
     healthcheck:
@@ -285,11 +346,64 @@ services:
     networks:
       - ml-services-monitoring
 
+  # Iceberg catalog for Trino
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.107.5-java
+    container_name: nessie_catalog
+    ports:
+      - "19120:19120"
+    environment:
+      # Store to outlive the container after docker compose down
+      - NESSIE_VERSION_STORE_TYPE=ROCKSDB
+      - NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH=/deployments/data/rocksdb
+    volumes:
+      - nessie_data:/deployments/data
+    networks:
+      - ml-services-monitoring
+
+  trino:
+    image: trinodb/trino:483
+    container_name: trino
+    depends_on:
+      minio:
+        condition: service_healthy
+      nessie:
+        condition: service_started
+    environment:
+      # Read by ${ENV:...} in etc/trino/catalog/iceberg.properties.
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      # ... and by etc/config.properties. Kept out of that file so it stays
+      # committable; the keystore itself is generated, never committed.
+      - TRINO_SHARED_SECRET=${TRINO_SHARED_SECRET}
+      - TRINO_KEYSTORE_PASSWORD=${TRINO_KEYSTORE_PASSWORD}
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./trino-iceberg/etc/config.properties:/etc/trino/config.properties:ro
+      - ./trino-iceberg/etc/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - ./trino-iceberg/etc/trino/password.db:/etc/trino/password.db:ro
+      - ./trino-iceberg/etc/keystore.jks:/etc/trino/keystore.jks:ro
+      - ./trino-iceberg/etc/trino/catalog/iceberg.properties:/etc/trino/catalog/iceberg.properties:ro
+      - ./trino-iceberg/etc/trino/catalog/duckdb.properties:/etc/trino/catalog/duckdb.properties:ro
+      - ./trino-iceberg/etc/trino/catalog/tpch.properties:/etc/trino/catalog/tpch.properties:ro
+      - ./trino-iceberg/data:/duckdb
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ml-services-monitoring
+
 volumes:
   grafana-data:
   prometheus-data:
   minio_data:
   postgres_data:
+  ollama_models:
+  nessie_data:
 
 networks:
   ml-services-monitoring:

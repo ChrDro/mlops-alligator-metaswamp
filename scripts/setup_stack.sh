@@ -3,7 +3,7 @@
 # Bring the whole stack from "fresh clone" to "a prediction actually works".
 #
 # Steps, in order:
-#   1. Preflight  - docker, .env, python interpreter
+#   1. Preflight  - docker, .env, python interpreter, Trino dev credentials
 #   2. Compose    - build and start all services, wait until they answer
 #   3. Train      - the 5 models, unless they are already registered
 #   4. Verify     - registry aliases + the model/schema contract tests
@@ -75,10 +75,24 @@ ok "Docker found and running"
 # shellcheck disable=SC1091  # .env is user config, not tracked
 set -a; . ./.env; set +a
 
-for var in MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+for var in TRINO_USERNAME TRINO_PASSWORD TRINO_IP_ADDRESS TRINO_KEYSTORE_PASSWORD TRINO_SHARED_SECRET MINIO_ROOT_USER MINIO_ROOT_PASSWORD POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
     [ -n "${!var:-}" ] || fail ".env: $var not set."
 done
 ok ".env found and complete"
+
+# Trino serves HTTPS with file-based password auth, so it needs a TLS keystore (holds
+# a private key) and a bcrypt password file. Both are git-ignored, so a fresh clone
+# has neither - and `docker compose up` would bind-mount the missing paths, which
+# makes Docker create DIRECTORIES there and leaves Trino unable to start. Generating
+# before step 2 avoids that; the generator keeps files that already exist, so this is
+# safe on every run. Pass --force to that script by hand to rotate the credentials.
+if credentials_log="$(bash trino-iceberg/generate-dev-credentials.sh 2>&1)"; then
+    printf '%s\n' "$credentials_log" | sed '/^$/d; s/^/      /'
+    ok "Trino TLS keystore and password file in place"
+else
+    printf '%s\n' "$credentials_log" >&2
+    fail "Could not generate the Trino credentials (see above)."
+fi
 
 # A venv created on Windows puts the interpreter in Scripts/, not bin/, so check
 # both before falling back to uv.
@@ -180,6 +194,13 @@ wait_for_http "http://localhost:8080/" "model-service" 180
 # the first boot after a rebuild is slow. Its healthcheck allows 300s start period.
 wait_for_http "http://localhost:4200/api/health" "prefect" 420
 
+# The task_4 training script asks this service to name each discovered subject area,
+# so it has to be up before step 3. Its healthcheck only passes once the model is
+# pulled into the volume, which on a cold start means a multi-GB download.
+if [ "$SKIP_TRAIN" = false ]; then
+    wait_for_healthy ollama 900
+fi
+
 # --- 3. training -------------------------------------------------------------
 
 TRAIN_SCRIPTS=(
@@ -188,6 +209,11 @@ TRAIN_SCRIPTS=(
     "fk_model:task_2/task_2_fk_train_and_register.py"
     "composite_fk_model:task_2/task_2_cfk_train_and_register.py"
     "denormalization_model:task_3/task_3_denormalization_train_and_register.py"
+    # Slowest of the five on a cold cache: it downloads the sentence-transformer,
+    # embeds every table, and asks the ollama service to name each cluster. Step 5
+    # globs curl_tests/test_curl_predict_*.sh, so leaving this untrained would fail
+    # the smoke test rather than skip it.
+    "subject_area_model:task_4/task_4_subject_area_train_and_register.py"
 )
 
 step "3/7  Train and register models"
@@ -345,16 +371,20 @@ else
 
     # Dropping the watermark table makes the detector treat every table as new, so
     # the run below actually has work to do instead of finding nothing changed.
+    # Import the table name from the detector instead of repeating it: this line
+    # said duckdb.staging.source_watermarks long after the catalog became iceberg,
+    # so the DROP silently hit nothing (the duckdb catalog still exists) and the
+    # reset below quietly did nothing at all.
     docker compose exec -T prefect python -c "
-from change_detector import get_trino_engine
+from change_detector import WATERMARK_TABLE, get_trino_engine
 from sqlalchemy import text
 with get_trino_engine().begin() as conn:
-    conn.execute(text('DROP TABLE IF EXISTS duckdb.staging.source_watermarks'))
-print('Watermarks reseted')
+    conn.execute(text(f'DROP TABLE IF EXISTS {WATERMARK_TABLE}'))
+print(f'Watermarks reset ({WATERMARK_TABLE})')
 " || fail "Trino unreachable. Check network."
-    ok "Watermarks reseted — next run will assume all talbes als "new""
+    ok "Watermarks reset — next run treats every table as new"
 
-    bash curl_tests/test_curl_notify_new_data.sh >/dev/null 2>&1 \
+    bash trigger_prefect_pipeline.sh >/dev/null 2>&1 \
         || fail "Webhook call failed."
     ok "Push trigger send"
     warn "Runs need may need one or two minutes — see progress at: http://localhost:4200/runs"
@@ -369,28 +399,53 @@ $BOLD$GREEN Stack is ready.$RESET
   MLflow        http://localhost:5000
   Model API     http://localhost:8080/docs
   Prefect       http://localhost:4200
-  Grafana       http://localhost:3000   (admin/admin)
+  Grafana       http://localhost:3000   (GF_SECURITY_ADMIN_USER / GF_SECURITY_ADMIN_PASSWORD from .env)
   Prometheus    http://localhost:9090
   Alertmanager  http://localhost:9093   (Null Receiver, sends nothing)
   MinIO         http://localhost:9001
-  Evidently     http://localhost:8085/report
+  Evidently     http://localhost:8085/tracks          (what is monitored)
+                http://localhost:8085/report/<track> (drift HTML, e.g. pk_columns)
 
   Dashboards:
-    Model Service - Golden Signals    /d/model-service-golden-signals
-    Data Drift Monitoring             /d/evidently-data-drift
-    ML Model Performance Monitoring   /d/evidently-model-quality
+    Model Service - Golden Signals            /d/model-service-golden-signals
+    Key Predict Data Drift Monitoring         /d/evidently-key-drift
+    Key Model Performance Monitoring          /d/evidently-model-quality
+    Normalform Predict Data Drift Monitoring  /d/evidently-normalform-drift
+    Normalform Model Performance Monitoring   /d/evidently-normalform-quality
+
+  Ollama        http://localhost:${OLLAMA_HOST_PORT:-11434}   (names the task_4 subject areas)
+  Trino         https://localhost:8443  (user/password from .env)
+
+  SQL client (DBeaver / DataGrip): the TLS certificate is self-signed and freshly
+  generated per clone, so a verifying client rejects it with "PKIX path building
+  failed" until pointed at the matching truststore. Ready-to-paste JDBC URL:
+
+jdbc:trino://localhost:8443/iceberg?SSL=true&SSLTrustStorePath=$REPO_ROOT/trino-iceberg/etc/trino-truststore.jks&SSLTrustStorePassword=$TRINO_KEYSTORE_PASSWORD
+
+  User / password are $TRINO_USERNAME and TRINO_PASSWORD from .env. Swap the catalog
+  for duckdb or tpch as needed. The truststore holds only the public certificate - no
+  private key - so the password above protects its integrity, not a secret.
+
+  Note SSLTrustStore*, not SSLKeyStore*: the latter is for client certificates
+  (mutual TLS) and does not make the server's certificate trusted.
+
+  The truststore is rewritten in place whenever the keystore is regenerated, so this
+  URL keeps working. Prefer it over SSLVerification=NONE, which every person then has
+  to set on every machine and which switches the check off rather than passing it.
 
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
-  Trigger Streaming:    bash curl_tests/test_curl_notify_new_data.sh
-  Results:              duckdb.prediction_results.key_results / nf_results
+  Subject area:         bash curl_tests/test_curl_predict_subject_area.sh
+  Trigger Streaming:    bash trigger_prefect_pipeline.sh
+  Results:              iceberg.prediction_results.key_results / nf_results / subject_area_results
 
   Monitoring notes:
-    Drift fills automatically from the 4 predict endpoints, one track per
+    Drift fills automatically from all 5 predict endpoints, one track per
     model. Each needs service.window_size predictions before its first
-    report appears. Switch model with the Model dropdown on the dashboard.
+    report appears. The key dashboards carry a Model dropdown (pk/cpk/fk/cfk);
+    normalform has its own pair of dashboards because it is multiclass.
     F1/precision/recall need ground-truth labels, which live predictions do
     not carry, so they come from the hourly model-quality-backtest
-    deployment. Run it now with:
+    deployment. Run it now instead of waiting for :17 with:
       docker compose exec -T -w /opt/flows prefect python model_quality_backtest.py
     What is actually being monitored:  curl localhost:8085/tracks
 

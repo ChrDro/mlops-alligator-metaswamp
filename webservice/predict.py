@@ -144,6 +144,43 @@ def _align_to_signature(
 def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
     _configure_tracking()
 
+
+def predict_domain(model_name: str, data: pd.DataFrame) -> tuple[str, float]:
+    """Predict domain from text features and return (label, confidence).
+
+    Separate from `predict` below because that one casts every column to float for
+    the five statistics-based models. The subject-area model is a TF-IDF pipeline
+    over `table_name` and `columns`, so the same cast would turn its only inputs into
+    NaN. Everything else is identical: align to the logged signature, predict, then
+    read the confidence off the raw estimator's predict_proba.
+
+    The label is whatever class the model was trained on - here a subject-area name -
+    so this returns a str rather than the int the numeric models return.
+    """
+    _set_tracking_uri()
+
+    if not isinstance(data, pd.DataFrame):
+        msg_type_error_dataframe = f"Expected DataFrame, got {type(data)}"
+        raise TypeError(msg_type_error_dataframe)
+
+    model_input = data.copy()
+    for col in model_input.columns:
+        model_input[col] = model_input[col].astype(str)
+
+    model = load_model(model_name)
+    model_input = _align_to_signature(model, model_input, model_name)
+
+    prediction = model.predict(model_input)
+
+    raw_model = model._model_impl.get_raw_model()
+    probabilities = raw_model.predict_proba(model_input)
+
+    return str(prediction[0]), float(probabilities[0].max())
+
+
+def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
+    _set_tracking_uri()
+
     # Ensure data is a DataFrame and convert to proper dtypes
     if not isinstance(data, pd.DataFrame):
         msg_type_error_dataframe = f"Expected DataFrame, got {type(data)}"

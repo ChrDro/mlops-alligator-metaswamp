@@ -18,10 +18,12 @@ from data_model_events import NewDataAccepted, NewDataNotification
 from data_model_fk import ForeignKey, ForeignKeyPrediction
 from data_model_health import LivenessStatus, ReadinessStatus
 from data_model_pk import PrimaryKey, PrimaryKeyPrediction
+from data_model_subject_area import SubjectArea, SubjectAreaPrediction
 from event_publisher import EventPublishError, publish_new_data_event
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
 from monitoring_client import forward_to_monitoring
-from predict import MODEL_ALIAS, predict, resolve_model_versions
+from predict import MODEL_ALIAS, predict, predict_domain, resolve_model_versions
+from metrics import record_error
 from prometheus_fastapi_instrumentator import Instrumentator
 
 
@@ -35,7 +37,7 @@ Instrumentator().instrument(app).expose(app)
 def index() -> dict:
     # Keep the root route simple so users can tell the container is alive
     # before testing the full prediction path.
-    return {"message": "PK, FK Candidate and Normalform Prediction"}
+    return {"message": "PK, FK Candidate, Normalform and Subject Area Prediction"}
 
 
 @app.get("/health/live", response_model=LivenessStatus)
@@ -130,6 +132,7 @@ def predict_primary_key(
     except HTTPException:
         raise
     except Exception as error:
+        record_error("pk_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -172,6 +175,7 @@ def predict_composite_primary_key(
     except HTTPException:
         raise
     except Exception as error:
+        record_error("composite_pk_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -214,6 +218,7 @@ def predict_foreign_key(
     except HTTPException:
         raise
     except Exception as error:
+        record_error("fk_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -256,6 +261,54 @@ def predict_composite_foreign_key(
     except HTTPException:
         raise
     except Exception as error:
+        record_error("composite_fk_model", error)
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error in model input or predict logic: {error!s}",
+        ) from error
+    else:
+        return response
+
+
+@app.post("/predict_subject_area", response_model=SubjectAreaPrediction)
+def predict_subject_area(data: SubjectArea) -> SubjectAreaPrediction:
+    """
+    Assign a table to a subject area (its business domain).
+
+    The label set is not fixed in code: task_4 discovers it by clustering table names
+    and column names, names each cluster with a local LLM, then distils the result
+    into the TF-IDF classifier served here. Retraining can therefore both rename an
+    area and introduce a new one.
+
+    `prediction` is that name, so unlike the other endpoints it is a string. A table
+    that belongs to no discovered area still gets the closest one - the signal for
+    "do not trust this" is a low `probability`, not a special label.
+    """
+    try:
+        data_dict = data.model_dump()
+
+        input_df = pd.DataFrame([data_dict])
+
+        print("Sending the following columns as features to the model:", input_df.columns.tolist())
+
+        prediction_value, probability = predict_domain("subject_area_model", input_df)
+
+        response = SubjectAreaPrediction(
+            **data_dict,
+            prediction=prediction_value,
+            probability=probability,
+        )
+
+        # No monitoring track yet: the Evidently references are built from numeric
+        # feature frames, and two free-text columns need a DataDefinition of their own
+        # before a drift report on them means anything.
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        record_error("subject_area_model", error)
         traceback.print_exc()
 
         raise HTTPException(
@@ -294,7 +347,7 @@ def notify_new_data(notification: NewDataNotification) -> NewDataAccepted:
     return NewDataAccepted(
         status="accepted",
         schema_name=notification.schema_name,
-        detail="Change detection triggered.",
+        detail="Predict Pipeline triggered..",
     )
 
 
@@ -333,6 +386,7 @@ def predict_normalform_key_candidate(
     except HTTPException:
         raise
     except Exception as error:
+        record_error("denormalization_model", error)
         traceback.print_exc()
 
         raise HTTPException(

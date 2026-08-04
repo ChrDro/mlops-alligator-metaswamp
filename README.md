@@ -38,14 +38,17 @@ statistics, it never reads real data — which keeps it fast and usable on regul
 | **1. Primary keys** | Is this column a single PK? part of a composite PK? | `pk_target`, `composite_pk_target` | ✅ implemented |
 | **2. Foreign keys** | Is this column a single FK? part of a composite FK? | `fk_target`, `composite_fk_target` | ✅ implemented |
 | **3. Normalization** | What is the highest normal form the table satisfies (0–3NF)? | `target_normal_form` | ✅ implemented |
-| **4. Domain grouping** | Group tables/schemas by naming and structural similarity. | — (unsupervised) | ⛔ out of scope |
+| **4. Domain grouping** | Which business domain (subject area) does this table belong to? | `subject_area` (discovered, not predefined) | ✅ implemented |
 
-> Task 4 is deliberately **not** part of this capstone. Effort is going into engineering
-> depth on Tasks 1–3, per the capstone brief ("keep the modelling simple; the point is
-> the engineering").
+> Task 4 has no ground truth, so it runs in two stages: subject areas are **discovered**
+> by clustering table and column names (embeddings → UMAP → HDBSCAN) and **named** by a
+> local open-weights LLM, then that labelling is distilled into a TF-IDF text classifier
+> which is what gets registered and served. Retraining can rename an area or add a new
+> one, so its label set is not fixed in code.
 
-Each task is a separate model, so five models are trained and served in total:
-`pk_model`, `composite_pk_model`, `fk_model`, `composite_fk_model`, `denormalization_model`.
+Each task is a separate model, so six models are trained and served in total:
+`pk_model`, `composite_pk_model`, `fk_model`, `composite_fk_model`,
+`denormalization_model`, `subject_area_model`.
 
 ---
 
@@ -83,11 +86,11 @@ through the registry: promoting a model is moving an alias, not rebuilding a con
 The project uses [`uv`](https://docs.astral.sh/uv/) and Python 3.11.
 
 ```bash
-# install dependencies (runtime + dev) into a local venv
-uv sync --extra dev
+# install dependencies into a local venv - test tooling included, no extra flag needed
+uv sync
 # or, with plain pip:
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+pip install -e .
 ```
 
 Copy the environment template and fill in the values:
@@ -100,7 +103,25 @@ cp env.template .env
 | :--- | :--- |
 | `MLFLOW_TRACKING_URI` | Where the service and training scripts reach MLflow (e.g. `http://127.0.0.1:5000`). **Required.** |
 | `MLFLOW_MODEL_ALIAS` | Which registry alias the service serves. Defaults to `dev`. |
-| `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). |
+| `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). `TRINO_IP_ADDRESS` is a host without a port - use `localhost` for the Trino container from `docker-compose.yaml`. The user is created in `password.db` by the credential script below. |
+| `TRINO_KEYSTORE_PASSWORD` / `TRINO_SHARED_SECRET` | Protect the generated TLS keystore and Trino's internal communication. Any non-empty values work locally. |
+| `OLLAMA_MODEL` / `OLLAMA_MODEL_FAMILY` | Which open-weights model names the task_4 subject areas. Defaults to `qwen2.5:3b`; use `qwen2.5:7b` if Docker has ≥8 GB RAM. Keep the two in sync — the container healthcheck greps for the family. |
+| `OLLAMA_HOST_PORT` / `OLLAMA_BASE_URL` | Set both to a free port if the host already runs Ollama natively on 11434. |
+
+
+Then generate Trino's credentials. It serves HTTPS with password auth, and the two
+files that needs — a TLS keystore holding a private key and a bcrypt password file —
+are git-ignored, so a clone has neither:
+
+```bash
+bash trino-iceberg/generate-dev-credentials.sh
+```
+
+Run this **before** the first `docker compose up`: Compose bind-mounts both paths, and
+Docker creates a directory for a bind-mount source that is missing, which leaves Trino
+unable to start. The script is idempotent, keeps existing files, and takes `--force` to
+rotate them. `scripts/setup_stack.sh` runs it in preflight, so the scripted path needs
+no extra step. See [trino-iceberg/README.md](trino-iceberg/README.md) for details.
 
 ### 2. Train and register the models
 
@@ -114,13 +135,24 @@ python task_1/task_1_cpk_train_and_register.py   # composite primary key
 python task_2/task_2_fk_train_and_register.py    # single foreign key
 python task_2/task_2_cfk_train_and_register.py   # composite foreign key
 python task_3/task_3_denormalization_train_and_register.py  # normal form
+# Subject area. Needs the ollama service up (docker compose up -d ollama) to name the
+# clusters it discovers, and downloads a sentence-transformer on first run.
+python task_4/task_4_subject_area_train_and_register.py     # subject area
 ```
 
 ### 3. Run the full stack
 
 ```bash
+# Trino's keystore and password file are git-ignored - generate them first (step 1).
+# Skipping this leaves Trino unable to start: Compose bind-mounts the two missing
+# paths and Docker creates directories there. Re-running the script clears them.
+bash trino-iceberg/generate-dev-credentials.sh
+
 docker compose up --build
 ```
+
+Or let `scripts/setup_stack.sh` do all of it — it runs the generator in preflight and
+takes the stack from a fresh clone to a working prediction in one command.
 
 | Service | URL |
 | :--- | :--- |
@@ -128,6 +160,57 @@ docker compose up --build
 | Prometheus | http://localhost:9090 |
 | Grafana (dashboard auto-provisioned) | http://localhost:3000 |
 | Evidently drift report | http://localhost:8085/report |
+| Ollama (task_4 subject-area labels) | http://localhost:11434 |
+
+On first start the `ollama` service pulls its model (~2 GB for the default
+`qwen2.5:3b`) into a named volume, so the container reports `starting` for a few
+minutes before it turns `healthy`. Every later `up` reuses the volume. This replaces
+the previous OpenRouter call — no API key, and label generation needs no internet.
+| MLflow | http://localhost:5000 |
+| Prefect | http://localhost:4200 |
+| MinIO console | http://localhost:9001 |
+| Trino (self-signed TLS, password auth) | https://localhost:8443 |
+| Nessie (Iceberg catalog) API | http://localhost:19120/api/v1 |
+
+Trino, Nessie and the `warehouse` bucket are part of this stack - the separate
+`docker run` setup under `trino-iceberg/` is gone, and its MinIO is now the same
+`minio` service that MLflow stores artifacts in. Catalogs: `iceberg` (Nessie on
+MinIO), `duckdb` (`trino-iceberg/data/capstone.db`) and `tpch`.
+
+#### Alternative: start the stack from a container (Docker-out-of-Docker)
+
+```bash
+./scripts/run_stack_in_container.sh
+```
+
+This runs the compose CLI inside a container that has the host's Docker socket
+mounted, so the services it starts are siblings of the launcher on the host
+daemon — same published ports, same named volumes, same image cache as
+`docker compose up`. There is no nested Docker daemon and no `privileged: true`.
+Useful when the machine that orchestrates the stack should not need a Python
+environment or a compose plugin of its own, only a socket.
+
+Arguments are passed straight through to `docker compose` inside the launcher:
+
+```bash
+./scripts/run_stack_in_container.sh ps
+./scripts/run_stack_in_container.sh logs -f grafana
+./scripts/run_stack_in_container.sh up -d prometheus grafana
+./scripts/run_stack_in_container.sh down
+```
+
+Works on macOS, Linux and Windows (Git Bash or WSL2) with Docker Desktop. The
+launcher has to mount the repo at the **same absolute path the Docker daemon
+uses for it** — the host path on macOS and Linux, `/mnt/<drive>/...` under
+Docker Desktop for Windows: the relative bind mounts in `docker-compose.yaml`
+are resolved by the CLI in the launcher but mounted by the host daemon, so a
+wrong path would silently start Prometheus and Grafana without their
+configuration. The script probes this before starting anything and aborts with
+the detected path if the daemon cannot see the repo; override it with
+`PROJECT_DIR=... ./scripts/run_stack_in_container.sh` for an unusual setup.
+
+Mounting the Docker socket is equivalent to root on the host — this is meant for
+local development and CI, not for running untrusted code.
 
 ### 4. Make a prediction
 
@@ -169,9 +252,16 @@ form, not P(class=1)).
 | `POST` | `/predict_fk` | `fk_model` | single foreign key |
 | `POST` | `/predict_cfk` | `composite_fk_model` | composite foreign key |
 | `POST` | `/predict_normalform` | `denormalization_model` | normal form 0–3 |
+| `POST` | `/predict_subject_area` | `subject_area_model` | subject-area name |
 
 The request schema for each route is a Pydantic model in `webservice/data_model_*.py` —
 that file is the source of truth for the exact feature list.
+
+`/predict_subject_area` is the one endpoint whose request is text rather than column
+statistics (`table_name` plus a comma-separated `columns` string), and whose
+`prediction` is therefore a string rather than an int class. A table that fits no
+discovered area still gets the nearest one, so a low `probability` — not a special
+label — is the signal not to trust the answer.
 
 ---
 
@@ -406,21 +496,24 @@ gate** that refuses to register a model whose test F1 falls below the current ba
 | Experiment tracking & registry | MLflow | ✅ params, metrics, signature, feature list; alias-based deploy |
 | Model service | FastAPI + Docker | ✅ 5 typed endpoints, `/health/live` + `/health/ready`, `/metrics` |
 | CI | GitHub Actions | ✅ Ruff lint/format + pytest with coverage |
-| Service monitoring | Prometheus + Grafana | ✅ golden signals, 11 alert rules, provisioned dashboard |
+| Service monitoring | Prometheus + Grafana | ✅ golden signals, 10 alert rules, 5 provisioned dashboards |
 | Model monitoring | Evidently | ✅ input drift against a real reference set |
 | Data pipeline | Prefect + dbt | 🔜 planned |
-| Retraining | manual trigger | 🔜 planned (`reload_models()` hook in place) |
+| Retraining | manual trigger | 🔜 planned — no trigger in code yet; models are cached per name via `@lru_cache`, so a reload hook would start at `load_model.cache_clear()` |
 
 ### Monitoring detail
 
 - `webservice/metrics.py` adds model-level metrics on top of the HTTP golden signals:
   predictions by class, inference duration, errors by type, returned confidence.
-- `prometheus/alert.yaml` covers latency, traffic, errors, saturation, plus model-health
-  rules (a model stuck on one class, confidence collapse, prediction errors spiking).
-- `grafana/dashboards/golden-signals.json` is auto-provisioned — a fresh `docker compose
-  up` shows the board with no manual setup.
-- `evidently_service/build_reference.py` regenerates the drift reference set from the
-  training data. **Re-run it whenever the feature set changes.**
+- `prometheus/alert.yaml` holds 10 rules in three groups: `service-health` (instance down,
+  model service unreachable), `golden-signals` (5xx/4xx rate, p95 latency, no traffic,
+  memory) and `model-health` (a model stuck on one class, confidence collapse, prediction
+  errors spiking).
+- `grafana/dashboards/` holds five auto-provisioned boards — `model_service_golden_signals`
+  plus a drift and a quality board each for the key and the normal-form models. A fresh
+  `docker compose up` shows all of them with no manual setup.
+- `evidently_service/build_monitoring_references.py` regenerates the drift reference sets
+  from the training data. **Re-run it whenever the feature set changes.**
 
 ---
 
@@ -451,6 +544,7 @@ evidently_service/     drift-monitoring service + reference builder
 prometheus/            scrape config + alert rules
 grafana/               provisioned datasource + dashboard
 test/                  API, prediction and data-quality tests
+scripts/               stack setup + Docker-out-of-Docker launcher
 data/                  training CSVs
 documentation/         MLOps plan, presentations
 ```
