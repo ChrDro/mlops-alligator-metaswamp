@@ -54,22 +54,52 @@ Three ideas looked sound and did not survive the ablation:
 Leave-one-out over the seven that remain costs between 0.007 and 0.017 F1 each, so none
 of them is redundant.
 
-Scope of the grouping key
--------------------------
-`database` is the reference scope, matching the grouping key of every cross-validation
-split in the training scripts. Two databases may each have a `users` table with an `id`
-column and no relationship between them, so looking across databases would manufacture
-parents that cannot exist.
+The reference scope, and why it has to be augmented
+---------------------------------------------------
+Every feature here is relative to a *reference scope*: the set of other tables it is
+allowed to look at. In training that scope is one `database` - two databases may each
+have a `users` table with an `id` column and no relationship between them, so looking
+across databases would manufacture parents that cannot exist.
+
+Serving has no such boundary. `prefect/pk_fk_pipeline.py` profiles a Trino *schema*, and
+`database` there is the catalog name (constant `iceberg`), so the scope is whatever the
+loaders happened to put in `new_predict_data` - a flat landing area for unrelated tables.
+That is a train/serve skew, and it is not a small one. Training on single-database scopes
+and then serving on progressively larger ones (measured, 5-fold grouped CV on
+`fk_target`):
+
+    reference scope            tables/scope     F1
+    one database (training)             7.1    0.810
+    5 databases merged                 35.5    0.797
+    20 databases merged               142.2    0.764
+    everything in one schema         1706.0    0.666   <- worse than the 0.696 baseline
+
+The counts inflate as the scope grows (`n_other_tables_with_same_column_name` goes from
+2.14 to 14.32 on average, `name_unique_in_other_table` from 0.24 to 0.47), so a model
+trained on tight scopes reads a wide scope as "everything is related".
+
+The fix is scope augmentation, not an operational rule about how loaders must lay out
+schemas: train on several scope widths at once via `scope_augmented_variants`, and the
+model becomes scope-invariant.
+
+    trained on          serve@1db  serve@5  serve@20  serve@all
+    one database            0.810    0.797     0.764      0.666
+    1 + 5 + pooled          0.803    0.796     0.787      0.783
+
+That costs 0.007 F1 at the ideal layout, recovers 0.117 at the worst, and never drops
+below the 0.696 no-cross-table-features baseline at any scope width. Normalising the
+count by scope size instead was also measured and did not help (0.635 at serve@all).
 
 Serving
 -------
-Only `database`, `table_name`, `column_name` and `is_unique` are needed, all of which
-the Prefect extractor (prefect/pk_fk_pipeline.py) already has for every column of a
-schema before it profiles anything. These features are not wired into the serving path
-yet: that change also touches the Pydantic request schema, the model contract test, the
-curl fixture and the regenerated monitoring CSVs, so it is deliberately separate from
-proving the features pay off offline.
+Only the scope columns plus `table_name`, `column_name` and `is_unique` are needed. The
+Prefect extractor has all of them for every column of a schema before it profiles
+anything, which matters in streaming mode: a run scoped to a handful of changed tables
+must still compute these features against the whole schema, or a column whose parent
+table was not in the run would score 0 on every feature here.
 """
+
+from collections.abc import Sequence
 
 import pandas as pd
 
@@ -119,12 +149,26 @@ CROSS_TABLE_FEATURES = [
     "name_ends_with_code_or_num",
 ]
 
+# Columns that define the reference scope. Training groups by the logical database;
+# serving passes ("database", "schema") because there `database` is the Trino catalog and
+# the schema is what actually bounds a set of tables.
+DEFAULT_SCOPE_COLUMNS = ("database",)
+
 REQUIRED_COLUMNS = (
-    "database",
     "table_name",
     "column_name",
     "is_unique",
 )
+
+# Scope widths trained on together, in databases merged per synthetic scope. `None` pools
+# every database into one scope, which is what a flat landing schema looks like. See the
+# augmentation table in the module docstring for the measurements behind this choice.
+SCOPE_AUGMENTATION_WIDTHS: tuple[int | None, ...] = (1, 5, None)
+
+# Name of the synthetic scope column `scope_augmented_variants` groups by. It never
+# reaches the feature matrix - the training script drops it with the other identity
+# columns.
+SYNTHETIC_SCOPE_COLUMN = "cross_table_scope"
 
 
 def column_stem(column_name: str) -> str:
@@ -160,8 +204,8 @@ def table_name_variants(table_name: str) -> set[str]:
     return variants
 
 
-class _DatabaseIndex:
-    """Lookups over one database's columns, built once and queried per row."""
+class _ScopeIndex:
+    """Lookups over one reference scope's columns, built once and queried per row."""
 
     def __init__(self, frame: pd.DataFrame) -> None:
         # column name (lowercased) -> tables that have a column with that name
@@ -169,7 +213,7 @@ class _DatabaseIndex:
         # column name -> tables where that column is unique and non-null, i.e. tables for
         # which it is a single-column primary key candidate
         self.unique_tables_by_column: dict[str, set[str]] = {}
-        # every singular/plural variant of every table name in this database
+        # every singular/plural variant of every table name in this scope
         self.table_variants: set[str] = set()
 
         for row in frame.itertuples(index=False):
@@ -192,7 +236,7 @@ class _DatabaseIndex:
         return self.unique_tables_by_column.get(column, set()) - {table}
 
 
-def _row_features(index: _DatabaseIndex, table: str, column: str, is_unique: int) -> dict:
+def _row_features(index: _ScopeIndex, table: str, column: str, is_unique: int) -> dict:
     """The seven cross-table features for one column."""
     stem = column_stem(column)
     other_tables_with_name = index.tables_by_column.get(column, set()) - {table}
@@ -221,14 +265,26 @@ def _row_features(index: _DatabaseIndex, table: str, column: str, is_unique: int
     }
 
 
-def add_cross_table_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_cross_table_features(
+    df: pd.DataFrame,
+    scope_columns: Sequence[str] = DEFAULT_SCOPE_COLUMNS,
+) -> pd.DataFrame:
     """Return `df` with the cross-table feature columns appended.
 
-    Call this on the raw training frame, before one-hot encoding, because it needs the
-    identity columns. The row order and index of the input are preserved, so the result
-    lines up with any target column taken from `df`.
+    Call this on the raw frame, before one-hot encoding, because it needs the identity
+    columns. The row order and index of the input are preserved, so the result lines up
+    with any target column taken from `df`.
+
+    Args:
+        df: Column profiles. Needs `REQUIRED_COLUMNS` plus every entry of
+            `scope_columns`.
+        scope_columns: Columns whose combination bounds the reference scope. Training uses
+            `("database",)`; serving uses `("database", "schema")` because `database` is
+            the Trino catalog there. Widening this silently changes what every feature
+            means - see the scope discussion in the module docstring.
     """
-    missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
+    required = [*REQUIRED_COLUMNS, *scope_columns]
+    missing = [column for column in required if column not in df.columns]
     if missing:
         msg_missing_columns = f"add_cross_table_features needs columns {missing}"
         raise KeyError(msg_missing_columns)
@@ -239,9 +295,9 @@ def add_cross_table_features(df: pd.DataFrame) -> pd.DataFrame:
     # realign the result.
     records: list[dict] = []
     source_index: list = []
-    for _, database_frame in df.groupby("database", sort=False):
-        index = _DatabaseIndex(database_frame)
-        source_index.extend(database_frame.index.tolist())
+    for _, scope_frame in df.groupby(list(scope_columns), sort=False):
+        index = _ScopeIndex(scope_frame)
+        source_index.extend(scope_frame.index.tolist())
         records.extend(
             _row_features(
                 index,
@@ -249,8 +305,48 @@ def add_cross_table_features(df: pd.DataFrame) -> pd.DataFrame:
                 str(row.column_name).lower(),
                 int(row.is_unique),
             )
-            for row in database_frame.itertuples(index=False)
+            for row in scope_frame.itertuples(index=False)
         )
 
     features = pd.DataFrame(records, index=source_index).reindex(df.index)
     return pd.concat([df, features], axis=1)
+
+
+def scope_augmented_variants(
+    df: pd.DataFrame,
+    widths: Sequence[int | None] = SCOPE_AUGMENTATION_WIDTHS,
+    database_column: str = "database",
+) -> list[pd.DataFrame]:
+    """Featurise `df` once per reference-scope width, for scope-invariant training.
+
+    Serving cannot promise the tight one-database-per-schema scope the training CSV has,
+    so the model is shown several widths of the same rows and learns not to depend on any
+    one of them. Without this, a model trained only on single-database scopes scores 0.666
+    when served on a schema holding every table - below the 0.696 it gets with no
+    cross-table features at all. See the module docstring for the full table.
+
+    Args:
+        df: Raw column profiles.
+        widths: Databases merged into one synthetic scope per variant. `None` pools every
+            database into a single scope, which is what a flat landing schema looks like.
+        database_column: The real logical-database column that gets bucketed.
+
+    Returns:
+        One featurised frame per width, each keeping `df`'s original columns, row order
+        and index, so they can be concatenated into a training frame or indexed with the
+        same fold indices.
+    """
+    codes = pd.Categorical(df[database_column]).codes
+    variants: list[pd.DataFrame] = []
+
+    for width in widths:
+        scoped = df.copy()
+        # Bucketing by code keeps every database whole inside exactly one synthetic scope,
+        # so a variant never splits a real database across two scopes.
+        scoped[SYNTHETIC_SCOPE_COLUMN] = (
+            "pooled" if width is None else "scope_" + (codes // width).astype(str)
+        )
+        featurised = add_cross_table_features(scoped, scope_columns=(SYNTHETIC_SCOPE_COLUMN,))
+        variants.append(featurised.drop(columns=[SYNTHETIC_SCOPE_COLUMN]))
+
+    return variants

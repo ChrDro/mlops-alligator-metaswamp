@@ -25,8 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.cross_table_features import (
     CROSS_TABLE_FEATURES,
+    SYNTHETIC_SCOPE_COLUMN,
     add_cross_table_features,
     column_stem,
+    scope_augmented_variants,
     table_name_variants,
 )
 
@@ -280,3 +282,87 @@ class TestFrameContract:
     def test_missing_input_columns_fail_loudly(self):
         with pytest.raises(KeyError, match="add_cross_table_features needs columns"):
             add_cross_table_features(pd.DataFrame({"database": ["a"]}))
+
+
+class TestReferenceScope:
+    """The scope decides what every feature above means, so widening it is not cosmetic."""
+
+    @staticmethod
+    def two_databases() -> pd.DataFrame:
+        """The same `users.id` / `orders.id` pair in two unrelated databases."""
+        return pd.DataFrame(
+            [
+                make_row("db_a", "users", "id", is_unique=1),
+                make_row("db_a", "orders", "id"),
+                make_row("db_b", "people", "id", is_unique=1),
+                make_row("db_b", "invoices", "id"),
+            ],
+        )
+
+    def test_a_wider_scope_finds_more_neighbours(self):
+        """Grouping by database sees 1 sibling table; pooling both sees 3.
+
+        This is the train/serve skew the augmentation exists for: serving groups by Trino
+        schema, which may hold many logical databases.
+        """
+        frame = self.two_databases()
+
+        narrow = add_cross_table_features(frame, scope_columns=("database",))
+        frame_pooled = frame.assign(scope="all")
+        wide = add_cross_table_features(frame_pooled, scope_columns=("scope",))
+
+        assert narrow["n_other_tables_with_same_column_name"].tolist() == [1, 1, 1, 1]
+        assert wide["n_other_tables_with_same_column_name"].tolist() == [3, 3, 3, 3]
+
+    def test_a_missing_scope_column_fails_loudly(self):
+        with pytest.raises(KeyError, match="add_cross_table_features needs columns"):
+            add_cross_table_features(self.two_databases(), scope_columns=("subject_area",))
+
+
+class TestScopeAugmentedVariants:
+    def test_one_frame_per_requested_width(self):
+        frame = TestReferenceScope.two_databases()
+        variants = scope_augmented_variants(frame, widths=(1, None))
+
+        assert len(variants) == 2
+        for variant in variants:
+            assert len(variant) == len(frame)
+            assert set(CROSS_TABLE_FEATURES) <= set(variant.columns)
+
+    def test_the_widths_really_differ(self):
+        """If every variant computed the same values the augmentation would be a no-op."""
+        frame = TestReferenceScope.two_databases()
+        per_database, pooled = scope_augmented_variants(frame, widths=(1, None))
+
+        assert per_database["n_other_tables_with_same_column_name"].tolist() == [1, 1, 1, 1]
+        assert pooled["n_other_tables_with_same_column_name"].tolist() == [3, 3, 3, 3]
+
+    def test_the_synthetic_scope_column_never_leaks_into_the_output(self):
+        """It would otherwise reach the feature matrix as a string column and break the fit."""
+        frame = TestReferenceScope.two_databases()
+
+        for variant in scope_augmented_variants(frame, widths=(1, None)):
+            assert SYNTHETIC_SCOPE_COLUMN not in variant.columns
+            assert list(frame.columns) == list(variant.columns)[: len(frame.columns)]
+
+    def test_every_variant_stays_row_aligned_with_the_input(self):
+        """The training script indexes all variants with one set of fold indices."""
+        frame = TestReferenceScope.two_databases()
+
+        for variant in scope_augmented_variants(frame, widths=(1, 5, None)):
+            assert variant.index.tolist() == frame.index.tolist()
+            assert variant["database"].tolist() == frame["database"].tolist()
+            assert variant["column_name"].tolist() == frame["column_name"].tolist()
+
+    def test_a_width_never_splits_one_database_across_two_scopes(self):
+        """Bucketing on the database code keeps each database whole, so no real database
+        loses sight of its own tables at any width."""
+        frame = pd.DataFrame(
+            [make_row(f"db_{i}", "users", "id", is_unique=(i == 0)) for i in range(4)]
+            + [make_row("db_0", "orders", "id")],
+        )
+        # width 2 merges db_0+db_1 and db_2+db_3; db_0's own two tables must stay together.
+        (variant,) = scope_augmented_variants(frame, widths=(2,))
+        child = variant[(variant.database == "db_0") & (variant.table_name == "orders")].iloc[0]
+
+        assert child["name_unique_in_other_table"] == 1

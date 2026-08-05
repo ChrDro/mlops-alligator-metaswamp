@@ -10,6 +10,21 @@ Candidates (no baseline):
 - Random forest (randomized search + tuned decision threshold)
 - LightGBM (randomized search + tuned decision threshold)
 
+Cross-table features and scope augmentation
+-------------------------------------------
+Since 2026-08-05 the feature matrix includes the seven cross-table features from
+src/cross_table_features.py, which lift CV F1 from 0.696 to 0.810. Those features are
+relative to a *reference scope* - the other tables they may look at - and serving cannot
+promise the tight one-database-per-schema scope this CSV has. So the model is trained on
+several scope widths of the same rows at once (`scope_augmented_variants`), which makes it
+scope-invariant at a cost of 0.007 F1 and prevents a drop to 0.666 when served on a schema
+holding everything. `cv_f1_by_scope_*` reports the estimate per width; see the module
+docstring of src/cross_table_features.py for the measurements.
+
+Evaluation always scores the *unaugmented* rows, one scope per database, so the numbers
+stay comparable to every run before augmentation existed. Augmentation only ever adds
+training rows.
+
 Why grouped cross-validation instead of one holdout
 ---------------------------------------------------
 Until 2026-08-05 every candidate was scored on a SINGLE fold of a 5-way
@@ -48,6 +63,7 @@ produced the reported metrics.
 """
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -77,6 +93,17 @@ from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedGroupKFold,
     TunedThresholdClassifierCV,
+)
+
+
+# This script is run as `python task_2/task_2_fk_train_and_register.py` from the repo
+# root, so the repo root is not on sys.path - only task_2/ is.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.cross_table_features import (
+    CROSS_TABLE_FEATURES,
+    SCOPE_AUGMENTATION_WIDTHS,
+    scope_augmented_variants,
 )
 
 
@@ -156,6 +183,10 @@ NAME_FEATURES_FOR_ERROR_ANALYSIS = [
 
 # How many example column names to keep per error bucket in the logged analysis.
 ERROR_ANALYSIS_SAMPLE_SIZE = 30
+
+# Index into the scope variants of the width every metric is reported at: one database per
+# reference scope, the same scope the training CSV's labels were collected in.
+EVAL_VARIANT = SCOPE_AUGMENTATION_WIDTHS.index(1)
 
 PARAM_DISTRIBUTIONS: dict[str, dict] = {
     "xgboost": {
@@ -273,30 +304,55 @@ def load_data() -> tuple[Path, pd.DataFrame]:
 
 
 def one_hot_encode_column_type(df: pd.DataFrame) -> pd.DataFrame:
-    print("\n------Column Preview and One-Hot Encoding of 'column_type'------")
-    df = pd.get_dummies(df, columns=["column_type"], drop_first=True)
-    print(df.columns)
-    return df
+    return pd.get_dummies(df, columns=["column_type"], drop_first=True)
+
+
+def scope_label(width: int | None) -> str:
+    """Short name for a reference-scope width, used in metric names and logs."""
+    return "pooled" if width is None else f"{width}db"
+
+
+def build_scope_variants(raw_df: pd.DataFrame) -> list[pd.DataFrame]:
+    """One encoded frame per reference-scope width, all row-aligned with `raw_df`.
+
+    Variant `EVAL_VARIANT` is the one-database-per-scope width. It is what every reported
+    metric is computed on, so numbers stay comparable across runs; the wider variants only
+    ever contribute extra training rows.
+    """
+    print("\n------Cross-Table Features per Reference-Scope Width------")
+    variants = [
+        one_hot_encode_column_type(variant)
+        for variant in scope_augmented_variants(raw_df, widths=SCOPE_AUGMENTATION_WIDTHS)
+    ]
+
+    for width, variant in zip(SCOPE_AUGMENTATION_WIDTHS, variants, strict=True):
+        means = ", ".join(f"{name}={variant[name].mean():.2f}" for name in CROSS_TABLE_FEATURES[:3])
+        print(f"  scope {scope_label(width):>8s}: {means}")
+
+    return variants
 
 
 def build_feature_matrix(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
-    """Split the frame into features, target and the grouping key.
+    """Split one encoded variant into features, target and the grouping key.
 
-    `groups` is the database name. Every split in this script is grouped by it, so no
-    database contributes rows to both sides of any train/test boundary.
+    `groups` is the *real* database name, not the synthetic scope: it is the key every
+    cross-validation split groups by, so no database contributes rows to both sides of any
+    train/test boundary regardless of which scope width the features were computed at.
     """
-    print("\n------Feature Matrix------")
-
     groups = df["database"]
     X = df.drop(columns=[*TARGET_COLUMNS, *COLUMNS_TO_DROP])
     y = df[TARGET_COLUMN]
 
+    return X, y, groups
+
+
+def print_feature_matrix_summary(X: pd.DataFrame, y: pd.Series, groups: pd.Series) -> None:
+    print("\n------Feature Matrix------")
     print(f"Feature count: {X.shape[1]}")
     print(X.info())
     print(f"Rows: {len(X)} | databases: {groups.nunique()}")
     print(f"Positive rate ({TARGET_COLUMN}): {round(y.mean() * 100, 1)}%")
-
-    return X, y, groups
+    print(f"Cross-table features included: {len(CROSS_TABLE_FEATURES)}")
 
 
 def make_grouped_splits(
@@ -442,38 +498,73 @@ def compute_metrics(
     }
 
 
+def stack_scope_variants(
+    scope_matrices: list[pd.DataFrame],
+    y: pd.Series,
+    groups: pd.Series,
+    row_idx: np.ndarray,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    """Stack the same rows at every reference-scope width into one training frame.
+
+    This is the scope augmentation: the model sees each column once per scope width and so
+    cannot lean on any single width. `y` and `groups` are repeated unchanged, because a
+    wider scope changes only what the cross-table features say about a row, never its label
+    or which database it belongs to.
+
+    Indices are reset because the variants share `row_idx`, which would otherwise produce a
+    duplicated index that pandas alignment can silently misread.
+    """
+    n_variants = len(scope_matrices)
+    X_train = pd.concat([variant.iloc[row_idx] for variant in scope_matrices], ignore_index=True)
+    y_train = pd.concat([y.iloc[row_idx]] * n_variants, ignore_index=True)
+    groups_train = pd.concat([groups.iloc[row_idx]] * n_variants, ignore_index=True)
+    return X_train, y_train, groups_train
+
+
 def cross_validate_candidate(
     spec: dict,
     params: dict,
-    X: pd.DataFrame,
+    scope_matrices: list[pd.DataFrame],
     y: pd.Series,
     groups: pd.Series,
     splits: list[tuple[np.ndarray, np.ndarray]],
 ) -> dict:
     """Score one candidate out-of-fold across every grouped fold.
 
-    StratifiedGroupKFold uses each row as test exactly once, so the pooled
-    predictions cover the whole labelled set and the confusion matrix built from them
-    accounts for every row.
+    StratifiedGroupKFold uses each row as test exactly once, so the pooled predictions
+    cover the whole labelled set and the confusion matrix built from them accounts for
+    every row.
 
-    Returns per-fold F1 (the spread is the point of this whole exercise) alongside the
-    pooled metrics.
+    Each fold trains on all scope widths stacked together and is then scored on each width
+    separately. The reported `fold_f1`, confusion matrix and out-of-fold arrays all come
+    from the `EVAL_VARIANT` width so they stay comparable with earlier runs;
+    `scope_f1` carries the per-width estimates, which is what tells you how the model would
+    do on a schema wider than a single database.
     """
     oof_pred = np.zeros(len(y), dtype=int)
     oof_proba = np.zeros(len(y), dtype=float)
     fold_f1: list[float] = []
     fold_thresholds: list[float] = []
+    scope_fold_f1: dict[str, list[float]] = {
+        scope_label(width): [] for width in SCOPE_AUGMENTATION_WIDTHS
+    }
 
     for fold, (train_idx, test_idx) in enumerate(splits):
         model = fit_candidate(
             spec,
             params,
-            X.iloc[train_idx],
-            y.iloc[train_idx],
-            groups.iloc[train_idx],
+            *stack_scope_variants(scope_matrices, y, groups, train_idx),
         )
-        y_pred = model.predict(X.iloc[test_idx])
-        y_proba = model.predict_proba(X.iloc[test_idx])[:, 1]
+
+        for width, variant in zip(SCOPE_AUGMENTATION_WIDTHS, scope_matrices, strict=True):
+            scope_pred = model.predict(variant.iloc[test_idx])
+            scope_fold_f1[scope_label(width)].append(
+                float(f1_score(y.iloc[test_idx], scope_pred)),
+            )
+
+        evaluation_variant = scope_matrices[EVAL_VARIANT]
+        y_pred = model.predict(evaluation_variant.iloc[test_idx])
+        y_proba = model.predict_proba(evaluation_variant.iloc[test_idx])[:, 1]
 
         oof_pred[test_idx] = y_pred
         oof_proba[test_idx] = y_proba
@@ -486,6 +577,7 @@ def cross_validate_candidate(
         print(f"  fold {fold}: F1={fold_score:.4f}")
 
     return {
+        "scope_f1": {label: float(np.mean(scores)) for label, scores in scope_fold_f1.items()},
         "fold_f1": fold_f1,
         "cv_f1_mean": float(np.mean(fold_f1)),
         "cv_f1_std": float(np.std(fold_f1)),
@@ -502,33 +594,42 @@ def cross_validate_candidate(
 def build_candidate(
     spec: dict,
     params: dict,
-    X: pd.DataFrame,
+    scope_matrices: list[pd.DataFrame],
     y: pd.Series,
     groups: pd.Series,
     splits: list[tuple[np.ndarray, np.ndarray]],
 ) -> dict:
     """Cross-validate a candidate, then refit it on every row for serving.
 
-    The registered model is the full-data refit, because throwing away a fifth of the
-    training rows to keep a holdout buys nothing once the honest estimate comes from
-    the out-of-fold predictions. Its reported quality is the CV estimate, not the
-    in-sample metrics - those are logged only as an overfitting tell.
+    The registered model is the full-data refit over every scope width, because throwing
+    away a fifth of the training rows to keep a holdout buys nothing once the honest
+    estimate comes from the out-of-fold predictions. Its reported quality is the CV
+    estimate, not the in-sample metrics - those are logged only as an overfitting tell.
     """
     print(f"\n------Candidate: {spec['name']}------")
 
-    cv_result = cross_validate_candidate(spec, params, X, y, groups, splits)
+    cv_result = cross_validate_candidate(spec, params, scope_matrices, y, groups, splits)
     print(
         f"  cv_f1_mean={cv_result['cv_f1_mean']:.4f} "
         f"(std={cv_result['cv_f1_std']:.4f}, "
         f"min={cv_result['cv_f1_min']:.4f}, max={cv_result['cv_f1_max']:.4f})",
     )
+    scopes = ", ".join(f"{label}={score:.4f}" for label, score in cv_result["scope_f1"].items())
+    print(f"  by reference scope: {scopes}")
 
-    final_model = fit_candidate(spec, params, X, y, groups)
+    all_rows = np.arange(len(y))
+    final_model = fit_candidate(
+        spec,
+        params,
+        *stack_scope_variants(scope_matrices, y, groups, all_rows),
+    )
     if isinstance(final_model, TunedThresholdClassifierCV):
         print(f"  final tuned threshold: {final_model.best_threshold_:.3f}")
 
-    in_sample_pred = final_model.predict(X)
-    in_sample_proba = final_model.predict_proba(X)[:, 1]
+    # In-sample metrics are read at the evaluation width, matching every reported metric.
+    evaluation_variant = scope_matrices[EVAL_VARIANT]
+    in_sample_pred = final_model.predict(evaluation_variant)
+    in_sample_proba = final_model.predict_proba(evaluation_variant)[:, 1]
 
     return {
         "name": spec["name"],
@@ -542,18 +643,23 @@ def build_candidate(
 
 
 def train_all_candidates(
-    X: pd.DataFrame,
+    scope_matrices: list[pd.DataFrame],
     y: pd.Series,
     groups: pd.Series,
     splits: list[tuple[np.ndarray, np.ndarray]],
 ) -> list[dict]:
-    """Search hyperparameters once per family, then cross-validate every candidate."""
+    """Search hyperparameters once per family, then cross-validate every candidate.
+
+    The search runs on the evaluation width only, not on the stacked frame: it picks
+    regularisation strength, which transfers across scope widths, and searching the stacked
+    frame would triple the most expensive step of this script for a second-order gain.
+    """
     print("\n------Training candidate models------")
 
     search_idx = splits[0][0]
     searched_families = {spec["family"] for spec in CANDIDATE_SPECS if spec["searched"]}
     best_params = {
-        family: search_hyperparameters(family, X, y, groups, search_idx)
+        family: search_hyperparameters(family, scope_matrices[EVAL_VARIANT], y, groups, search_idx)
         for family in sorted(searched_families)
     }
 
@@ -561,7 +667,7 @@ def train_all_candidates(
         build_candidate(
             spec,
             best_params[spec["family"]] if spec["searched"] else {},
-            X,
+            scope_matrices,
             y,
             groups,
             splits,
@@ -585,6 +691,7 @@ def print_candidate_summary(candidates: list[dict]) -> None:
                 "oof_recall": round(c["cv_metrics"]["recall"], 4),
                 "oof_pr_auc": round(c["cv_metrics"]["pr_auc"], 4),
                 "train_f1": round(c["train_metrics"]["f1_score"], 4),
+                **{f"f1@{label}": round(score, 4) for label, score in c["cv"]["scope_f1"].items()},
             }
             for c in candidates
         ],
@@ -747,6 +854,13 @@ def log_candidate_run(
         mlflow.log_param("cv_splits", N_SPLITS)
         mlflow.log_param("cv_grouped_by", "database")
         mlflow.log_param("search_n_iter", SEARCH_N_ITER)
+        mlflow.log_param(
+            "scope_augmentation_widths",
+            [scope_label(width) for width in SCOPE_AUGMENTATION_WIDTHS],
+        )
+        mlflow.log_param(
+            "training_rows_after_augmentation", len(X) * len(SCOPE_AUGMENTATION_WIDTHS)
+        )
         mlflow.log_param("input_path", str(input_path))
         mlflow.log_param("model_name", MODEL_NAME)
         mlflow.log_param("alias", MODEL_ALIAS)
@@ -756,6 +870,10 @@ def log_candidate_run(
         mlflow.log_metric("cv_f1_std", cv_result["cv_f1_std"])
         mlflow.log_metric("cv_f1_min", cv_result["cv_f1_min"])
         mlflow.log_metric("cv_f1_max", cv_result["cv_f1_max"])
+        # What the model would score if the serving schema is wider than one database.
+        # cv_f1_by_scope_pooled is the worst case: every table in one reference scope.
+        for label, score in cv_result["scope_f1"].items():
+            mlflow.log_metric(f"cv_f1_by_scope_{label}", score)
         for fold, fold_score in enumerate(cv_result["fold_f1"]):
             mlflow.log_metric("cv_f1_per_fold", fold_score, step=fold)
         for metric_name, value in candidate["cv_metrics"].items():
@@ -780,6 +898,7 @@ def log_candidate_run(
         mlflow.log_dict(
             {
                 "fold_f1": cv_result["fold_f1"],
+                "f1_by_reference_scope": cv_result["scope_f1"],
                 "fold_thresholds": cv_result["fold_thresholds"],
                 "oof_confusion_matrix": cv_result["oof_confusion_matrix"].tolist(),
                 "oof_metrics": candidate["cv_metrics"],
@@ -872,12 +991,18 @@ def register_best_candidate(
 
 def main() -> None:
     input_path, raw_df = load_data()
-    df = one_hot_encode_column_type(raw_df)
 
-    X, y, groups = build_feature_matrix(df)
-    splits = make_grouped_splits(X, y, groups)
+    # One encoded frame per reference-scope width. All are row-aligned with raw_df, so the
+    # same fold indices apply to every one of them.
+    variants = build_scope_variants(raw_df)
+    matrices = [build_feature_matrix(variant) for variant in variants]
+    scope_matrices = [X for X, _, _ in matrices]
+    _, y, groups = matrices[EVAL_VARIANT]
 
-    candidates = train_all_candidates(X, y, groups, splits)
+    print_feature_matrix_summary(scope_matrices[EVAL_VARIANT], y, groups)
+    splits = make_grouped_splits(scope_matrices[EVAL_VARIANT], y, groups)
+
+    candidates = train_all_candidates(scope_matrices, y, groups, splits)
     print_candidate_summary(candidates)
 
     best = select_best_candidate(candidates)
@@ -891,7 +1016,7 @@ def main() -> None:
     for candidate in candidates:
         run_ids[candidate["name"]] = log_candidate_run(
             candidate=candidate,
-            X=X,
+            X=scope_matrices[EVAL_VARIANT],
             y=y,
             input_path=input_path,
         )

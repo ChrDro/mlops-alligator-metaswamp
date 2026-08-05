@@ -370,15 +370,32 @@ tables" is the size of each source database, not the number of feature rows.
 
 ## Features
 
-Features are engineered per column and per table. There are two feature sets, generated
-directly from the training scripts:
+Features are engineered per column, per table, and — for the single-FK model — across
+tables. Generated directly from the training scripts:
 
-- **Tasks 1 & 2 — 31 features** (identical set; only the target differs)
+- **Tasks 1 & 2 — 31 features** from the training CSV (identical set; only the target
+  differs), except:
+- **Task 2 single FK — 37 features**: 30 of the shared set plus **7 cross-table features**
+  computed by [`src/cross_table_features.py`](src/cross_table_features.py). A foreign key
+  is a property of a *pair* of columns in two tables, so this is the only model that looks
+  outside the table being classified. They raised its cross-validated F1 from 0.696 to
+  0.810; that module's docstring carries the measurements, including three further ideas
+  that were measured and rejected.
 - **Task 3 — 50 features** (adds normalization-specific signals and a few columns Tasks 1
   & 2 drop)
 
+> **Reference scope.** The cross-table features are relative to the set of other tables
+> they may look at. Training scopes that to one `database`; the serving pipeline can only
+> scope to a Trino schema, which may hold many unrelated tables. A model trained only on
+> the narrow scope drops to F1 0.666 on a wide one — below the 0.696 it gets with no
+> cross-table features at all. The fk model is therefore trained on several scope widths at
+> once, which holds it at 0.783 even in the worst case. `cv_f1_by_scope_*` in MLflow reports
+> the estimate per width.
+
 Identifier columns (`database`, `schema`, `table_name`, `column_name`) and raw
 `min_value` / `max_value` are never used as features — only for grouping and traceability.
+The cross-table features are *derived from* the identifiers rather than using them
+directly, which is why they are computed at runtime instead of stored in the CSV.
 
 > **Note on Task 3 features.** `is_this_col_violating_1nf`, `is_composite_key_part` and
 > `is_this_col_partial_dependency` are close to the *definitions* of 1NF/2NF, so the model
