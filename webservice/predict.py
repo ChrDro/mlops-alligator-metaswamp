@@ -11,6 +11,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.pyfunc import PyFuncModel
 from mlflow.tracking import MlflowClient
 
+load_dotenv()
 
 # Every registered model the API serves, and the alias it serves them under. The
 # health endpoint reports on exactly this set, so a new model has to be listed here
@@ -22,7 +23,7 @@ MODEL_NAMES = (
     "composite_fk_model",
     "denormalization_model",
 )
-MODEL_ALIAS = "dev"
+MODEL_ALIAS = os.getenv("MODEL_ALIAS", "dev")
 
 # Budget for the reachability check below. Short on purpose: it exists to keep a
 # readiness probe inside a probe-sized deadline, not to wait out a slow server.
