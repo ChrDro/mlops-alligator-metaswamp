@@ -381,7 +381,9 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Experiment Tracking in **allen 5** Training-Scripts (`mlflow.start_run` je Kandidat)
   - [x] Hyperparameter-Suche mit `RandomizedSearchCV` + `StratifiedGroupKFold` in allen 5 Scripts (statt Optuna) — TODO „more than one model … with hyperparameter search" erledigt
   - [x] Metrics Logging (Accuracy, Precision, Recall, F1 — je train/test)
-  - [x] Alle vier Kandidaten (RF, XGB, jeweils Baseline + RandomizedSearch) werden geloggt, bester per `f1_score` registriert
+  - [~] Alle vier Kandidaten (RF, XGB, jeweils Baseline + RandomizedSearch) werden geloggt, bester per `f1_score` registriert
+    - [x] `fk` und `cpk` (2026-08-05): Auswahl per `cv_f1_mean` aus 5-fold `StratifiedGroupKFold` statt aus **einem** Fold. Über die fünf Folds schwankt F1 um bis zu 0.21, die Auswahl lief also auf Rauschen. Zusätzlich geloggt: `cv_f1_std`, `cv_f1_per_fold`, gepoolte Out-of-Fold Confusion Matrix und PR-Kurve als PNG, plus `error_analysis_oof.json` (welche Spaltennamen werden verwechselt)
+    - [ ] `pk`, `cfk`, `normalform` benutzen weiter den Einzel-Fold — gleiche Umstellung noch offen
   - [x] MLflow-Backend produktionsnah: Postgres als Backend-Store, MinIO/S3 als Artifact-Store, stündliches Postgres-Backup nach S3
   - [~] Artifacts: Confusion Matrix als `mlflow.log_dict` ✔ in allen 5 Scripts — **Feature Importance Plot fehlt** (in allen 5)
   - [ ] Dataset Tracking mit `mlflow.data` / `log_input` — würde zugleich die Frage „gegen welchen Datensatz wurde diese Version trainiert?" beantworten, die der Backtest in 6.5 implizit stellt
