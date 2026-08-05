@@ -34,6 +34,16 @@ PAIR_IDS = [request_cls.__name__ for request_cls, _ in MODEL_PAIRS]
 REQUEST_MODELS = [pair[0] for pair in MODEL_PAIRS]
 REQUEST_IDS = [cls.__name__ for cls in REQUEST_MODELS]
 
+# Fields each response model appends after the request fields. The four binary models
+# only ever need a class and its confidence; the normalform model is multiclass and
+# its table-level aggregation needs the full per-class distribution (see
+# aggregate_to_table's soft vote in prefect/normalform_pipeline.py), so its response
+# carries one extra field.
+DEFAULT_OUTPUT_FIELDS = ["prediction", "probability"]
+OUTPUT_FIELDS = {
+    NormalFormPrediction: [*DEFAULT_OUTPUT_FIELDS, "probabilities"],
+}
+
 
 @pytest.mark.parametrize("model_cls", REQUEST_MODELS, ids=REQUEST_IDS)
 def test_request_model_accepts_a_complete_payload(model_cls):
@@ -91,7 +101,8 @@ def test_response_model_extends_the_request_model(request_cls, response_cls):
     assert issubclass(response_cls, request_cls)
 
     response_fields = list(response_cls.model_fields)
-    assert response_fields == [*request_cls.model_fields, "prediction", "probability"]
+    expected_output_fields = OUTPUT_FIELDS.get(response_cls, DEFAULT_OUTPUT_FIELDS)
+    assert response_fields == [*request_cls.model_fields, *expected_output_fields]
 
 
 @pytest.mark.parametrize(("request_cls", "response_cls"), MODEL_PAIRS, ids=PAIR_IDS)

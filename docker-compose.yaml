@@ -364,6 +364,11 @@ services:
   trino:
     image: trinodb/trino:483
     container_name: trino
+    # Without a limit the JVM sees the whole Docker VM (~11.7 GiB) and claims ~9.3 GiB of
+    # heap, so the host OOM-killer took Trino down mid-build three times (exit 137). The
+    # limit alone was not enough - see the mounted jvm.config below, which pins the heap to
+    # 4 GiB so the off-heap part still fits inside this number.
+    mem_limit: 6g
     depends_on:
       minio:
         condition: service_healthy
@@ -381,6 +386,7 @@ services:
       - "8443:8443"
     volumes:
       - ./trino-iceberg/etc/config.properties:/etc/trino/config.properties:ro
+      - ./trino-iceberg/etc/jvm.config:/etc/trino/jvm.config:ro
       - ./trino-iceberg/etc/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
       - ./trino-iceberg/etc/trino/password.db:/etc/trino/password.db:ro
       - ./trino-iceberg/etc/keystore.jks:/etc/trino/keystore.jks:ro

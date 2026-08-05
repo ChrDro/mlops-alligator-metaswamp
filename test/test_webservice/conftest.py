@@ -93,9 +93,14 @@ class FakeMetadata:
 class FakeRawModel:
     """The raw sklearn estimator: `predict_proba` compares column order positionally."""
 
-    def __init__(self, probabilities) -> None:
+    def __init__(self, probabilities, classes=None) -> None:
         self._probabilities = probabilities
         self.seen_columns: list[str] | None = None
+        # Real estimators always carry this after fitting; predict_with_probabilities
+        # zips it with a predict_proba row to label each position, so the fake has to
+        # have one too. Defaults to 0..n-1, matching sklearn's default for integer
+        # class labels.
+        self.classes_ = np.array(classes if classes is not None else range(len(probabilities)))
 
     def predict_proba(self, model_input):
         self.seen_columns = list(model_input.columns)
@@ -118,9 +123,10 @@ class FakePyFuncModel:
         feature_names,
         prediction: int = 1,
         probabilities=(0.25, 0.75),
+        classes=None,
     ) -> None:
         self.metadata = FakeMetadata(feature_names)
-        self.raw_model = FakeRawModel(probabilities)
+        self.raw_model = FakeRawModel(probabilities, classes=classes)
         self._model_impl = FakeModelImpl(self.raw_model)
         self._prediction = prediction
         self.seen_columns: list[str] | None = None

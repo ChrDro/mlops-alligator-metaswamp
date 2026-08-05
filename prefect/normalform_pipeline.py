@@ -5,25 +5,31 @@ Separate from the pk/fk/cpk/cfk pipeline on purpose (see
 documentation/NORMALFORM_PREDICTION.md):
 - the model (denormalization_model) is MULTICLASS 0-3 (0=violates 1NF, 1/2/3=pure NF),
 - the label is a TABLE-level property inferred from per-column feature rows,
-- it uses a different, larger (29) feature set.
+- it uses a different, larger feature set.
 
 This flow:
 1. Skips tables already present in nf_results (each table is processed only once).
-2. Discovers + profiles the remaining columns and builds the exact 29 features the
-   registered model expects (feature logic ported verbatim from
-   get_trino_summaries_task_3_training.py so inference matches training), writing them
+2. Profiles the remaining tables with ``nf_features.build_features``, writing the result
    to iceberg.staging.stg_normalform_features for inspection.
 3. Calls POST /predict_normalform per column via the model API.
-4. Aggregates per table by MAJORITY VOTE -> one normal-form class per table.
+4. Aggregates per table by CONFIDENCE-WEIGHTED VOTE -> one normal-form class per table.
 5. Stores ONE row per table in iceberg.prediction_results.nf_results.
 
-Retraining is intentionally out of scope: the training data is frozen and was
-mostly hand-labeled (no label generator exists in the repo).
+Where the features come from
+----------------------------
+``nf_features``, the same module the training set is built with - not a second
+implementation of the same formulas. This flow used to carry its own ~250 lines of feature
+SQL, ported "verbatim" from the training extractor, which is precisely the skew finding 1.6
+describes: two copies that agree until one of them is edited, and the 1NF mean-length guard
+had already drifted (120 characters per value here against 20 per token there). A change to
+a feature now moves training and serving together or not at all.
+
+What is deliberately unchanged: predicting per column and combining into one table-level
+class. Whether the model should be trained at table level instead is an open question in
+Phase 4 of TASK_3_PLAN.md, and answering it by accident here would confound the comparison.
 """
 
 import os
-import re
-from collections.abc import Iterator
 
 import pandas as pd
 import requests
@@ -39,13 +45,16 @@ from change_events import (
 from dotenv import load_dotenv
 from model_health import diagnose, failure_detail
 from nf_features import (
-    LIST_VALUE_MIN_SHARE,
-    LIST_VALUE_PATTERN,
-    is_freetext_name,
+    COLUMN_TYPE_DUMMIES,
+    FEATURE_COLUMNS,
+    FLOAT_FEATURE_COLUMNS,
+    build_features,
+    encode_column_type,
 )
 from prefect.cache_policies import NONE as NO_CACHE
 from prefect.runtime import flow_run
 from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from prefect import flow, task
 
@@ -61,178 +70,24 @@ TRINO_PASSWORD = str(os.environ.get("TRINO_PASSWORD"))
 # Model API base (use localhost outside Docker, model-service name inside).
 MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://localhost:8080")
 
-# The column_type dummies the normalform model was trained with (drop_first=True
-# reference category is anything NOT in this set -> all-zero dummies).
-EXPECTED_TYPE_COLS = [
-    "column_type_char",
-    "column_type_date",
-    "column_type_decimal",
-    "column_type_double",
-    "column_type_integer",
-    "column_type_timestamp",
-    "column_type_varchar",
-]
+# The column_type dummies, from nf_features. The previous list here named seven types
+# including char, decimal and timestamp - none of which occur in the data - while omitting
+# `bigint`, which is 89% of it. The training script's `get_dummies` would have produced
+# `column_type_bigint` and this pipeline would never have sent it: the same skew as the
+# feature lists, one level down.
+EXPECTED_TYPE_COLS = list(COLUMN_TYPE_DUMMIES)
 
-# The 29 features the registered model / NormalForm pydantic schema expect, in order.
-# Kept inline (like pk_fk_pipeline's feature set) so the pipeline has no runtime dependency
-# on features_normalform.json. If the model is retrained with a different feature set, this
-# list and the extraction logic below must be updated to match.
+# What the model sees, in order: every measured feature plus the one-hot column type.
 #
-# Phase 0 of TASK_3_PLAN.md: 21 redundant features are commented out rather than deleted so
-# the previous set stays readable and the drop reason travels with the code. They are still
-# COMPUTED - recompute_table_features derives kept features from them - only the final
-# selection in extract_normalform_features leaves them out. The commented-out block must
-# stay in sync with `redundant_columns_to_drop` in the training script.
-MODEL_FEATURES: list[str] = [
-    # "number_unique_values",              # raw value behind unique_ratio
-    # "count",                             # == table_row_count
-    # "null_count",                        # constant 0 in the training set
-    # "null_ratio",                        # constant 0 in the training set
-    # "is_unique",                         # == (unique_ratio == 1 and null_count == 0)
-    # "ordinal_position",                  # raw value behind relative_ordinal_position
-    "unique_ratio",
-    # "is_non_null",                       # constant 1 in the training set
-    # "is_first_column",                   # == (ordinal_position == 1)
-    "relative_ordinal_position",
-    "is_first_unique_column",
-    "table_column_count",
-    # "table_unique_column_count",         # raw value behind table_ratio_of_pk_candidates
-    "table_row_count",
-    # "other_unique_columns_in_table",     # == table_unique_column_count - is_unique
-    # "table_has_unique_column",           # == (table_unique_column_count > 0)
-    # "table_has_no_single_pk_candidate",  # == 1 - table_has_unique_column
-    "table_near_unique_column_count",
-    "table_id_named_column_count",
-    # "table_non_null_column_count",       # == table_column_count (no NULLs in training)
-    "table_max_unique_ratio",
-    "table_integer_column_count",
-    "unique_ratio_rank",
-    # "null_ratio_rank",                   # == ordinal_position (no NULLs in training)
-    # "is_least_null_in_table",            # == is_first_column (dito)
-    # "unique_ratio_relative_to_max",      # == unique_ratio / table_max_unique_ratio
-    # "other_near_unique_columns_in_table",# == table_near_unique_column_count - (ur > 0.95)
-    "name_ends_with_id",
-    # "name_contains_key",                 # constant 0 in the training set
-    # "name_contains_table_name",          # constant 0 in the training set
-    # "name_is_singular_table_id",         # constant 0 in the training set
-    "name_length",
-    "table_avg_unique_ratio",
-    # "table_avg_null_ratio",              # constant 0 in the training set
-    "table_ratio_of_pk_candidates",
-    # Table-level aggregates below are deliberately KEPT. They look derivable via groupby,
-    # but the model sees one row per call and cannot aggregate - see TASK_3_PLAN.md 1.1.
-    "is_this_col_violating_1nf",
-    "is_composite_key_part",
-    "table_has_composite_pk",
-    "is_this_col_partial_dependency",
-    "table_ratio_composite_key_cols",
-    "table_ratio_1nf_violations",
-    "table_std_unique_ratio",
-    "table_has_partial_dependency",
-    "column_type_char",
-    "column_type_date",
-    "column_type_decimal",
-    "column_type_double",
-    "column_type_integer",
-    "column_type_timestamp",
-    "column_type_varchar",
-]
+# Derived from nf_features rather than listed here. The previous version was a hand-kept
+# copy of the training script's selection, with a comment saying so - and a hand-kept copy
+# of a formula is exactly the shape of skew finding 1.6 describes. There is now one list,
+# in the module that produces the numbers, and a test that fails if it drifts from what
+# `build_features` actually returns.
+MODEL_FEATURES: list[str] = [*FEATURE_COLUMNS, *EXPECTED_TYPE_COLS]
 
-# Features the API expects as float (NormalForm pydantic); everything else numeric
-# is int, and column_type_* are bool. Entries for dropped features are commented out
-# alongside MODEL_FEATURES - _row_to_payload only looks at names it finds there, so a
-# stale entry would be silently ignored rather than error.
-FLOAT_FEATURES = {
-    # "null_ratio",                        # dropped, see MODEL_FEATURES
-    "unique_ratio",
-    "relative_ordinal_position",
-    "table_max_unique_ratio",
-    # "unique_ratio_relative_to_max",      # dropped, see MODEL_FEATURES
-    "table_avg_unique_ratio",
-    # "table_avg_null_ratio",              # dropped, see MODEL_FEATURES
-    "table_ratio_of_pk_candidates",
-    "table_ratio_composite_key_cols",
-    "table_ratio_1nf_violations",
-    "table_std_unique_ratio",
-}
-
-
-# --- 1NF detection (Phase 0.5 of TASK_3_PLAN.md) ------------------------------------
-#
-# The old test was `COUNT_IF(value LIKE '%,%') > 0`: a SINGLE row containing a comma set
-# the flag. Because table_ratio_1nf_violations > 0 maps to class 0 in 100% of the training
-# rows, one comment row was enough to flip a whole table to 0NF. Precision on this flag
-# matters more than recall - hence three conditions instead of one.
-#
-# A list column differs from prose in that the WHOLE value is a separator-list of short
-# tokens, and that this holds for nearly every row - not in "contains a comma somewhere".
-#
-# The pattern lives here rather than inline because union_parts is built with an f-string,
-# where `{1,40}` would be silently evaluated as the tuple `(1, 40)` and quietly corrupt the
-# regex. Interpolating a variable sidesteps that. Deliberately backslash-free.
-# The pattern, the share threshold and the free-text name veto now live in nf_features -
-# the module Phase 2b built for the training set. They were duplicated here, which is the
-# shape of skew described in finding 1.6: two copies of one formula that agree until one
-# of them is edited. Imported, not copied (Phase 0.5, "shared module").
-#
-# Deliberately NOT shared: the mean-length guard below. nf_features measures it per token
-# rather than per value, which is a better rule - a list of 80 part ids is 355 characters
-# long and every piece of it is 4, so the per-value cap of 120 rejects a genuine 1NF
-# violation as prose (measured on nf_026 of the generated set). Changing it here would
-# change what the *currently registered* model is served, so it waits for Phase 4.
-LIST_VALUE_MAX_MEAN_LENGTH = 120
-
-
-def build_1nf_violation_expr(column: str) -> str:
-    """
-    SQL for is_this_col_violating_1nf: 1 only if the column looks like a repeating group.
-
-    Three conditions, each catching a different failure of the old `LIKE '%,%'` test:
-    - the share threshold kills the single-row false positive (the main damage),
-    - the anchored pattern rejects prose with a comma mid-sentence,
-    - the mean-length guard rejects long comments that happen to start list-shaped.
-
-    Known gap: short prose without sentence punctuation ("Danke, bis morgen") still matches
-    the pattern. Only the share threshold and the name veto catch that case.
-    """
-    quoted = f'"{column}"'
-    return f"""
-                        CASE
-                            WHEN COUNT_IF({quoted} IS NOT NULL) = 0 THEN 0
-                            WHEN CAST(COUNT_IF(
-                                     regexp_like(CAST({quoted} AS VARCHAR),
-                                                 '{LIST_VALUE_PATTERN}')
-                                 ) AS DOUBLE)
-                                 / COUNT_IF({quoted} IS NOT NULL) >= {LIST_VALUE_MIN_SHARE}
-                             AND AVG(LENGTH(CAST({quoted} AS VARCHAR)))
-                                 <= {LIST_VALUE_MAX_MEAN_LENGTH}
-                            THEN 1
-                            ELSE 0
-                        END AS is_this_col_violating_1nf"""
-
-
-def apply_freetext_veto(df_table: pd.DataFrame) -> pd.DataFrame:
-    """
-    Force is_this_col_violating_1nf to 0 for columns whose NAME marks them as free text.
-
-    Second line of defence behind build_1nf_violation_expr. A veto can only suppress false
-    positives, never create new ones - the right direction for a flag where one false
-    positive flips an entire table to 0NF.
-
-    The column itself stays in the frame on purpose: removing it would shrink
-    table_column_count and shift relative_ordinal_position, table_avg_unique_ratio and
-    table_ratio_of_pk_candidates for every other column, i.e. describe a table that does
-    not exist. Only this one flag is overridden.
-
-    Must run BEFORE recompute_table_features - that is where table_ratio_1nf_violations is
-    derived from this column.
-    """
-    vetoed = df_table["column_name"].map(is_freetext_name)
-    suppressed = vetoed & (df_table["is_this_col_violating_1nf"] == 1)
-    for name in df_table.loc[suppressed, "column_name"]:
-        print(f"  1NF veto (free-text column name): {name}")
-    df_table.loc[vetoed, "is_this_col_violating_1nf"] = 0
-    return df_table
+# Features the API expects as float; everything else numeric is int, column_type_* are bool.
+FLOAT_FEATURES = FLOAT_FEATURE_COLUMNS
 
 
 def get_trino_engine() -> Engine:
@@ -247,280 +102,6 @@ def get_trino_engine() -> Engine:
     )
 
 
-def chunks(lst: list, n: int) -> Iterator[list]:
-    """Split list into chunks of size n."""
-    for i in range(0, len(lst), n):
-        yield lst[i : i + n]
-
-
-def build_feature_query(union_sql: str) -> str:
-    """
-    Build the normalform feature query (table stats + ranks + per-column features).
-    Ported from get_trino_summaries_task_3_training.py, minus the training-only
-    columns (target_normal_form, is_unique_non_null).
-    """
-    return f"""
-WITH base AS (
-    {union_sql}
-),
-table_stats AS (
-    SELECT
-        MAX(CAST(ordinal_position AS INTEGER))   AS table_column_count,
-        SUM(CASE
-                WHEN number_unique_values = count AND null_count = 0 THEN 1
-                ELSE 0
-            END)                                 AS table_unique_column_count,
-        MIN(CASE
-                WHEN number_unique_values = count AND null_count = 0
-                THEN CAST(ordinal_position AS INTEGER)
-            END)                                 AS table_first_unique_ordinal,
-        MAX(count)                               AS table_row_count,
-        MAX(CASE
-                WHEN number_unique_values = count AND null_count = 0 THEN 1
-                ELSE 0
-            END)                                 AS table_has_unique_column,
-        SUM(CASE
-                WHEN count > 0 AND CAST(number_unique_values AS DOUBLE) / count > 0.95 THEN 1
-                ELSE 0
-            END)                                 AS table_near_unique_column_count,
-        SUM(CASE
-                WHEN LOWER(column_name) LIKE '%\\_id' ESCAPE '\\' THEN 1
-                ELSE 0
-            END)                                 AS table_id_named_column_count,
-        SUM(CASE
-                WHEN null_count = 0 THEN 1
-                ELSE 0
-            END)                                 AS table_non_null_column_count,
-        MAX(CASE
-                WHEN count > 0 THEN CAST(number_unique_values AS DOUBLE) / count
-                ELSE 0
-            END)                                 AS table_max_unique_ratio,
-        SUM(CASE
-                WHEN column_type IN ('bigint', 'integer', 'int') THEN 1
-                ELSE 0
-            END)                                 AS table_integer_column_count,
-        AVG(
-            CASE WHEN count > 0
-                THEN CAST(number_unique_values AS DOUBLE) / count
-                ELSE 0
-            END
-        )                                        AS table_avg_unique_ratio,
-        AVG(null_ratio)                          AS table_avg_null_ratio,
-        CASE
-            WHEN MAX(CASE WHEN number_unique_values = count AND null_count = 0
-                          THEN 1 ELSE 0 END) = 0
-            AND SUM(CASE WHEN LOWER(column_name) LIKE '%\\_id' ESCAPE '\\'
-                         THEN 1 ELSE 0 END) >= 2
-            THEN 1 ELSE 0
-        END                                      AS table_has_composite_pk
-    FROM base
-),
-column_ranks AS (
-    SELECT
-        column_name,
-        ordinal_position,
-        ROW_NUMBER() OVER (ORDER BY
-            CASE WHEN count > 0 THEN CAST(number_unique_values AS DOUBLE) / count ELSE 0 END DESC,
-            CAST(ordinal_position AS INTEGER) ASC
-        ) AS unique_ratio_rank,
-        ROW_NUMBER() OVER (ORDER BY
-            null_ratio ASC,
-            CAST(ordinal_position AS INTEGER) ASC
-        ) AS null_ratio_rank,
-        CASE WHEN count > 0
-             THEN CAST(number_unique_values AS DOUBLE) / count
-             ELSE 0 END AS col_unique_ratio
-    FROM base
-)
-SELECT
-    b.database,
-    b.schema,
-    b.table_name,
-    b.column_name,
-    b.column_type,
-    b.number_unique_values,
-    b.count,
-    b.null_count,
-    b.null_ratio,
-    b.is_unique,
-    b.ordinal_position,
-    CASE WHEN b.count > 0
-         THEN CAST(b.number_unique_values AS DOUBLE) / b.count
-         ELSE 0 END                                           AS unique_ratio,
-    CASE WHEN b.null_count = 0 THEN 1 ELSE 0 END             AS is_non_null,
-    CASE WHEN CAST(b.ordinal_position AS INTEGER) = 1
-         THEN 1 ELSE 0 END                                    AS is_first_column,
-    CAST(CAST(b.ordinal_position AS INTEGER) AS DOUBLE)
-        / NULLIF(t.table_column_count, 0)                    AS relative_ordinal_position,
-    CASE WHEN CAST(b.ordinal_position AS INTEGER)
-              = t.table_first_unique_ordinal THEN 1
-         ELSE 0 END                                           AS is_first_unique_column,
-    t.table_column_count,
-    t.table_unique_column_count,
-    t.table_row_count,
-    t.table_unique_column_count
-        - CASE WHEN b.number_unique_values = b.count
-                AND b.null_count = 0 THEN 1 ELSE 0 END       AS other_unique_columns_in_table,
-    t.table_has_unique_column,
-    CASE WHEN t.table_has_unique_column = 0 THEN 1 ELSE 0 END AS table_has_no_single_pk_candidate,
-    t.table_near_unique_column_count,
-    t.table_id_named_column_count,
-    t.table_non_null_column_count,
-    t.table_max_unique_ratio,
-    t.table_integer_column_count,
-    r.unique_ratio_rank,
-    r.null_ratio_rank,
-    CASE WHEN r.null_ratio_rank = 1 THEN 1 ELSE 0 END        AS is_least_null_in_table,
-    CASE WHEN t.table_max_unique_ratio > 0
-         THEN r.col_unique_ratio / t.table_max_unique_ratio
-         ELSE 0 END                                           AS unique_ratio_relative_to_max,
-    t.table_near_unique_column_count
-        - CASE WHEN b.count > 0 AND CAST(b.number_unique_values AS DOUBLE) / b.count > 0.95
-               THEN 1 ELSE 0 END                             AS other_near_unique_columns_in_table,
-    CASE WHEN LOWER(b.column_name) LIKE '%\\_id' ESCAPE '\\'
-         THEN 1 ELSE 0 END                                     AS name_ends_with_id,
-    CASE WHEN LOWER(b.column_name) LIKE '%key%'
-         THEN 1 ELSE 0 END                                     AS name_contains_key,
-    CASE WHEN LOWER(b.column_name) LIKE '%' || LOWER(b.table_name) || '%'
-         THEN 1 ELSE 0 END                                     AS name_contains_table_name,
-    CASE WHEN LENGTH(b.table_name) > 1
-          AND LOWER(b.column_name) =
-              LOWER(
-                  CASE WHEN SUBSTR(b.table_name, LENGTH(b.table_name), 1) = 's'
-                       THEN SUBSTR(b.table_name, 1, LENGTH(b.table_name) - 1)
-                       ELSE b.table_name
-                  END
-              ) || '_id'
-         THEN 1 ELSE 0 END                                     AS name_is_singular_table_id,
-    LENGTH(b.column_name)                                      AS name_length,
-    CASE
-        WHEN LOWER(b.column_name) LIKE '%id%'
-        AND CASE WHEN t.table_has_unique_column = 0 THEN 1 ELSE 0 END = 1
-        THEN 1 ELSE 0
-    END                                                      AS is_composite_key_part,
-    CAST(t.table_unique_column_count AS DOUBLE)
-        / NULLIF(t.table_column_count, 0)                   AS table_ratio_of_pk_candidates,
-    t.table_avg_unique_ratio,
-    t.table_avg_null_ratio,
-    b.is_this_col_violating_1nf,
-    t.table_has_composite_pk
-FROM base AS b
-CROSS JOIN table_stats AS t
-LEFT JOIN column_ranks AS r
-    ON b.column_name = r.column_name
-    AND b.ordinal_position = r.ordinal_position
-ORDER BY CAST(b.ordinal_position AS INTEGER)
-"""  # noqa: S608 - union_sql is built from catalog metadata, not user input
-
-
-def recompute_table_features(df_table: pd.DataFrame) -> pd.DataFrame:
-    """
-    Recompute table-level stats/rankings across all batched columns and derive the
-    FD-style features. Ported verbatim from the training script so inference matches
-    how the model was trained.
-    """
-    table_col_count = int(df_table["ordinal_position"].max())
-    table_unique_col_count = int(df_table["is_unique"].sum())
-    table_row_count = int(df_table["count"].max())
-    table_has_unique = int((df_table["is_unique"] == 1).any())
-    table_near_unique = int((df_table["unique_ratio"] > 0.95).sum())
-    table_id_named = int(df_table["name_ends_with_id"].sum())
-    table_non_null = int((df_table["null_count"] == 0).sum())
-    table_max_unique_ratio = float(df_table["unique_ratio"].max())
-    table_int_col = int(df_table["column_type"].isin(["bigint", "integer", "int"]).sum())
-    table_has_composite_pk = int(table_has_unique == 0 and table_id_named >= 2)
-    table_avg_unique_ratio = float(df_table["unique_ratio"].mean())
-    table_avg_null_ratio = float(df_table["null_ratio"].mean())
-    table_ratio_pk = table_unique_col_count / table_col_count if table_col_count > 0 else 0.0
-
-    unique_rows = df_table[df_table["is_unique"] == 1]
-    first_unique_ord = int(unique_rows["ordinal_position"].min()) if not unique_rows.empty else None
-
-    df_table["table_column_count"] = table_col_count
-    df_table["table_unique_column_count"] = table_unique_col_count
-    df_table["table_row_count"] = table_row_count
-    df_table["table_has_unique_column"] = table_has_unique
-    df_table["table_has_no_single_pk_candidate"] = int(table_has_unique == 0)
-    df_table["table_near_unique_column_count"] = table_near_unique
-    df_table["table_id_named_column_count"] = table_id_named
-    df_table["table_non_null_column_count"] = table_non_null
-    df_table["table_max_unique_ratio"] = table_max_unique_ratio
-    df_table["table_integer_column_count"] = table_int_col
-    df_table["other_unique_columns_in_table"] = table_unique_col_count - df_table["is_unique"]
-    df_table["other_near_unique_columns_in_table"] = table_near_unique - (
-        df_table["unique_ratio"] > 0.95
-    ).astype(int)
-    df_table["relative_ordinal_position"] = (
-        df_table["ordinal_position"] / table_col_count if table_col_count > 0 else 0.0
-    )
-    df_table["is_first_unique_column"] = (
-        (df_table["ordinal_position"] == first_unique_ord).astype(int)
-        if first_unique_ord is not None
-        else 0
-    )
-    df_table["table_has_composite_pk"] = table_has_composite_pk
-    df_table["table_avg_unique_ratio"] = round(table_avg_unique_ratio, 4)
-    df_table["table_avg_null_ratio"] = round(table_avg_null_ratio, 4)
-    df_table["table_ratio_of_pk_candidates"] = round(table_ratio_pk, 4)
-    df_table["is_composite_key_part"] = (
-        df_table["column_name"].str.lower().str.contains("id")
-        & (df_table["table_has_no_single_pk_candidate"] == 1)
-    ).astype(int)
-
-    rank_idx = df_table.sort_values(
-        ["unique_ratio", "ordinal_position"],
-        ascending=[False, True],
-    ).index
-    df_table["unique_ratio_rank"] = pd.Series(range(1, len(rank_idx) + 1), index=rank_idx)
-
-    rank_idx = df_table.sort_values(
-        ["null_ratio", "ordinal_position"],
-        ascending=[True, True],
-    ).index
-    df_table["null_ratio_rank"] = pd.Series(range(1, len(rank_idx) + 1), index=rank_idx)
-
-    df_table["is_least_null_in_table"] = (df_table["null_ratio_rank"] == 1).astype(int)
-    df_table["unique_ratio_relative_to_max"] = (
-        (df_table["unique_ratio"] / table_max_unique_ratio) if table_max_unique_ratio > 0 else 0.0
-    )
-
-    # Partial-dependency heuristic (metadata-only approximation).
-    cpk_unique_counts = set(
-        df_table[df_table["is_composite_key_part"] == 1]["number_unique_values"].tolist(),
-    )
-    df_table["is_this_col_partial_dependency"] = (
-        (df_table["is_composite_key_part"] == 0)
-        & (df_table["is_unique"] == 0)
-        & (table_has_composite_pk == 1)
-        & (df_table["number_unique_values"].isin(cpk_unique_counts))
-    ).astype(int)
-
-    df_table["table_ratio_composite_key_cols"] = round(df_table["is_composite_key_part"].mean(), 4)
-    df_table["table_ratio_1nf_violations"] = round(df_table["is_this_col_violating_1nf"].mean(), 4)
-    std_val = df_table["unique_ratio"].std()
-    df_table["table_std_unique_ratio"] = round(0.0 if pd.isna(std_val) else float(std_val), 4)
-    df_table["table_has_partial_dependency"] = int(df_table["is_this_col_partial_dependency"].max())
-
-    return df_table
-
-
-def _normalize_type(raw: str) -> str:
-    """Normalize a Trino/iceberg data type to one of the model's column_type categories."""
-    t = re.sub(r"\(.*\)", "", str(raw)).strip().lower()
-    if t == "int":
-        t = "integer"
-    return t
-
-
-def _encode_type_dummies(df_table: pd.DataFrame) -> pd.DataFrame:
-    """Produce the 7 expected column_type_* dummy columns; unknown types -> all zero."""
-    normalized = df_table["column_type"].map(_normalize_type)
-    for col in EXPECTED_TYPE_COLS:
-        type_name = col[len("column_type_") :]
-        df_table[col] = (normalized == type_name).astype(int)
-    return df_table
-
-
 @task(name="extract-normalform-features", retries=2, retry_delay_seconds=30, cache_policy=NO_CACHE)
 def extract_normalform_features(
     target_schemas: list[str],
@@ -529,12 +110,13 @@ def extract_normalform_features(
     only_tables: list[TableRef] | None = None,
 ) -> pd.DataFrame:
     """
-    Profile all columns in the target schema(s) and produce the 29 model features
-    (plus id columns database/schema/table_name/column_name for aggregation).
+    Profile every table in the target schema(s) into the model's feature set, one row per
+    column, plus the id columns database/schema/table_name/column_name for aggregation.
 
     Args:
-        target_schemas: Schemas to scan for tables/columns.
-        batch_size: Number of columns to profile per Trino query.
+        target_schemas: Schemas to scan for tables.
+        batch_size: Aggregates per profiling query. The profiler decides how many queries a
+            table needs; this only caps how wide each SELECT list gets.
         skip_tables: (database, schema, table_name) triples to skip entirely (already
             processed in a previous run) so each table is only profiled/predicted once.
         only_tables: Restrict profiling to exactly these tables (streaming mode).
@@ -547,98 +129,49 @@ def extract_normalform_features(
 
     schema_filter = "', '".join(target_schemas)
     discovery_query = text(f"""
-        SELECT t.table_catalog, t.table_schema, t.table_name,
-               c.column_name, c.data_type, c.ordinal_position
-        FROM iceberg.information_schema.tables AS t
-        INNER JOIN iceberg.information_schema.columns AS c
-            ON t.table_catalog = c.table_catalog
-            AND t.table_schema = c.table_schema
-            AND t.table_name = c.table_name
-        WHERE t.table_schema IN ('{schema_filter}')
-        ORDER BY c.ordinal_position ASC
+        SELECT table_catalog, table_schema, table_name
+        FROM iceberg.information_schema.tables
+        WHERE table_schema IN ('{schema_filter}')
+        ORDER BY table_schema, table_name
     """)  # noqa: S608 - schema names are operator-supplied config, not user input
 
     with engine.connect() as connection:
-        found_tables = connection.execute(discovery_query).fetchall()
+        found = [tuple(row) for row in connection.execute(discovery_query).fetchall()]
 
-    print(f"Found {len(found_tables)} columns across all tables")
-
-    grouped: dict = {}
-    for database, schema, table, column, data_type, ordinal_position in found_tables:
-        grouped.setdefault((database, schema, table), []).append(
-            (column, data_type, ordinal_position),
-        )
+    print(f"Found {len(found)} tables")
 
     if only_tables is not None:
         # Streaming mode: the change detector already decided what needs work, so the
         # already-processed filter must NOT apply - a reloaded table is meant to be
         # profiled again even though nf_results holds an older row for it.
         wanted = {tuple(ref) for ref in only_tables}
-        grouped = {k: v for k, v in grouped.items() if k in wanted}
-        print(f"Restricted to {len(grouped)} changed tables")
+        found = [ref for ref in found if ref in wanted]
+        print(f"Restricted to {len(found)} changed tables")
     elif skip_tables:
-        before = len(grouped)
-        grouped = {k: v for k, v in grouped.items() if k not in skip_tables}
-        print(f"Skipping {before - len(grouped)} already-processed tables")
+        before = len(found)
+        found = [ref for ref in found if ref not in skip_tables]
+        print(f"Skipping {before - len(found)} already-processed tables")
 
-    print(f"Processing {len(grouped)} tables")
+    print(f"Processing {len(found)} tables")
 
     all_table_features = []
-    for (database, schema, table), columns in grouped.items():
-        table_dfs = []
-        batch_error = False
-
-        for col_batch in chunks(columns, batch_size):
-            union_parts = []
-            for column, data_type, ordinal_position in col_batch:
-                display_type = re.sub(r"^decimal\(.*\)$", "decimal", data_type, flags=re.IGNORECASE)
-                union_parts.append(f"""
-                    SELECT
-                        '{database}' AS database,
-                        '{schema}' AS schema,
-                        '{table}' AS table_name,
-                        '{column}' AS column_name,
-                        '{display_type}' AS column_type,
-                        COUNT(DISTINCT "{column}") AS number_unique_values,
-                        COUNT(*) AS count,
-                        COUNT_IF("{column}" IS NULL) AS null_count,
-                        CASE
-                            WHEN COUNT(*) > 0
-                                THEN CAST(COUNT_IF("{column}" IS NULL) AS DOUBLE) / COUNT(*)
-                                ELSE 0
-                            END AS null_ratio,
-                        CASE
-                            WHEN COUNT(DISTINCT "{column}") = COUNT(*)
-                                AND COUNT_IF("{column}" IS NULL) = 0 THEN 1
-                                ELSE 0
-                            END AS is_unique,
-                        '{ordinal_position}' AS ordinal_position,{build_1nf_violation_expr(column)}
-                    FROM {database}.{schema}.{table}
-                """)  # noqa: S608 - identifiers come from catalog metadata, not user input
-
-            full_query = build_feature_query(" UNION ALL ".join(union_parts))
+    with engine.connect() as connection:
+        for database, schema, table in found:
             try:
-                with engine.connect() as connection:
-                    result = connection.execute(text(full_query))
-                    table_dfs.append(pd.DataFrame(result.fetchall(), columns=result.keys()))
-            except Exception as e:  # noqa: BLE001 - skip a table if a batch fails, keep the rest
-                orig = getattr(e, "orig", None)
-                msg = str(orig) if orig else str(e).split("\n")[0]
-                print(f"Error at {database}.{schema}.{table}: {msg}")
-                batch_error = True
-                break
-
-        if batch_error or not table_dfs:
-            continue
-
-        df_table = pd.concat(table_dfs, ignore_index=True)
-        df_table["ordinal_position"] = df_table["ordinal_position"].astype(int)
-        # Before recompute_table_features: that is where table_ratio_1nf_violations is
-        # averaged from is_this_col_violating_1nf.
-        df_table = apply_freetext_veto(df_table)
-        df_table = recompute_table_features(df_table)
-        df_table = _encode_type_dummies(df_table)
-        all_table_features.append(df_table)
+                df_table = build_features(
+                    connection,
+                    database,
+                    schema,
+                    table,
+                    batch_size=batch_size,
+                )
+            except SQLAlchemyError as error:
+                # One unreadable table must not take the run down - the rest still predict.
+                orig = getattr(error, "orig", None)
+                message = str(orig) if orig else str(error).split("\n")[0]
+                print(f"Error at {database}.{schema}.{table}: {message}")
+                continue
+            all_table_features.append(encode_column_type(df_table))
 
     if not all_table_features:
         print("No data available - check tables and connection.")
@@ -646,9 +179,8 @@ def extract_normalform_features(
 
     df_final = pd.concat(all_table_features, ignore_index=True)
 
-    # Keep id columns (for aggregation) + exactly the 29 model features. Everything the
-    # extractor computed for intermediate use (count, ordinal_position, is_unique, ...) is
-    # dropped here, not earlier - recompute_table_features needs it.
+    # Keep the id columns (for aggregation) plus exactly the model features. `column_type`
+    # drops out here: the model sees its one-hot dummies, not the raw string.
     id_cols = ["database", "schema", "table_name", "column_name"]
     missing = [f for f in MODEL_FEATURES if f not in df_final.columns]
     if missing:
@@ -660,8 +192,8 @@ def extract_normalform_features(
 
     # Persist the extracted features (rebuilt each run) so they can be inspected without
     # running prediction, mirroring pk_fk_pipeline's stg_column_features. This is its OWN
-    # table: the normalform feature set (29 cols) differs from the pk/fk one, so the two
-    # must never share a staging table.
+    # table: the normalform feature set differs from the pk/fk one, so the two must never
+    # share a staging table.
     with engine.begin() as connection:
         connection.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
         df_final.to_sql(
@@ -697,12 +229,17 @@ def _row_to_payload(row: pd.Series) -> dict:
 def predict_normalform(features: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
     Call POST /predict_normalform for each column row. Returns the input frame with
-    per-column `prediction` (NF class) and `confidence` columns added, plus the
-    distinct reasons any calls failed so a run that predicted nothing can say why.
+    per-column `prediction` (NF class), `confidence`, and `probabilities` (the full
+    per-class distribution, keyed by class label) columns added, plus the distinct
+    reasons any calls failed so a run that predicted nothing can say why.
+
+    `probabilities` is what `aggregate_to_table` votes with - `confidence` alone is
+    just its max, and a confidence-weighted vote needs the whole distribution.
     """
     url = f"{MODEL_API_URL}/predict_normalform"
     predictions = []
     confidences = []
+    probabilities = []
     failure_reasons: set[str] = set()
 
     for _idx, row in features.iterrows():
@@ -712,6 +249,7 @@ def predict_normalform(features: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]
             result = response.json()
             predictions.append(result.get("prediction"))
             confidences.append(result.get("probability", 0.0))
+            probabilities.append(result.get("probabilities"))
         except (requests.RequestException, requests.Timeout, requests.HTTPError) as e:
             loc = f"{row['schema']}.{row['table_name']}.{row['column_name']}"
             # Keep the service's explanation, not just "400 Bad Request".
@@ -720,37 +258,48 @@ def predict_normalform(features: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]
             failure_reasons.add(detail)
             predictions.append(None)
             confidences.append(0.0)
+            probabilities.append(None)
 
     out = features.copy()
     out["prediction"] = predictions
     out["confidence"] = confidences
+    out["probabilities"] = probabilities
     return out, sorted(failure_reasons)
 
 
 @task(name="aggregate-normalform", cache_policy=NO_CACHE)
 def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
     """
-    Collapse per-column predictions to one row per table via majority vote.
-    Confidence = mean probability among the columns that voted for the winning class.
+    Collapse per-column predictions to one row per table via confidence-weighted
+    (soft) voting: average every column's full probability distribution, then take
+    the class with the highest averaged probability.
+
+    Not a hard vote over `prediction` labels. Two columns that are barely 51% sure
+    would otherwise outvote one column that is 99% sure, and an exact split would be
+    broken arbitrarily by `value_counts` row order rather than by which columns were
+    actually confident. Averaging probabilities fixes both: a confident column
+    outweighs unsure ones, and a tie is only a tie when the averaged distribution
+    itself is tied.
     """
-    predicted = predicted.dropna(subset=["prediction"]).copy()
+    predicted = predicted.dropna(subset=["prediction", "probabilities"]).copy()
     if predicted.empty:
         return pd.DataFrame()
-
-    predicted["prediction"] = predicted["prediction"].astype(int)
 
     rows = []
     group_cols = ["database", "schema", "table_name"]
     for (database, schema, table), grp in predicted.groupby(group_cols):
-        winning_class = int(grp["prediction"].value_counts().idxmax())
-        winners = grp[grp["prediction"] == winning_class]
+        # Each entry in `probabilities` is a {class_label: probability} dict from
+        # one column; stacking them into a frame and averaging columnwise gives the
+        # table's combined distribution, one column per NF class.
+        mean_distribution = pd.DataFrame(list(grp["probabilities"])).astype(float).mean()
+        winning_class = int(mean_distribution.idxmax())
         rows.append(
             {
                 "database": database,
                 "schema": schema,
                 "table_name": table,
                 "predicted_normal_form": winning_class,
-                "confidence": round(float(winners["confidence"].mean()), 4),
+                "confidence": round(float(mean_distribution.max()), 4),
                 "n_columns": len(grp),
             },
         )

@@ -5,8 +5,8 @@ What this file is
 -----------------
 The plumbing, not the recipes. It materializes a ``TableSpec`` as a real Iceberg table,
 derives the label from the declared FDs via ``nf_labeling``, and writes the manifest row.
-``RECIPES`` is deliberately empty: filling it is Phase **2b**, where the TPC-H joins and
-the 1NF injections are worked out.
+The shapes live elsewhere: ``nf_recipes`` builds them from TPC-H (2b), ``nf_synthetic``
+generates independent schemas (2d), and ``load_specs`` puts the two together.
 
 Why raw tables and not feature rows
 -----------------------------------
@@ -23,8 +23,9 @@ else, the same view it has in production.
 
 Run it
 ------
-``python task_3/nf_generator.py --dry-run`` computes and prints the labels without
-touching Trino. That is the useful mode until 2b fills in the recipes.
+``python task_3/nf_generator.py --dry-run`` computes and prints the labels without touching
+Trino; ``--no-synthetic`` restricts a run to the TPC-H part, which is the faster loop while
+working on the recipes.
 """
 
 from __future__ import annotations
@@ -93,17 +94,30 @@ class TableSpec:
     review_reason: str | None = None
 
 
-def load_specs() -> list[TableSpec]:
+def load_specs(synthetic: bool = True) -> list[TableSpec]:
     """
-    The recipes from Phase 2b.
+    Everything there is to generate: the TPC-H recipes (2b) and the synthetic schemas (2d).
 
-    Imported here rather than at module level because ``nf_recipes`` needs ``TableSpec``
-    from this module - a top-level import in both directions would be a cycle. The
-    generator owns the plumbing, the recipes own the shapes; this is the seam.
+    Two sources on purpose. TPC-H supplies realism from eight real relations; the synthetic
+    schemas supply the *number* of source schemas, which 2b measured as the binding
+    constraint. A model trained on only one of them learns that one.
+
+    Imported here rather than at module level because both modules need ``TableSpec`` from
+    this one - a top-level import in both directions would be a cycle. The generator owns
+    the plumbing, the recipes own the shapes; this is the seam.
+
+    Args:
+        synthetic: Include the synthetic schemas. ``False`` regenerates only the TPC-H
+            part, which is the faster loop while working on the recipes.
     """
     from nf_recipes import build_specs  # noqa: PLC0415 - see docstring
 
-    return build_specs()
+    specs = build_specs()
+    if synthetic:
+        from nf_synthetic import build_synthetic_specs  # noqa: PLC0415 - see docstring
+
+        specs += build_synthetic_specs()
+    return specs
 
 
 def get_trino_engine() -> Engine:
@@ -248,13 +262,18 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true", help="one line per table")
     parser.add_argument(
+        "--no-synthetic",
+        action="store_true",
+        help="only the TPC-H recipes, without the synthetic schemas from 2d",
+    )
+    parser.add_argument(
         "--only",
         default=None,
         help="restrict to table names containing this substring",
     )
     args = parser.parse_args()
 
-    specs = load_specs()
+    specs = load_specs(synthetic=not args.no_synthetic)
     if args.only:
         specs = [spec for spec in specs if args.only in spec.table_name]
 

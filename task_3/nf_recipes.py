@@ -21,15 +21,32 @@ Two consequences the recipes are built around: ``lineitem`` on its own is **2NF*
 3NF, and ``part`` with ``mfgr`` is 2NF as well. Each is only 3NF once the dependent
 attribute is projected away - which is where the 3NF-with-composite-key tables come from.
 
+Two columns that were excluded and are now back on purpose
+----------------------------------------------------------
+``orders.shippriority`` (constant, one value over 15.000 rows) and ``customer.acctbal``
+(1499 distinct over 1500) were removed from this catalog because they produced accidental
+dependencies that polluted the labels. That was the wrong fix, and a prediction run on real
+TPC-H showed why: `orders` came back 2NF because every column "determines" a constant one,
+and `customer` came back 2NF from ``acctbal -> mktsegment``. Both are 3NF.
+
+The guards belong in the extractor, not in the choice of test data - a trivial dependency is
+trivial wherever it appears, and ``find_dependencies`` now drops constant dependents and
+near-unique determinants. Removing the columns instead meant the training set contained
+neither phenomenon, so nothing could learn them and no check could catch the regression. They
+are back as the decoys they always were: if a guard breaks, the label-versus-discovered check
+fails on these tables instead of on a customer's database.
+
 What is deliberately not projected
 ----------------------------------
-* ``orders.shippriority`` - constant in TPC-H. A constant column is a dependency on the
-  empty set, which would quietly drag every table containing it down to 1NF.
 * ``customer/supplier.name|address|phone`` and ``part.name`` - accidentally unique. They
   would be extra candidate keys, and ``part.name`` is unique on ``tiny`` but *not* on
   ``sf1``, so the label would depend on the scale factor. ``nation.name`` and
   ``region.name`` are kept: stable natural keys at every scale, and the only thing
   keeping natural keys represented at all.
+* ``supplier.acctbal`` and ``lineitem.extendedprice`` - near-unique, 1499 resp. 1968
+  distinct values at 1500-2000 rows. ``customer.acctbal`` is projected as the deliberate
+  near-unique decoy (see above); keeping the other two out limits how many tables one guard
+  regression can move, so a failure points somewhere specific.
 * ``comment`` - except where a recipe wants free text on purpose (see ``DECOY_RECIPES``).
 
 The two things this set is built to defeat
@@ -110,12 +127,16 @@ TPCH: dict[str, BaseRelation] = {
     "supplier": BaseRelation(
         name="supplier",
         key=frozenset({"suppkey"}),
-        attributes=("suppkey", "nationkey", "acctbal"),
+        attributes=("suppkey", "nationkey"),
     ),
     "customer": BaseRelation(
         name="customer",
+        # acctbal is the near-unique decoy: 1499 distinct over 1500 rows, which is close
+        # enough to a key that it determines other columns by accident. No declared FD - it
+        # is a plain non-key attribute, and any dependency out of it is the artifact
+        # find_dependencies is meant to drop.
         key=frozenset({"custkey"}),
-        attributes=("custkey", "nationkey", "acctbal", "mktsegment"),
+        attributes=("custkey", "nationkey", "mktsegment", "acctbal"),
     ),
     "part": BaseRelation(
         name="part",
@@ -131,8 +152,20 @@ TPCH: dict[str, BaseRelation] = {
     ),
     "orders": BaseRelation(
         name="orders",
+        # shippriority is the constant decoy: 0 in every TPC-H row. Every other column
+        # "determines" it, which is a dependency on the empty set and says nothing about the
+        # schema. Declared like any other non-key attribute - `orderkey -> shippriority`
+        # holds, and that is the whole truth about it.
         key=frozenset({"orderkey"}),
-        attributes=("orderkey", "custkey", "orderstatus", "orderdate", "orderpriority", "clerk"),
+        attributes=(
+            "orderkey",
+            "custkey",
+            "orderstatus",
+            "orderdate",
+            "orderpriority",
+            "clerk",
+            "shippriority",
+        ),
     ),
     "lineitem": BaseRelation(
         name="lineitem",
@@ -143,7 +176,6 @@ TPCH: dict[str, BaseRelation] = {
             "partkey",
             "suppkey",
             "quantity",
-            "extendedprice",
             "discount",
             "returnflag",
             "linestatus",
@@ -516,7 +548,12 @@ class ListRecipe:
         child: Child relation in ``TPCH``.
         child_fk: Column in the child that points at the parent.
         parent_fk: The parent column it points at.
-        value: Child column folded into the list.
+        value: Child column folded into the list. Deliberately low-cardinality: a list of
+            shipping modes is what a denormalized column actually looks like, and a
+            near-unique one (a price, a key) would turn the control into an accidental
+            key of its own.
+        child_order: Child column deciding which value the control keeps. Has to vary
+            inside a parent group, or the control column goes constant.
         separator: ``,``, ``;`` or ``|``.
         note: Travels into the manifest.
     """
@@ -527,6 +564,7 @@ class ListRecipe:
     child_fk: str
     parent_fk: str
     value: str
+    child_order: str
     separator: str
     note: str = ""
 
@@ -544,8 +582,15 @@ class ListRecipe:
         )
 
         if atomic:
-            column = "child_count"
-            aggregate = f'CAST(count(c."{self.value}") AS VARCHAR)'
+            # One child value instead of all of them - the tightest possible contrast to
+            # the list: same source column, same type, one entry rather than many.
+            #
+            # NOT count(*), which is what this was first. TPC-H has fixed fan-outs (every
+            # part has exactly four suppliers), so the count came out **constant** - and a
+            # constant column is determined by every other column, which dragged the
+            # control down to 2NF. The validation harness (2c) caught it on six tables.
+            column = f"{self.child}_{self.value}_first"
+            aggregate = f'CAST(min_by(c."{self.value}", c."{self.child_order}") AS VARCHAR)'
         else:
             column = f"{self.child}_{self.value}_list"
             aggregate = (
@@ -571,52 +616,58 @@ class ListRecipe:
 
 LIST_RECIPES: tuple[ListRecipe, ...] = (
     ListRecipe(
-        "orders_partkey_list",
+        "orders_shipmode_list",
         parent="orders_core",
         child="lineitem",
         child_fk="orderkey",
         parent_fk="orderkey",
-        value="partkey",
+        value="shipmode",
+        child_order="linenumber",
         separator=",",
-        note="0NF on a 3NF parent - the control is the same table with a count",
+        note="0NF on a 3NF parent - the control keeps one shipping mode instead of all",
     ),
     ListRecipe(
-        "customer_orderkey_list",
+        "customer_orderpriority_list",
         parent="customer_core",
         child="orders",
         child_fk="custkey",
         parent_fk="custkey",
-        value="orderkey",
+        value="orderpriority",
+        child_order="orderkey",
         separator=";",
         note="0NF with a semicolon separator",
     ),
     ListRecipe(
-        "supplier_partkey_list",
+        "supplier_shipmode_list",
         parent="supplier_core",
-        child="partsupp",
+        child="lineitem",
         child_fk="suppkey",
         parent_fk="suppkey",
-        value="partkey",
+        value="shipmode",
+        child_order="orderkey",
         separator="|",
-        note="0NF with a pipe separator",
+        note="0NF with a pipe separator, and a long list - the case that showed the "
+        "prose guard has to measure per token, not per value",
     ),
     ListRecipe(
-        "part_suppkey_list",
+        "part_returnflag_list",
         parent="part_core",
-        child="partsupp",
+        child="lineitem",
         child_fk="partkey",
         parent_fk="partkey",
-        value="suppkey",
+        value="returnflag",
+        child_order="orderkey",
         separator=",",
         note="0NF on a 3NF parent, second shape",
     ),
     ListRecipe(
-        "orders_customer_partkey_list",
+        "orders_customer_shipmode_list",
         parent="orders_customer",
         child="lineitem",
         child_fk="orderkey",
         parent_fk="orderkey",
-        value="partkey",
+        value="shipmode",
+        child_order="linenumber",
         separator=",",
         note="0NF on a 2NF parent - 0NF must not correlate with the parent's form",
     ),
@@ -835,6 +886,8 @@ def build_specs() -> list[TableSpec]:
                 violates_1nf=variant.violates_1nf,
                 generation_params={
                     "recipe_id": variant.recipe_id,
+                    "family": variant.recipe_id,
+                    "source": "tpch",
                     "kind": variant.kind,
                     **variant.params,
                 },

@@ -23,7 +23,13 @@ from event_publisher import EventPublishError, publish_new_data_event
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
 from metrics import record_error
 from monitoring_client import forward_to_monitoring
-from predict import MODEL_ALIAS, predict, predict_domain, resolve_model_versions
+from predict import (
+    MODEL_ALIAS,
+    predict,
+    predict_domain,
+    predict_with_probabilities,
+    resolve_model_versions,
+)
 from prometheus_fastapi_instrumentator import Instrumentator
 
 
@@ -363,7 +369,10 @@ def predict_normalform_key_candidate(
 
         print("Sending the following columns as features to the model:", input_df.columns.tolist())
 
-        prediction, probability = predict("denormalization_model", input_df)
+        prediction, probability, probabilities = predict_with_probabilities(
+            "denormalization_model",
+            input_df,
+        )
 
         if hasattr(prediction, "item"):
             prediction_value = int(prediction.item())
@@ -376,6 +385,7 @@ def predict_normalform_key_candidate(
             **data_dict,
             prediction=prediction_value,
             probability=probability,
+            probabilities=probabilities,
         )
 
         # Drift only. This model is multiclass, so its classification track cannot

@@ -54,19 +54,18 @@ HERE = Path(__file__).resolve().parent
 # no 'char'/'timestamp'; normalform is the other way round. Encoding one model's
 # data with the other's vocabulary silently produces the wrong feature set.
 KEY_COLUMN_TYPES = ["bigint", "boolean", "date", "decimal", "double", "integer", "varchar"]
-NF_COLUMN_TYPES = [
-    "bigint",
-    "char",
-    "date",
-    "decimal",
-    "double",
-    "integer",
-    "timestamp",
-    "varchar",
-]
+
+# Imported rather than repeated. This file was the fourth place the normalform vocabulary
+# lived, and it had drifted: 'char', 'decimal' and 'timestamp' do not occur in the training
+# data at all. Phase 2 replaced that data wholesale - see E3 in TASK_3_PLAN.md.
+sys.path.insert(0, str(REPO_ROOT / "prefect"))
+from nf_features import COLUMN_TYPE_CATEGORIES  # noqa: E402 - path set on the line above
+
+
+NF_COLUMN_TYPES = list(COLUMN_TYPE_CATEGORIES)
 
 KEY_TRAINING_DATA = "data/summary_output_task_1_2_training.csv"
-NF_TRAINING_DATA = "data/nf_test_analyse.csv"
+NF_TRAINING_DATA = "data/nf_training.csv"
 
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "pk_columns": {

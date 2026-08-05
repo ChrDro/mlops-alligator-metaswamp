@@ -47,6 +47,9 @@ class FakeResult:
     def scalar(self):
         return self._scalar_value
 
+    def scalar_one(self):
+        return self._scalar_value
+
 
 class FakeConnection:
     """

@@ -225,6 +225,47 @@ def delete_manifest_rows(conn: Connection, table_names: Sequence[str]) -> None:
     )
 
 
+def update_review_reasons(
+    conn: Connection,
+    reasons: dict[str, str],
+    all_tables: Sequence[str],
+) -> None:
+    """
+    Write the review queue from **E1**: flag what the harness found, clear what it did not.
+
+    Clearing matters as much as flagging. Without it a table that was fixed keeps its old
+    note forever, the queue only ever grows, and it stops being read - at which point
+    "report and carry on" has quietly become "ignore".
+
+    Args:
+        conn: Open SQLAlchemy connection to Trino.
+        reasons: ``table_name -> reason``. Tables to flag.
+        all_tables: Every table the harness looked at. Those not in ``reasons`` get their
+            review note cleared.
+    """
+    ensure_manifest_table(conn)
+
+    cleared = [name for name in all_tables if name not in reasons]
+    if cleared:
+        placeholders = ", ".join(f":name_{i}" for i in range(len(cleared)))
+        conn.execute(
+            text(
+                f"UPDATE {MANIFEST_TABLE} SET review_reason = NULL "  # noqa: S608 - bound parameters
+                f"WHERE table_name IN ({placeholders})",
+            ),
+            {f"name_{i}": name for i, name in enumerate(cleared)},
+        )
+
+    for table_name, reason in reasons.items():
+        conn.execute(
+            text(
+                f"UPDATE {MANIFEST_TABLE} SET review_reason = :reason "  # noqa: S608 - bound parameters
+                "WHERE table_name = :name",
+            ),
+            {"reason": reason, "name": table_name},
+        )
+
+
 def load_manifest(conn: Connection, only_review: bool = False) -> list[ManifestRow]:
     """
     Read the manifest back.
