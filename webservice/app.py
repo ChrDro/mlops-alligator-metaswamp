@@ -21,9 +21,9 @@ from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from data_model_subject_area import SubjectArea, SubjectAreaPrediction
 from event_publisher import EventPublishError, publish_new_data_event
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
+from metrics import record_error
 from monitoring_client import forward_to_monitoring
 from predict import MODEL_ALIAS, predict, predict_domain, resolve_model_versions
-from metrics import record_error
 from prometheus_fastapi_instrumentator import Instrumentator
 
 
