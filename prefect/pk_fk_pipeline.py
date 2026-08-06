@@ -13,11 +13,14 @@ dbt session entirely and used its own SQLAlchemy connection, so it has been move
 here as a normal Prefect task with no loss of functionality.
 """
 
+import importlib.util
 import os
 import re
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
+from types import ModuleType
 
 import pandas as pd
 import requests
@@ -34,9 +37,45 @@ from dotenv import load_dotenv
 from model_health import diagnose, failure_detail
 from prefect.cache_policies import NONE as NO_CACHE
 from prefect.runtime import flow_run
-from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy import Connection, Engine, bindparam, create_engine, text
 
 from prefect import flow, task
+
+
+def _load_cross_table_features() -> ModuleType:
+    """Load src/cross_table_features.py by path, without touching sys.path.
+
+    The fk model's cross-table features have to be computed by the exact module the
+    training script used - a second copy inside prefect/ would drift, and a feature
+    computed differently at training and serving time is the silent failure
+    test/test_models/test_model_schema_contract.py exists to catch.
+
+    Importing it as `src.cross_table_features` would need the repo root on sys.path, and
+    the repo root contains a directory called `prefect` that shadows the installed Prefect
+    library - see the import-path note in test/test_pipelines/conftest.py. Loading the file
+    directly avoids that trap.
+
+    Two locations are tried: the repo layout (src/ next to prefect/) and /opt/src, where
+    docker-compose.yaml bind-mounts it in the container.
+    """
+    for directory in (Path(__file__).resolve().parents[1] / "src", Path("/opt/src")):
+        module_path = directory / "cross_table_features.py"
+        if module_path.exists():
+            spec = importlib.util.spec_from_file_location("cross_table_features", module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+    msg_features_missing = (
+        "cross_table_features.py not found next to prefect/ or at /opt/src. "
+        "The fk model needs it; check the ./src bind mount in docker-compose.yaml."
+    )
+    raise ImportError(msg_features_missing)
+
+
+_cross_table = _load_cross_table_features()
+CROSS_TABLE_FEATURES: list[str] = _cross_table.CROSS_TABLE_FEATURES
+add_cross_table_features = _cross_table.add_cross_table_features
 
 
 # Suppress InsecureRequestWarning for unverified HTTPS requests
@@ -53,6 +92,15 @@ MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://localhost:8080")
 
 # The four column-level models served by the API, in stored-column order.
 PREDICTION_MODELS = ["pk", "fk", "cpk", "cfk"]
+
+# The reference scope for the fk model's cross-table features. `database` here is the
+# Trino catalog, so the schema is what actually bounds a set of related tables. The model
+# is trained on several scope widths (see src/cross_table_features.py) precisely because
+# this scope cannot be assumed to hold one logical database.
+SERVING_SCOPE_COLUMNS = ("database", "schema")
+
+# Identifies one column across staging, the queue and information_schema.
+UNIQUENESS_KEY = ["database", "schema", "table_name", "column_name"]
 
 # Column-type dummy columns for the feature table
 EXPECTED_TYPE_COLS = [
@@ -279,6 +327,109 @@ def recompute_table_stats(df_table: pd.DataFrame) -> pd.DataFrame:
     return df_table
 
 
+def _known_uniqueness(engine: Engine, databases: set[str], schemas: set[str]) -> pd.DataFrame:
+    """`is_unique` per column from the queue, for tables this run did not profile.
+
+    The queue is the only durable record of a column's uniqueness: staging is rebuilt every
+    run and a streaming run rebuilds it with just the changed tables. Without this lookup a
+    streaming run would see a one-table reference scope and score 0 on every cross-table
+    feature, which reads to the model as "this database has no relationships at all".
+
+    A requeued column can appear more than once, so the newest row wins.
+    """
+    empty = pd.DataFrame(columns=[*UNIQUENESS_KEY, "is_unique"])
+    if not databases or not schemas:
+        return empty
+
+    query = text("""
+        SELECT database, schema, table_name, column_name, is_unique, created_at
+        FROM iceberg.predictions.queue
+        WHERE database IN :databases AND schema IN :schemas
+    """).bindparams(
+        bindparam("databases", value=tuple(databases), expanding=True),
+        bindparam("schemas", value=tuple(schemas), expanding=True),
+    )
+
+    try:
+        with engine.connect() as connection:
+            known = pd.read_sql(query, connection)
+    except Exception as e:  # noqa: BLE001 - a missing queue on a first run is not an error
+        orig = getattr(e, "orig", None)
+        print(f"No previous uniqueness available ({orig or str(e).split(chr(10))[0]})")
+        return empty
+
+    return (
+        known.sort_values("created_at")
+        .drop_duplicates(subset=UNIQUENESS_KEY, keep="last")
+        .drop(columns=["created_at"])
+    )
+
+
+def add_serving_cross_table_features(
+    df_final: pd.DataFrame,
+    discovered_columns: list[tuple[str, str, str, str]],
+    engine: Engine,
+) -> pd.DataFrame:
+    """Attach the fk model's cross-table features, scoped to the whole schema.
+
+    The reference scope must be every table of the schema, not just the tables this run
+    profiled: `n_other_tables_with_same_column_name` and friends are about the *other*
+    tables, and a column whose parent table was not in this run has to find it anyway.
+
+    Uniqueness comes from this run where available and from the queue otherwise. Columns
+    that have never been profiled contribute their names but count as not unique, which is
+    the safe default - it can only fail to find a parent, never invent one.
+
+    Args:
+        df_final: The rows profiled in this run, already carrying `is_unique`.
+        discovered_columns: (database, schema, table_name, column_name) for every column of
+            the target schemas, from information_schema and before any table filtering.
+        engine: Trino connection, for the queue lookup.
+
+    Returns:
+        `df_final` with `CROSS_TABLE_FEATURES` appended, same rows in the same order.
+    """
+    reference = pd.DataFrame(discovered_columns, columns=UNIQUENESS_KEY)
+
+    uniqueness = _known_uniqueness(
+        engine,
+        databases=set(reference["database"]),
+        schemas=set(reference["schema"]),
+    )
+    reference = reference.merge(uniqueness, on=UNIQUENESS_KEY, how="left")
+    # to_numeric before fillna: the merge can leave an object-dtype column when the queue
+    # lookup came back empty, and .fillna on object dtype is deprecated in pandas 2.x.
+    reference["is_unique"] = (
+        pd.to_numeric(reference["is_unique"], errors="coerce").fillna(0).astype(int)
+    )
+
+    # Rows profiled in this run are authoritative, so their stale reference copies drop out.
+    unprofiled = reference.merge(
+        df_final[UNIQUENESS_KEY].assign(_in_run=1), on=UNIQUENESS_KEY, how="left"
+    )
+    unprofiled = unprofiled[unprofiled["_in_run"].isna()].drop(columns=["_in_run"])
+
+    scope_sizes = reference.groupby(list(SERVING_SCOPE_COLUMNS))["table_name"].nunique()
+    print(
+        f"Cross-table reference scope: {len(reference)} columns / "
+        f"{reference['table_name'].nunique()} tables across {len(scope_sizes)} scope(s); "
+        f"largest scope has {int(scope_sizes.max())} tables. "
+        f"{len(unprofiled)} columns contribute names only.",
+    )
+    unknown = int((unprofiled["is_unique"] == 0).sum()) if not unprofiled.empty else 0
+    if unknown:
+        print(f"  {unknown} reference columns have no recorded uniqueness (treated as 0)")
+
+    # df_final first, so the profiled rows keep their positions after featurising.
+    combined = pd.concat([df_final, unprofiled], ignore_index=True)
+    featurised = add_cross_table_features(combined, scope_columns=SERVING_SCOPE_COLUMNS)
+
+    result = featurised.iloc[: len(df_final)].copy()
+    # The queue stores these as BIGINT; a float column would be rejected on insert.
+    result[CROSS_TABLE_FEATURES] = result[CROSS_TABLE_FEATURES].astype(int)
+    return result
+
+
 @task(name="extract-features", retries=2, retry_delay_seconds=30, cache_policy=NO_CACHE)
 def extract_features(
     target_schemas: list[str],
@@ -446,6 +597,18 @@ def extract_features(
         by=["database", "schema", "table_name", "ordinal_position"],
     ).reset_index(drop=True)
 
+    # Cross-table features come last because they are the only ones that look outside the
+    # table being profiled, and they need the whole schema in view - `found_tables` is that
+    # view, taken before only_tables/skip_tables narrowed this run down.
+    df_final = add_serving_cross_table_features(
+        df_final,
+        discovered_columns=[
+            (database, schema, table, column)
+            for database, schema, table, column, _type, _pos in found_tables
+        ],
+        engine=engine,
+    )
+
     print(f"Final features shape: {df_final.shape}")
 
     # Step 4: Write the feature table (rebuild each run, like a dbt table model).
@@ -564,17 +727,27 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 column_type_double BIGINT,
                 column_type_integer BIGINT,
                 column_type_varchar BIGINT,
+                n_other_tables_with_same_column_name BIGINT,
+                name_unique_in_other_table BIGINT,
+                is_non_unique_and_name_unique_elsewhere BIGINT,
+                name_references_other_table_exact BIGINT,
+                name_references_other_table_fuzzy BIGINT,
+                name_ends_with_id_no_underscore BIGINT,
+                name_ends_with_code_or_num BIGINT,
                 processed BOOLEAN,
                 processed_at VARCHAR,
                 created_at VARCHAR
             )
         """)
 
-        # Migration guard: an existing queue created before the CPK feature expansion
-        # lacks the 7 added columns. CREATE TABLE IF NOT EXISTS won't alter it, and the
-        # column-explicit INSERT below would then fail. Drop the stale table so it is
-        # recreated with the full schema. Previously-processed rows get re-queued and
-        # re-predicted, which is what we want after a feature-schema change.
+        # Migration guard: a queue created before a feature expansion lacks the added
+        # columns. CREATE TABLE IF NOT EXISTS won't alter it, and the column-explicit
+        # INSERT below would then fail. Drop the stale table so it is recreated with the
+        # full schema. Previously-processed rows get re-queued and re-predicted, which is
+        # what we want after a feature-schema change.
+        #
+        # The sentinel is the newest added column, so this guard covers every expansion:
+        # first the CPK one (table_integer_column_count), now the fk cross-table features.
         queue_exists = (
             conn.execute(
                 text("""
@@ -589,15 +762,16 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 text("""
                     SELECT COUNT(*) FROM iceberg.information_schema.columns
                     WHERE table_schema = 'predictions' AND table_name = 'queue'
-                      AND column_name = 'table_integer_column_count'
+                      AND column_name = 'name_ends_with_code_or_num'
                 """),
             ).scalar()
             or 0
         )
         if queue_exists and not has_new_columns:
             print(
-                "Queue table predates the CPK feature expansion (missing 7 columns); "
-                "dropping and recreating. Previously-processed rows will be re-predicted.",
+                "Queue table predates the fk cross-table feature expansion (missing 7 "
+                "columns); dropping and recreating. Previously-processed rows will be "
+                "re-predicted.",
             )
             conn.execute(text("DROP TABLE iceberg.predictions.queue"))
 
@@ -633,6 +807,10 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 name_is_singular_table_id,
                 name_length, column_type_boolean, column_type_date, column_type_decimal,
                 column_type_double, column_type_integer, column_type_varchar,
+                n_other_tables_with_same_column_name, name_unique_in_other_table,
+                is_non_unique_and_name_unique_elsewhere,
+                name_references_other_table_exact, name_references_other_table_fuzzy,
+                name_ends_with_id_no_underscore, name_ends_with_code_or_num,
                 processed, processed_at, created_at
             )
             SELECT
@@ -681,6 +859,13 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 column_type_double,
                 column_type_integer,
                 column_type_varchar,
+                n_other_tables_with_same_column_name,
+                name_unique_in_other_table,
+                is_non_unique_and_name_unique_elsewhere,
+                name_references_other_table_exact,
+                name_references_other_table_fuzzy,
+                name_ends_with_id_no_underscore,
+                name_ends_with_code_or_num,
                 FALSE AS processed,
                 CAST(NULL AS VARCHAR) AS processed_at,
                 CAST(CURRENT_TIMESTAMP AS VARCHAR) AS created_at
@@ -780,7 +965,11 @@ def fetch_new_rows(batch_size: int = 100) -> pd.DataFrame:
             name_ends_with_id, name_contains_key, name_contains_table_name,
             name_is_singular_table_id,
             name_length, column_type_boolean, column_type_date, column_type_decimal,
-            column_type_double, column_type_integer, column_type_varchar
+            column_type_double, column_type_integer, column_type_varchar,
+            n_other_tables_with_same_column_name, name_unique_in_other_table,
+            is_non_unique_and_name_unique_elsewhere,
+            name_references_other_table_exact, name_references_other_table_fuzzy,
+            name_ends_with_id_no_underscore, name_ends_with_code_or_num
         FROM iceberg.predictions.queue
         WHERE processed = FALSE
         LIMIT :batch_size

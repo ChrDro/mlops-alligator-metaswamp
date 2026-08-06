@@ -43,6 +43,14 @@ import requests
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The fk model's cross-table features are computed, not stored, so this script needs the
+# same module the training script used - see add_derived_features.
+sys.path.insert(0, str(REPO_ROOT))
+
+from src.cross_table_features import add_cross_table_features  # noqa: E402
+
+
 HERE = Path(__file__).resolve().parent
 
 # One entry per monitored model. The track name is what appears as dataset_name on
@@ -150,6 +158,23 @@ def assign_split(df: pd.DataFrame, reference_pct: int) -> pd.Series:
         ["reference" if b < reference_pct else "holdout" for b in buckets],
         index=df.index,
     )
+
+
+def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add features the training scripts compute rather than read from the CSV.
+
+    The fk model's seven cross-table features are derived from the identity columns at
+    training time (src/cross_table_features.py), so they are absent from the labelled CSV
+    and have to be recomputed here or `build_one` would refuse the fk track outright.
+
+    Scoped by `database`, matching the training script. The serving pipeline scopes by
+    Trino schema instead and the model is trained to tolerate both widths, but a baseline
+    should describe the width the labels were collected in.
+
+    The other tracks ignore the extra columns: each one selects features by name from its
+    Pydantic model.
+    """
+    return add_cross_table_features(df) if "database" in df.columns else df
 
 
 def encode_column_type(df: pd.DataFrame, categories: list[str]) -> pd.DataFrame:
@@ -386,7 +411,7 @@ def main() -> int:
         # trained on the same column_type vocabulary, so grouping by source is
         # enough here - the assertion inside encode_column_type catches it if not.
         categories = MODEL_SPECS[source_tracks[0]]["column_types"]
-        encoded = encode_column_type(df, categories)
+        encoded = encode_column_type(add_derived_features(df), categories)
         split = assign_split(encoded, args.reference_pct)
         logging.info(
             f"  split by identity hash: {(split == 'reference').sum()} reference / "
