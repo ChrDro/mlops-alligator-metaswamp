@@ -52,6 +52,12 @@ services:
       - "9093:9093"
     volumes:
       - ./alertmanager:/etc/alertmanager
+      # Named, so recreation (e.g. via the launcher's --build) reuses this
+      # volume instead of leaving an anonymous one behind each time - the
+      # image declares VOLUME /alertmanager internally, so without an
+      # explicit mount here, compose/docker create a fresh anonymous volume
+      # on every container recreation.
+      - alertmanager-data:/alertmanager
     command: --config.file=/etc/alertmanager/alertmanager.yml
     networks:
       - ml-services-monitoring
@@ -406,6 +412,7 @@ services:
 volumes:
   grafana-data:
   prometheus-data:
+  alertmanager-data:
   minio_data:
   postgres_data:
   ollama_models:

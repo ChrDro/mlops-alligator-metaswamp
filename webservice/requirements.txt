@@ -4,12 +4,17 @@ lightgbm==4.7.0
 mlflow==3.14.0
 numpy==2.4.6
 pandas==2.3.3
-prometheus-fastapi-instrumentator==7.1.0
+# 7.1.0 caps starlette<1.0.0, which stays on a version with a fixed SSRF CVE
+# (CVE-2026-48818, fixed in starlette 1.1.0). 8.1.0 allows starlette>=1.0.0.
+prometheus-fastapi-instrumentator==8.1.0
 pydantic==2.13.4
 python-dotenv==1.2.2
 requests==2.34.2
 scikit-learn==1.9.0
 uvicorn==0.51.0
+# Not used at runtime - pip bootstraps it into every environment regardless.
+# Pinned only to clear CVE-2026-24049 (path traversal, fixed in 0.46.2).
+wheel==0.47.0
 # All five training scripts log XGBoost candidates under the mlflow.sklearn
 # flavor, so unpickling a model whose best candidate was XGBoost needs the
 # library importable here. Pinned to the version used for training.

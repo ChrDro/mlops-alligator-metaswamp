@@ -16,7 +16,10 @@
 
 services:
   stack-launcher:
-    image: docker:28-cli # ships the compose v2 plugin, no extra install needed
+    # Use the "-dev" variant: the plain "-cli" DHI tag is a minimal, hardened
+    # image with no shell (/bin/sh), which breaks the "sh -c" entrypoint below.
+    image: dhi.io/docker:29.7.1-cli-dev
+    # docker:28-cli # ships the compose v2 plugin, no extra install needed
     # The project has to sit at the same absolute path in here as the daemon
     # uses for it. docker-compose.yaml has relative bind mounts (./mlruns,
     # ./prometheus, ./grafana, ./data), which compose resolves to absolute paths
@@ -24,6 +27,7 @@ services:
     # anywhere else, the daemon would look up paths that do not exist on the
     # host and Prometheus, Alertmanager and Grafana would start on empty
     # directories. run_stack_in_container.sh probes this before starting.
+    container_name: mlops-alligator-metaswamp-stack-launcher
     working_dir: ${PROJECT_DIR:?run scripts/run_stack_in_container.sh instead of invoking this file directly}
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
@@ -34,4 +38,9 @@ services:
       # would silently create a second one with its own volumes and databases.
       - COMPOSE_PROJECT_NAME=mlops-alligator-metaswamp
     # Overridden by the wrapper script whenever it is given arguments.
-    command: docker compose up -d --build
+    # entrypoint/command are lists so "sh -c" receives the whole pipeline as
+    # ONE string argument - a scalar command here would be word-split by
+    # compose and only the first word ("docker") would reach "sh -c", with
+    # "compose", "up", "-d", "--build" landing unused in $0, $1, ...
+    entrypoint: ["sh", "-c"]
+    command: ["docker compose up -d --build"]
