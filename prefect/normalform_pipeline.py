@@ -293,6 +293,12 @@ def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
         # table's combined distribution, one column per NF class.
         mean_distribution = pd.DataFrame(list(grp["probabilities"])).astype(float).mean()
         winning_class = int(mean_distribution.idxmax())
+        # If NF = 3 then flag_normalized is True
+        if winning_class == 3:
+            flag_normalized = True
+        else:
+            flag_normalized = False
+
         rows.append(
             {
                 "database": database,
@@ -300,6 +306,7 @@ def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
                 "table_name": table,
                 "predicted_normal_form": winning_class,
                 "confidence": round(float(mean_distribution.max()), 4),
+                "normalized": flag_normalized,
                 "n_columns": len(grp),
             },
         )
