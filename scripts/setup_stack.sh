@@ -6,10 +6,11 @@
 #   1. Preflight  - docker, .env, python interpreter
 #   2. Compose    - build and start all services, wait until they answer
 #   3. Train      - the 5 models, unless they are already registered
-#   4. Verify     - registry aliases + the model/schema contract tests
-#   5. Smoke test - one real prediction through the API
-#   6. Monitoring - build one Evidently baseline per key model (pk/cpk/fk/cfk)
-#   7. Streaming  - optional: reset watermarks and fire the push trigger
+#   4. Promote    - bootstrap/refresh the prod alias from the dev candidate
+#   5. Verify     - registry aliases + the model/schema contract tests
+#   6. Smoke test - one real prediction through the API
+#   7. Monitoring - build one Evidently baseline per key model (pk/cpk/fk/cfk)
+#   8. Streaming  - optional: reset watermarks and fire the push trigger
 #
 # The script is idempotent: run it again and it skips the training and the
 # baseline build it does not need. Use --retrain to force both.
@@ -64,7 +65,7 @@ fail()  { printf '\n%sError:%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 
 # --- 1. preflight ------------------------------------------------------------
 
-step "1/7  Preflight"
+step "1/8  Preflight"
 
 command -v docker >/dev/null 2>&1 || fail "docker not found."
 docker info >/dev/null 2>&1 || fail "Docker daemon not running. Start Docker Desktop."
@@ -148,14 +149,17 @@ wait_for_healthy() {  # service, timeout_seconds
     done
 }
 
-registered_models() {
-    $PYTHON - <<'PY' 2>/dev/null || true
+registered_models() {  # $1 = alias to check (default: dev)
+    ALIAS_TO_CHECK="${1:-dev}" $PYTHON - <<'PY' 2>/dev/null || true
+import os
+
 import mlflow
 from mlflow.tracking import MlflowClient
 
+alias = os.environ.get("ALIAS_TO_CHECK", "dev")
 try:
     for model in MlflowClient().search_registered_models():
-        if "dev" in (model.aliases or {}):
+        if alias in (model.aliases or {}):
             print(model.name)
 except Exception:
     pass
@@ -164,7 +168,7 @@ PY
 
 # --- 2. compose --------------------------------------------------------------
 
-step "2/7  Build and start container"
+step "2/8  Build and start container"
 
 # --build matters: webservice/ is baked into the image, not mounted. Without it a
 # code change silently keeps serving the old routes.
@@ -190,7 +194,7 @@ TRAIN_SCRIPTS=(
     "denormalization_model:task_3/task_3_denormalization_train_and_register.py"
 )
 
-step "3/7  Train and register models"
+step "3/8  Train and register models"
 
 if [ "$SKIP_TRAIN" = true ]; then
     warn "--skip-train was set, skipped training"
@@ -218,21 +222,41 @@ else
     done
 fi
 
-# --- 4. verify ---------------------------------------------------------------
+# --- 4. promote ----------------------------------------------------------
 
-step "4/7  Check Registry und Pydantic schema contract prüfen"
+step "4/8  Promote dev candidates to prod"
+
+# model-service serves @prod (docker-compose.yaml MODEL_ALIAS=prod), so a fresh
+# stack needs prod bootstrapped before any predict endpoint can work. On later
+# runs this compares each dev candidate's F1 against the running prod model and
+# only moves the alias if it is at least as good.
+if $PYTHON scripts/promote_model.py; then
+    ok "Promotion decisions applied (see log lines above for bootstrap/promoted/rejected)"
+else
+    fail "Promotion failed — see output above. model-service depends on @prod existing."
+fi
+
+# --- 5. verify ---------------------------------------------------------------
+
+step "5/8  Check Registry und Pydantic schema contract prüfen"
 
 MISSING=""
-FOUND="$(registered_models)"
+FOUND_DEV="$(registered_models dev)"
+FOUND_PROD="$(registered_models prod)"
 for entry in "${TRAIN_SCRIPTS[@]}"; do
     model_name="${entry%%:*}"
-    if printf '%s\n' "$FOUND" | grep -qx "$model_name"; then
+    if printf '%s\n' "$FOUND_DEV" | grep -qx "$model_name"; then
         ok "$model_name @dev"
     else
         MISSING="$MISSING $model_name"
     fi
+    if printf '%s\n' "$FOUND_PROD" | grep -qx "$model_name"; then
+        ok "$model_name @prod"
+    else
+        MISSING="$MISSING $model_name(prod)"
+    fi
 done
-[ -z "$MISSING" ] || fail "Not registered:$MISSING — without models each predict returns code 400."
+[ -z "$MISSING" ] || fail "Not registered:$MISSING — model-service serves @prod, without it every predict returns code 400."
 
 # Catches the drift that once let three of four models return NULL in production:
 # the Pydantic request schema and the logged model signature must agree on the
@@ -246,7 +270,7 @@ fi
 
 # --- 5. smoke test -----------------------------------------------------------
 
-step "5/7  Smoke test: Real Predict with API"
+step "6/8  Smoke test: Real Predict with API"
 
 for script in curl_tests/test_curl_predict_*.sh; do
     endpoint="$(basename "$script" .sh | sed 's/^test_curl_//')"
@@ -270,7 +294,7 @@ done
 # mounting them, writing the CSV is not enough - the image has to be rebuilt after.
 # That is why this cannot move up next to the other builds in step 2.
 
-step "6/7  Evidently monitoring baselines"
+step "7/8  Evidently monitoring baselines"
 
 REFERENCE_DIR="evidently_service/references"
 HOLDOUT_DIR="data/holdouts"
@@ -336,7 +360,7 @@ fi
 
 # --- 7. streaming (optional) -------------------------------------------------
 
-step "7/7  Streaming-Trigger"
+step "8/8  Streaming-Trigger"
 
 if [ "$WITH_STREAMING" = false ]; then
     warn "skipped — set argument --with-streaming (needs accessible Trino instance)"
@@ -382,6 +406,8 @@ $BOLD$GREEN Stack is ready.$RESET
 
   Single Predict:       bash curl_tests/test_curl_predict_pk.sh
   Trigger Streaming:    bash curl_tests/test_curl_notify_new_data.sh
+  Promote a retrain:    $PYTHON scripts/promote_model.py --model pk_model
+                         (then: docker compose restart model-service)
   Results:              duckdb.prediction_results.key_results / nf_results
 
   Monitoring notes:

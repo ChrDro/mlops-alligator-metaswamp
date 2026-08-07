@@ -176,7 +176,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 | 2 Testing & CI/CD | 🟡 ~45% | Keine Unit-Tests für API/Predict, keine Coverage, kein Docker-Build-Workflow |
 | 3 API & Docker | 🟡 ~55% | Kein API-Versioning, Dockerfile nicht gehärtet (root, single-stage) |
 | 4 Data Pipeline | 🟢 ~80% | Streaming steht; Training nicht orchestriert, keine Deployments für Batch |
-| 5 MLflow & Retraining | 🟡 ~65% | Retraining-Pfad komplett offen |
+| 5 MLflow & Retraining | 🟡 ~70% | `dev`→`prod` Promotion mit F1-Gate steht; Retraining selbst (Trigger, Prefect-Flow) offen |
 | 6 Monitoring | 🟡 ~55% | Grafana-Dashboards leer, Evidently noch auf Tutorial-Daten |
 
 ---
@@ -341,13 +341,13 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] Model Metadata (Tags via `mlflow.set_tags`)
   - [x] Model Signature (`infer_signature`) und Input Example
   - [x] **Aliase statt Stages**: `set_registered_model_alias(..., "dev")` — Stages sind in MLflow 3.x deprecated
-  - [ ] Zweiten Alias/Trennung `dev` → `prod` einführen (heute läuft der Webservice direkt auf `@dev`)
+  - [x] Zweiten Alias/Trennung `dev` → `prod` einführen — `scripts/promote_model.py` vergleicht Test-F1 von `dev` gegen `prod` und verschiebt den Alias nur bei Gleich- oder Verbesserung
   - [ ] Model Description je registriertem Modell setzen
 
 - [~] **5.3** Deployment Pattern
-  - [x] FastAPI lädt Model aus MLflow Registry (`models:/<name>@dev`)
+  - [x] FastAPI lädt Model aus MLflow Registry (`models:/<name>@<alias>`)
   - [x] Artefakt-Download aus MinIO im Compose-Netz konfiguriert (S3-Endpoint, Credentials)
-  - [ ] Environment Variable für Model Alias/Version
+  - [x] Environment Variable für Model Alias/Version — `MODEL_ALIAS` (Default `dev`, Compose setzt `prod`)
   - [ ] Model Loading Funktion mit Fallback (letzte funktionierende Version)
   - [ ] Blue-Green Deployment Vorbereitung
 
@@ -356,8 +356,8 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Prefect Flow für Retraining (kapselt die `task_*_train_and_register.py`)
   - [ ] Retraining mit neuen Daten aus Trino
   - [ ] Auto-Register zu MLflow nach Retraining (Logik existiert bereits in den Scripts → wiederverwenden)
-  - [ ] Model Comparison (Old vs New) vor Alias-Umzug
-  - [ ] Manuelle Promotion nach `prod`
+  - [x] Model Comparison (Old vs New) vor Alias-Umzug — `scripts/promote_model.py`, Vergleich per Test-F1
+  - [x] Manuelle Promotion nach `prod` — `python scripts/promote_model.py --model <name>`, danach `docker compose restart model-service`
   - [ ] Trigger-Kriterium festlegen (Zeitplan vs. Evidently-Drift-Signal)
 
 - [ ] **5.5** CI/CD für Modelle
@@ -687,8 +687,8 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
    - Register to MLflow
    - Compare with production model
 
-3. **Manual Promotion** (1 Stunde)
-   - Script für Stage Promotion
+3. **Manual Promotion** ✅ erledigt — `scripts/promote_model.py` (F1-Gate `dev` vs. `prod`)
+   - ~~Script für Stage Promotion~~
    - MLflow UI als Alternative
 
 **Deliverables**:

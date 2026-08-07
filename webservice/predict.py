@@ -11,7 +11,7 @@ from mlflow.pyfunc import PyFuncModel
 
 @lru_cache(maxsize=5)
 def load_model(model_name: str) -> PyFuncModel:
-    alias = "dev"
+    alias = os.getenv("MODEL_ALIAS", "dev")
     model_uri = f"models:/{model_name}@{alias}"
 
     model = mlflow.pyfunc.load_model(model_uri)
