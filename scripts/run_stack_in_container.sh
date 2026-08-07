@@ -159,10 +159,23 @@ if [ -t 0 ] && [ "$IS_WINDOWS" = false ]; then
 fi
 
 launch() {
-    if [ "$USE_TTY" = true ]; then
-        docker compose -p "$LAUNCHER_PROJECT" -f "$LAUNCHER_FILE" run --rm stack-launcher "$@"
+    # entrypoint in docker-compose.launcher.yaml is ["sh", "-c"]: it needs the
+    # whole command as ONE string argument. "$*" joins multiple words (e.g.
+    # docker compose ps) into a single string; with no override args at all,
+    # omit the extra argument so the launcher's own default command
+    # ("docker compose up -d --build") runs instead of an empty "sh -c ''".
+    if [ $# -eq 0 ]; then
+        if [ "$USE_TTY" = true ]; then
+            docker compose -p "$LAUNCHER_PROJECT" -f "$LAUNCHER_FILE" run --rm stack-launcher
+        else
+            docker compose -p "$LAUNCHER_PROJECT" -f "$LAUNCHER_FILE" run --rm -T stack-launcher
+        fi
     else
-        docker compose -p "$LAUNCHER_PROJECT" -f "$LAUNCHER_FILE" run --rm -T stack-launcher "$@"
+        if [ "$USE_TTY" = true ]; then
+            docker compose -p "$LAUNCHER_PROJECT" -f "$LAUNCHER_FILE" run --rm stack-launcher "$*"
+        else
+            docker compose -p "$LAUNCHER_PROJECT" -f "$LAUNCHER_FILE" run --rm -T stack-launcher "$*"
+        fi
     fi
 }
 
@@ -178,6 +191,13 @@ if [ $# -eq 0 ]; then
     # No arguments: docker-compose.launcher.yaml's own command runs (up -d --build).
     launch
     ok "Stack started"
+
+    # Anonymous volumes pile up on every recreate for any image that declares
+    # a VOLUME internally without an explicit named mount in docker-compose.yaml
+    # (e.g. alertmanager). `docker volume prune` only touches volumes with no
+    # container attached, so this is safe to run unconditionally after `up`.
+    docker volume prune -f >/dev/null 2>&1 || true
+    ok "Pruned dangling anonymous volumes"
 
     printf '\n    %-38s %s\n' "Prediction API (Swagger docs)" "http://localhost:8080/docs"
     printf '    %-38s %s\n'   "Prometheus"                    "http://localhost:9090"
