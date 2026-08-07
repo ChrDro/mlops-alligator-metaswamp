@@ -30,14 +30,25 @@ if str(SCRIPTS_DIR) not in sys.path:
 # 3.x put the plain filesystem backend into maintenance mode, so sqlite is used here
 # instead of "file:...".
 _STORE_DIR = tempfile.mkdtemp(prefix="promote_model_test_mlflow_")
-os.environ["MLFLOW_TRACKING_URI"] = f"sqlite:///{_STORE_DIR}/mlflow.db"
+_TRACKING_URI = f"sqlite:///{_STORE_DIR}/mlflow.db"
+os.environ["MLFLOW_TRACKING_URI"] = _TRACKING_URI
+mlflow.set_tracking_uri(_TRACKING_URI)
 
 import promote_model  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_tracking_uri() -> None:
+    # webservice/predict.py's own test suite calls mlflow.set_tracking_uri() to a fake
+    # host mid-run; that mutates process-global state monkeypatch does not revert, so
+    # a shared pytest session would otherwise leave this module's mlflow.* write calls
+    # (log_model, register_model, ...) pointed at an unreachable host.
+    mlflow.set_tracking_uri(_TRACKING_URI)
+
+
 @pytest.fixture
 def client() -> MlflowClient:
-    return MlflowClient()
+    return MlflowClient(tracking_uri=_TRACKING_URI)
 
 
 def _register_version(

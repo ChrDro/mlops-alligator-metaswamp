@@ -9,12 +9,14 @@ services:
       - .env
     environment:
       # boto3 needs these to download model artifacts from MinIO when resolving
-      # models:/...@dev. Inside the Docker network the endpoint is minio:9000.
+      # models:/...@{MODEL_ALIAS}. Inside the Docker network the endpoint is minio:9000.
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
       - AWS_DEFAULT_REGION=eu-central-1
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - MLFLOW_S3_IGNORE_TLS=true
+      # Serve the promoted model, not the dev candidate. Move via scripts/promote_model.py.
+      - MODEL_ALIAS=prod
       #  POST /events/new-data needs the REST endpoint set
       - PREFECT_API_URL=http://prefect:4200/api
     volumes:
@@ -22,6 +24,16 @@ services:
       # host shell, and Git Bash rewrites it to C:/... which compose then reads as
       # extra colons in the volume spec.
       - ./mlruns:/app/mlruns
+    # Readiness rather than liveness: "healthy" is only worth reading in
+    # `compose ps` if it means the registry actually resolves the models. A 503
+    # from /health/ready makes urlopen raise, which is what marks it unhealthy.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health/ready')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # Long enough for MLflow and MinIO to come up first.
+      start_period: 60s
     networks:
       - ml-services-monitoring
 
@@ -42,6 +54,12 @@ services:
       - "9093:9093"
     volumes:
       - ./alertmanager:/etc/alertmanager
+      # Named, so recreation (e.g. via the launcher's --build) reuses this
+      # volume instead of leaving an anonymous one behind each time - the
+      # image declares VOLUME /alertmanager internally, so without an
+      # explicit mount here, compose/docker create a fresh anonymous volume
+      # on every container recreation.
+      - alertmanager-data:/alertmanager
     command: --config.file=/etc/alertmanager/alertmanager.yml
     networks:
       - ml-services-monitoring
@@ -80,33 +98,46 @@ services:
       - ml-services-monitoring
 
   prefect:
-    image: prefecthq/prefect:3.6.25-python3.11
+    # Extends prefecthq/prefect:3.6.25-python3.11 with the flows' dependencies,
+    # which used to be pip-installed on every container start.
+    build:
+      context: prefect
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      # Ordering only, deliberately not service_healthy: the Prefect server is
+      # worth having even when Trino is down, and its own startup (pip install
+      # below) takes far longer than Trino needs to accept queries anyway.
+      trino:
+        condition: service_started
     env_file:
       - .env
     environment:
       - PREFECT_API_URL=http://localhost:4200/api
       - MODEL_API_URL=http://model-service:8080
+      - TRINO_IP_ADDRESS=trino
       # Persist server state in Postgres instead of SQLite in the container
       - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
     volumes:
       - ./prefect:/opt/flows
       # Read-only: model_quality_backtest.py replays the labelled holdout rows in
-      # data/pk_holdout.csv. Nothing in prefect/ writes to this directory.
+      # data/holdouts/ (one CSV per monitored model). Nothing in prefect/ writes
+      # to this directory.
       - ./data:/opt/data:ro
+      # Read-only: pk_fk_pipeline.py computes the fk model's cross-table features with
+      # src/cross_table_features.py, the same module the training script uses. Mounted
+      # rather than copied into prefect/ on purpose - two copies of feature code drift,
+      # and a feature computed differently at training and serving time is exactly the
+      # silent failure test/test_models/test_model_schema_contract.py exists to catch.
+      - ./src:/opt/src:ro
     working_dir: /opt/flows
     command:
       - /bin/sh
       - -lc
       - |
         set -e
-        pip install --no-cache-dir \
-          asyncpg==0.31.0 \
-          "sqlalchemy>=2.0.51" "trino[sqlalchemy]>=0.338.0" \
-          "pandas>=2.0.0,<3.0.0" python-dotenv requests
         python ensure_database.py
         prefect server start --host 0.0.0.0 &
         echo "Waiting for the Prefect API to come up..."
@@ -122,8 +153,61 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-      # Lets pip install above finish before the server starts.
-      start_period: 300s
+      # Dependencies now come from the image, so this only has to cover the
+      # database migration and the server's own startup.
+      start_period: 90s
+    networks:
+      - ml-services-monitoring
+
+  # Open-weights LLM that names the task_4 subject areas. Replaces the OpenRouter
+  # call, so the stack needs no API key and no outbound network at label time.
+  ollama:
+    image: ollama/ollama:0.32.5
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      # Host port is configurable because a machine may already run Ollama natively
+      # on 11434; in-network callers always use ollama:11434.
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      # Named volume, so the model is pulled once instead of on every `up`.
+      - ollama_models:/root/.ollama
+    environment:
+      # Default is 5 min. Labelling is bursty; reloading the weights costs more
+      # than the generation itself.
+      - OLLAMA_KEEP_ALIVE=1h
+    # The image ships no models, so the pull happens here. Same shape as minio below.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        ollama_pid=$$!
+        until ollama list >/dev/null 2>&1; do
+          echo "Waiting for Ollama to accept connections...";
+          sleep 1;
+        done
+        ollama pull ${OLLAMA_MODEL:-qwen2.5:3b}
+        echo "Ollama ready."
+        wait "$$ollama_pid"
+    healthcheck:
+      # Matches the model, not just the server - a call during the pull gets a 404.
+      test: ["CMD-SHELL", "ollama list | grep -q ${OLLAMA_MODEL_FAMILY:-qwen2.5}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # Covers the initial pull (~2 GB for qwen2.5:3b).
+      start_period: 600s
+    # CPU-only by default, which is what keeps this portable: Docker Desktop on
+    # macOS/Windows cannot reach the GPU anyway. On a Linux host with the NVIDIA
+    # container toolkit, uncomment for a large speedup.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     networks:
       - ml-services-monitoring
 
@@ -155,6 +239,8 @@ services:
         done
         mc mb --ignore-existing myminio/mlflow
         mc mb --ignore-existing myminio/postgres-backups
+        # Iceberg warehouse for the Trino/Nessie catalog
+        mc mb --ignore-existing myminio/warehouse
         echo "MinIO buckets ready."
         wait "$$minio_pid"
     healthcheck:
@@ -254,6 +340,11 @@ services:
       - MLFLOW_S3_IGNORE_TLS=true
       # MLflow 3.x rejects Host headers not in its allowlist (DNS-rebinding protection).
       - MLFLOW_SERVER_ALLOWED_HOSTS=mlflow:*,localhost:*,127.0.0.1:*
+      # The job runner spawns a Huey consumer pool for GenAI evaluation, online
+      # scoring and webhooks - none of which this project uses. Together with
+      # --workers 1 below it takes the server from 18 processes and a 2.3 GiB
+      # peak down to 5 processes and ~350 MiB.
+      - MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false
     depends_on:
       minio:
         condition: service_healthy
@@ -261,6 +352,7 @@ services:
         condition: service_healthy
     command: >
       mlflow server
+      --workers 1
       --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       --default-artifact-root s3://mlflow/
       --host 0.0.0.0
@@ -268,11 +360,71 @@ services:
     networks:
       - ml-services-monitoring
 
+  # Iceberg catalog for Trino
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.107.5-java
+    container_name: nessie_catalog
+    ports:
+      - "19120:19120"
+    environment:
+      # Store to outlive the container after docker compose down
+      - NESSIE_VERSION_STORE_TYPE=ROCKSDB
+      - NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH=/deployments/data/rocksdb
+    volumes:
+      - nessie_data:/deployments/data
+    networks:
+      - ml-services-monitoring
+
+  trino:
+    image: trinodb/trino:483
+    container_name: trino
+    # Without a limit the JVM sees the whole Docker VM (~11.7 GiB) and claims ~9.3 GiB of
+    # heap, so the host OOM-killer took Trino down mid-build three times (exit 137). The
+    # limit alone was not enough - see the mounted jvm.config below, which pins the heap to
+    # 4 GiB so the off-heap part still fits inside this number.
+    mem_limit: 6g
+    depends_on:
+      minio:
+        condition: service_healthy
+      nessie:
+        condition: service_started
+    environment:
+      # Read by ${ENV:...} in etc/trino/catalog/iceberg.properties.
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      # ... and by etc/config.properties. Kept out of that file so it stays
+      # committable; the keystore itself is generated, never committed.
+      - TRINO_SHARED_SECRET=${TRINO_SHARED_SECRET}
+      - TRINO_KEYSTORE_PASSWORD=${TRINO_KEYSTORE_PASSWORD}
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./trino-iceberg/etc/config.properties:/etc/trino/config.properties:ro
+      - ./trino-iceberg/etc/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino-iceberg/etc/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - ./trino-iceberg/etc/trino/password.db:/etc/trino/password.db:ro
+      - ./trino-iceberg/etc/keystore.jks:/etc/trino/keystore.jks:ro
+      - ./trino-iceberg/etc/trino/catalog/iceberg.properties:/etc/trino/catalog/iceberg.properties:ro
+      - ./trino-iceberg/etc/trino/catalog/duckdb.properties:/etc/trino/catalog/duckdb.properties:ro
+      - ./trino-iceberg/etc/trino/catalog/tpch.properties:/etc/trino/catalog/tpch.properties:ro
+      - ./trino-iceberg/data:/duckdb
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ml-services-monitoring
+
 volumes:
   grafana-data:
   prometheus-data:
+  alertmanager-data:
   minio_data:
   postgres_data:
+  ollama_models:
+  nessie_data:
 
 networks:
   ml-services-monitoring:

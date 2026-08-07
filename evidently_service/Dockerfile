@@ -4,9 +4,10 @@ WORKDIR /app
 
 COPY . /app
 
-RUN pip install --upgrade pip
-
-RUN pip install -r requirements.txt
+# One layer, and --no-cache-dir so pip's download cache does not end up in the
+# image: that cache plus the separate pip-upgrade layer were dead weight.
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8085
 

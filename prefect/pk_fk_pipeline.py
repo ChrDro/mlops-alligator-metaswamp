@@ -3,7 +3,7 @@ Prefect flow for orchestrating the feature engineering and prediction pipeline.
 
 This flow follows 3 steps:
 1. Extracts column-level features from information_schema (plain Python/pandas)
-   and writes them to duckdb.staging.stg_column_features in Trino.
+   and writes them to iceberg.staging.stg_column_features in Trino.
 2. Populates the prediction queue from the extracted features.
 3. Triggers the prediction flow to call the ML model APIs and store results.
 
@@ -13,11 +13,14 @@ dbt session entirely and used its own SQLAlchemy connection, so it has been move
 here as a normal Prefect task with no loss of functionality.
 """
 
+import importlib.util
 import os
 import re
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
+from types import ModuleType
 
 import pandas as pd
 import requests
@@ -28,13 +31,51 @@ from change_events import (
     claim_pending_changes,
     complete_pending_changes,
     release_pending_changes,
+    with_commit_retry,
 )
 from dotenv import load_dotenv
+from model_health import diagnose, failure_detail
 from prefect.cache_policies import NONE as NO_CACHE
 from prefect.runtime import flow_run
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Connection, Engine, bindparam, create_engine, text
 
 from prefect import flow, task
+
+
+def _load_cross_table_features() -> ModuleType:
+    """Load src/cross_table_features.py by path, without touching sys.path.
+
+    The fk model's cross-table features have to be computed by the exact module the
+    training script used - a second copy inside prefect/ would drift, and a feature
+    computed differently at training and serving time is the silent failure
+    test/test_models/test_model_schema_contract.py exists to catch.
+
+    Importing it as `src.cross_table_features` would need the repo root on sys.path, and
+    the repo root contains a directory called `prefect` that shadows the installed Prefect
+    library - see the import-path note in test/test_pipelines/conftest.py. Loading the file
+    directly avoids that trap.
+
+    Two locations are tried: the repo layout (src/ next to prefect/) and /opt/src, where
+    docker-compose.yaml bind-mounts it in the container.
+    """
+    for directory in (Path(__file__).resolve().parents[1] / "src", Path("/opt/src")):
+        module_path = directory / "cross_table_features.py"
+        if module_path.exists():
+            spec = importlib.util.spec_from_file_location("cross_table_features", module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+    msg_features_missing = (
+        "cross_table_features.py not found next to prefect/ or at /opt/src. "
+        "The fk model needs it; check the ./src bind mount in docker-compose.yaml."
+    )
+    raise ImportError(msg_features_missing)
+
+
+_cross_table = _load_cross_table_features()
+CROSS_TABLE_FEATURES: list[str] = _cross_table.CROSS_TABLE_FEATURES
+add_cross_table_features = _cross_table.add_cross_table_features
 
 
 # Suppress InsecureRequestWarning for unverified HTTPS requests
@@ -52,6 +93,15 @@ MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://localhost:8080")
 # The four column-level models served by the API, in stored-column order.
 PREDICTION_MODELS = ["pk", "fk", "cpk", "cfk"]
 
+# The reference scope for the fk model's cross-table features. `database` here is the
+# Trino catalog, so the schema is what actually bounds a set of related tables. The model
+# is trained on several scope widths (see src/cross_table_features.py) precisely because
+# this scope cannot be assumed to hold one logical database.
+SERVING_SCOPE_COLUMNS = ("database", "schema")
+
+# Identifies one column across staging, the queue and information_schema.
+UNIQUENESS_KEY = ["database", "schema", "table_name", "column_name"]
+
 # Column-type dummy columns for the feature table
 EXPECTED_TYPE_COLS = [
     "column_type_boolean",
@@ -66,7 +116,7 @@ EXPECTED_TYPE_COLS = [
 def get_trino_engine() -> Engine:
     """Create and return a Trino engine instance."""
     return create_engine(
-        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/duckdb",
+        f"trino://{TRINO_USERNAME}:{TRINO_PASSWORD}@{TRINO_IP_ADDRESS}:8443/iceberg",
         connect_args={
             "http_scheme": "https",
             "verify": False,
@@ -258,7 +308,15 @@ def recompute_table_stats(df_table: pd.DataFrame) -> pd.DataFrame:
     ).index
     df_table["unique_ratio_rank"] = pd.Series(range(1, len(rank_idx) + 1), index=rank_idx)
 
-    rank_idx = df_table.sort_values(["ordinal_position"], ascending=[True]).index
+    # Must match the ROW_NUMBER() ordering in the extraction SQL above
+    # (null_ratio ASC, ordinal_position ASC), because this recompute overwrites the
+    # value the SQL produced. Until 30.07. the null_ratio key was missing here, which
+    # silently degraded null_ratio_rank to "position in the table" and
+    # is_least_null_in_table to "is the first column".
+    rank_idx = df_table.sort_values(
+        ["null_ratio", "ordinal_position"],
+        ascending=[True, True],
+    ).index
     df_table["null_ratio_rank"] = pd.Series(range(1, len(rank_idx) + 1), index=rank_idx)
 
     df_table["is_least_null_in_table"] = (df_table["null_ratio_rank"] == 1).astype(int)
@@ -269,15 +327,119 @@ def recompute_table_stats(df_table: pd.DataFrame) -> pd.DataFrame:
     return df_table
 
 
+def _known_uniqueness(engine: Engine, databases: set[str], schemas: set[str]) -> pd.DataFrame:
+    """`is_unique` per column from the queue, for tables this run did not profile.
+
+    The queue is the only durable record of a column's uniqueness: staging is rebuilt every
+    run and a streaming run rebuilds it with just the changed tables. Without this lookup a
+    streaming run would see a one-table reference scope and score 0 on every cross-table
+    feature, which reads to the model as "this database has no relationships at all".
+
+    A requeued column can appear more than once, so the newest row wins.
+    """
+    empty = pd.DataFrame(columns=[*UNIQUENESS_KEY, "is_unique"])
+    if not databases or not schemas:
+        return empty
+
+    query = text("""
+        SELECT database, schema, table_name, column_name, is_unique, created_at
+        FROM iceberg.predictions.queue
+        WHERE database IN :databases AND schema IN :schemas
+    """).bindparams(
+        bindparam("databases", value=tuple(databases), expanding=True),
+        bindparam("schemas", value=tuple(schemas), expanding=True),
+    )
+
+    try:
+        with engine.connect() as connection:
+            known = pd.read_sql(query, connection)
+    except Exception as e:  # noqa: BLE001 - a missing queue on a first run is not an error
+        orig = getattr(e, "orig", None)
+        print(f"No previous uniqueness available ({orig or str(e).split(chr(10))[0]})")
+        return empty
+
+    return (
+        known.sort_values("created_at")
+        .drop_duplicates(subset=UNIQUENESS_KEY, keep="last")
+        .drop(columns=["created_at"])
+    )
+
+
+def add_serving_cross_table_features(
+    df_final: pd.DataFrame,
+    discovered_columns: list[tuple[str, str, str, str]],
+    engine: Engine,
+) -> pd.DataFrame:
+    """Attach the fk model's cross-table features, scoped to the whole schema.
+
+    The reference scope must be every table of the schema, not just the tables this run
+    profiled: `n_other_tables_with_same_column_name` and friends are about the *other*
+    tables, and a column whose parent table was not in this run has to find it anyway.
+
+    Uniqueness comes from this run where available and from the queue otherwise. Columns
+    that have never been profiled contribute their names but count as not unique, which is
+    the safe default - it can only fail to find a parent, never invent one.
+
+    Args:
+        df_final: The rows profiled in this run, already carrying `is_unique`.
+        discovered_columns: (database, schema, table_name, column_name) for every column of
+            the target schemas, from information_schema and before any table filtering.
+        engine: Trino connection, for the queue lookup.
+
+    Returns:
+        `df_final` with `CROSS_TABLE_FEATURES` appended, same rows in the same order.
+    """
+    reference = pd.DataFrame(discovered_columns, columns=UNIQUENESS_KEY)
+
+    uniqueness = _known_uniqueness(
+        engine,
+        databases=set(reference["database"]),
+        schemas=set(reference["schema"]),
+    )
+    reference = reference.merge(uniqueness, on=UNIQUENESS_KEY, how="left")
+    # to_numeric before fillna: the merge can leave an object-dtype column when the queue
+    # lookup came back empty, and .fillna on object dtype is deprecated in pandas 2.x.
+    reference["is_unique"] = (
+        pd.to_numeric(reference["is_unique"], errors="coerce").fillna(0).astype(int)
+    )
+
+    # Rows profiled in this run are authoritative, so their stale reference copies drop out.
+    unprofiled = reference.merge(
+        df_final[UNIQUENESS_KEY].assign(_in_run=1), on=UNIQUENESS_KEY, how="left"
+    )
+    unprofiled = unprofiled[unprofiled["_in_run"].isna()].drop(columns=["_in_run"])
+
+    scope_sizes = reference.groupby(list(SERVING_SCOPE_COLUMNS))["table_name"].nunique()
+    print(
+        f"Cross-table reference scope: {len(reference)} columns / "
+        f"{reference['table_name'].nunique()} tables across {len(scope_sizes)} scope(s); "
+        f"largest scope has {int(scope_sizes.max())} tables. "
+        f"{len(unprofiled)} columns contribute names only.",
+    )
+    unknown = int((unprofiled["is_unique"] == 0).sum()) if not unprofiled.empty else 0
+    if unknown:
+        print(f"  {unknown} reference columns have no recorded uniqueness (treated as 0)")
+
+    # df_final first, so the profiled rows keep their positions after featurising.
+    combined = pd.concat([df_final, unprofiled], ignore_index=True)
+    featurised = add_cross_table_features(combined, scope_columns=SERVING_SCOPE_COLUMNS)
+
+    result = featurised.iloc[: len(df_final)].copy()
+    # The queue stores these as BIGINT; a float column would be rejected on insert.
+    result[CROSS_TABLE_FEATURES] = result[CROSS_TABLE_FEATURES].astype(int)
+    return result
+
+
 @task(name="extract-features", retries=2, retry_delay_seconds=30, cache_policy=NO_CACHE)
 def extract_features(
     target_schemas: list[str],
     batch_size: int = 30,
     only_tables: list[TableRef] | None = None,
+    skip_tables: set[tuple[str, str, str]] | None = None,
 ) -> int:
     """
     Extract column-level features from information_schema and write them to
-    duckdb.staging.stg_column_features (rebuilt each run).
+    iceberg.staging.stg_column_features (rebuilt each run).
 
     Args:
         target_schemas: Schemas to scan for tables/columns.
@@ -286,16 +448,22 @@ def extract_features(
             trigger so a run only pays for what actually changed instead of
             re-profiling the whole schema. None = profile everything (the
             original behaviour, kept for manual/full runs).
+        skip_tables: (database, schema, table_name) triples whose columns are all
+            queued already, so profiling them would produce nothing the queue
+            dedup does not immediately discard. Mirrors the normalform track's
+            skip_tables; see get_fully_queued_tables for how the set is built.
+            Ignored when only_tables is given - see the filter below for why.
 
     Returns:
         Number of feature rows written.
     """
+    skip_tables = skip_tables or set()
     engine = get_trino_engine()
 
     for schema in target_schemas:
         with engine.connect() as conn:
             create_schema = text(f"""
-                CREATE SCHEMA IF NOT EXISTS duckdb.{schema}
+                CREATE SCHEMA IF NOT EXISTS iceberg.{schema}
             """)
 
             conn.execute(create_schema)
@@ -305,8 +473,8 @@ def extract_features(
     discovery_query = text(f"""
         SELECT t.table_catalog, t.table_schema, t.table_name,
                c.column_name, c.data_type, c.ordinal_position
-        FROM duckdb.information_schema.tables AS t
-        INNER JOIN duckdb.information_schema.columns AS c
+        FROM iceberg.information_schema.tables AS t
+        INNER JOIN iceberg.information_schema.columns AS c
             ON t.table_catalog = c.table_catalog
             AND t.table_schema = c.table_schema
             AND t.table_name = c.table_name
@@ -327,6 +495,9 @@ def extract_features(
 
     # Step 2b: Narrow to the changed tables when the streaming trigger scoped the run.
     if only_tables is not None:
+        # Streaming mode: the change detector already decided what needs work, so the
+        # already-queued filter must NOT apply - a reloaded table is meant to be
+        # profiled again even though the queue holds older rows for its columns.
         wanted = {tuple(ref) for ref in only_tables}
         grouped = {key: cols for key, cols in grouped.items() if key in wanted}
         missing = wanted - set(grouped)
@@ -334,6 +505,10 @@ def extract_features(
             # A table was flagged as changed but is gone from information_schema by
             # the time we got here (dropped between detection and processing).
             print(f"{len(missing)} flagged tables no longer exist, skipping them")
+    elif skip_tables:
+        before = len(grouped)
+        grouped = {key: cols for key, cols in grouped.items() if key not in skip_tables}
+        print(f"Skipping {before - len(grouped)} already-queued tables")
 
     print(f"Processing {len(grouped)} tables")
 
@@ -408,7 +583,13 @@ def extract_features(
         all_table_features.append(df_table)
 
     if not all_table_features:
-        print("No data available - check tables and connection.")
+        # Distinguish the healthy case (everything was filtered out, which is the
+        # normal outcome of a full-scan run once every table is queued) from the
+        # genuine fault, so the steady state does not print like a failure.
+        if not grouped:
+            print("No tables left to profile after filtering - nothing to extract.")
+        else:
+            print("No data available - check tables and connection.")
         return 0
 
     df_final = pd.concat(all_table_features, ignore_index=True)
@@ -416,11 +597,23 @@ def extract_features(
         by=["database", "schema", "table_name", "ordinal_position"],
     ).reset_index(drop=True)
 
+    # Cross-table features come last because they are the only ones that look outside the
+    # table being profiled, and they need the whole schema in view - `found_tables` is that
+    # view, taken before only_tables/skip_tables narrowed this run down.
+    df_final = add_serving_cross_table_features(
+        df_final,
+        discovered_columns=[
+            (database, schema, table, column)
+            for database, schema, table, column, _type, _pos in found_tables
+        ],
+        engine=engine,
+    )
+
     print(f"Final features shape: {df_final.shape}")
 
     # Step 4: Write the feature table (rebuild each run, like a dbt table model).
     with engine.begin() as connection:
-        connection.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.staging"))
+        connection.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.staging"))
         df_final.to_sql(
             "stg_column_features",
             connection,
@@ -429,7 +622,7 @@ def extract_features(
             index=False,
         )
 
-    print(f"Wrote {len(df_final)} rows to duckdb.staging.stg_column_features")
+    print(f"Wrote {len(df_final)} rows to iceberg.staging.stg_column_features")
     return len(df_final)
 
 
@@ -486,8 +679,11 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         # Note: id is INTEGER (predictions.py marks rows processed via int(id)), and the
         # numeric columns are BIGINT/DOUBLE to match the types pandas.to_sql writes to the
         # staging table, avoiding INSERT type-coercion errors.
+
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.predictions"))
+
         create_queue_table = text("""
-            CREATE TABLE IF NOT EXISTS duckdb.predictions.queue (
+            CREATE TABLE IF NOT EXISTS iceberg.predictions.queue (
                 id INTEGER,
                 database VARCHAR,
                 schema VARCHAR,
@@ -531,21 +727,31 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 column_type_double BIGINT,
                 column_type_integer BIGINT,
                 column_type_varchar BIGINT,
+                n_other_tables_with_same_column_name BIGINT,
+                name_unique_in_other_table BIGINT,
+                is_non_unique_and_name_unique_elsewhere BIGINT,
+                name_references_other_table_exact BIGINT,
+                name_references_other_table_fuzzy BIGINT,
+                name_ends_with_id_no_underscore BIGINT,
+                name_ends_with_code_or_num BIGINT,
                 processed BOOLEAN,
                 processed_at VARCHAR,
                 created_at VARCHAR
             )
         """)
 
-        # Migration guard: an existing queue created before the CPK feature expansion
-        # lacks the 7 added columns. CREATE TABLE IF NOT EXISTS won't alter it, and the
-        # column-explicit INSERT below would then fail. Drop the stale table so it is
-        # recreated with the full schema. Previously-processed rows get re-queued and
-        # re-predicted, which is what we want after a feature-schema change.
+        # Migration guard: a queue created before a feature expansion lacks the added
+        # columns. CREATE TABLE IF NOT EXISTS won't alter it, and the column-explicit
+        # INSERT below would then fail. Drop the stale table so it is recreated with the
+        # full schema. Previously-processed rows get re-queued and re-predicted, which is
+        # what we want after a feature-schema change.
+        #
+        # The sentinel is the newest added column, so this guard covers every expansion:
+        # first the CPK one (table_integer_column_count), now the fk cross-table features.
         queue_exists = (
             conn.execute(
                 text("""
-                    SELECT COUNT(*) FROM duckdb.information_schema.tables
+                    SELECT COUNT(*) FROM iceberg.information_schema.tables
                     WHERE table_schema = 'predictions' AND table_name = 'queue'
                 """),
             ).scalar()
@@ -554,19 +760,20 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         has_new_columns = (
             conn.execute(
                 text("""
-                    SELECT COUNT(*) FROM duckdb.information_schema.columns
+                    SELECT COUNT(*) FROM iceberg.information_schema.columns
                     WHERE table_schema = 'predictions' AND table_name = 'queue'
-                      AND column_name = 'table_integer_column_count'
+                      AND column_name = 'name_ends_with_code_or_num'
                 """),
             ).scalar()
             or 0
         )
         if queue_exists and not has_new_columns:
             print(
-                "Queue table predates the CPK feature expansion (missing 7 columns); "
-                "dropping and recreating. Previously-processed rows will be re-predicted.",
+                "Queue table predates the fk cross-table feature expansion (missing 7 "
+                "columns); dropping and recreating. Previously-processed rows will be "
+                "re-predicted.",
             )
-            conn.execute(text("DROP TABLE duckdb.predictions.queue"))
+            conn.execute(text("DROP TABLE iceberg.predictions.queue"))
 
         conn.execute(create_queue_table)
         print("Queue table verified/created")
@@ -575,7 +782,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         # across runs (Trino has no auto-increment / sequences).
         max_id = (
             conn.execute(
-                text("SELECT COALESCE(MAX(id), 0) FROM duckdb.predictions.queue"),
+                text("SELECT COALESCE(MAX(id), 0) FROM iceberg.predictions.queue"),
             ).scalar()
             or 0
         )
@@ -583,7 +790,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
         # Insert new rows from staging that aren't already processed in the queue.
         # Column list is explicit so the projection is matched by name, not position.
         insert_query = text(f"""
-            INSERT INTO duckdb.predictions.queue (
+            INSERT INTO iceberg.predictions.queue (
                 id, database, schema, table_name, column_name,
                 number_unique_values, count, null_count, null_ratio, is_unique,
                 ordinal_position, unique_ratio, is_non_null,
@@ -600,6 +807,10 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 name_is_singular_table_id,
                 name_length, column_type_boolean, column_type_date, column_type_decimal,
                 column_type_double, column_type_integer, column_type_varchar,
+                n_other_tables_with_same_column_name, name_unique_in_other_table,
+                is_non_unique_and_name_unique_elsewhere,
+                name_references_other_table_exact, name_references_other_table_fuzzy,
+                name_ends_with_id_no_underscore, name_ends_with_code_or_num,
                 processed, processed_at, created_at
             )
             SELECT
@@ -648,13 +859,20 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 column_type_double,
                 column_type_integer,
                 column_type_varchar,
+                n_other_tables_with_same_column_name,
+                name_unique_in_other_table,
+                is_non_unique_and_name_unique_elsewhere,
+                name_references_other_table_exact,
+                name_references_other_table_fuzzy,
+                name_ends_with_id_no_underscore,
+                name_ends_with_code_or_num,
                 FALSE AS processed,
                 CAST(NULL AS VARCHAR) AS processed_at,
                 CAST(CURRENT_TIMESTAMP AS VARCHAR) AS created_at
-            FROM duckdb.staging.stg_column_features AS f
+            FROM iceberg.staging.stg_column_features AS f
             WHERE NOT EXISTS (
                 SELECT 1
-                FROM duckdb.predictions.queue AS q
+                FROM iceberg.predictions.queue AS q
                 WHERE q.database = f.database
                   AND q.schema = f.schema
                   AND q.table_name = f.table_name
@@ -664,7 +882,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
             AND (
                 NOT EXISTS (
                     SELECT 1
-                    FROM duckdb.predictions.queue AS q
+                    FROM iceberg.predictions.queue AS q
                     WHERE q.database = f.database
                       AND q.schema = f.schema
                       AND q.table_name = f.table_name
@@ -685,7 +903,7 @@ def populate_prediction_queue(requeue_tables: list[TableRef] | None = None) -> i
                 COUNT(*) as total_rows,
                 SUM(CASE WHEN processed = FALSE THEN 1 ELSE 0 END) as unprocessed,
                 SUM(CASE WHEN processed = TRUE THEN 1 ELSE 0 END) as processed
-            FROM duckdb.predictions.queue
+            FROM iceberg.predictions.queue
         """)
 
         status = conn.execute(status_query).fetchone()
@@ -706,7 +924,7 @@ def check_queue_status() -> dict:
                 COUNT(*) as total_rows,
                 SUM(CASE WHEN processed = FALSE THEN 1 ELSE 0 END) as unprocessed,
                 SUM(CASE WHEN processed = TRUE THEN 1 ELSE 0 END) as processed
-            FROM duckdb.predictions.queue
+            FROM iceberg.predictions.queue
         """)
 
         result = conn.execute(query).fetchone()
@@ -747,8 +965,12 @@ def fetch_new_rows(batch_size: int = 100) -> pd.DataFrame:
             name_ends_with_id, name_contains_key, name_contains_table_name,
             name_is_singular_table_id,
             name_length, column_type_boolean, column_type_date, column_type_decimal,
-            column_type_double, column_type_integer, column_type_varchar
-        FROM duckdb.predictions.queue
+            column_type_double, column_type_integer, column_type_varchar,
+            n_other_tables_with_same_column_name, name_unique_in_other_table,
+            is_non_unique_and_name_unique_elsewhere,
+            name_references_other_table_exact, name_references_other_table_fuzzy,
+            name_ends_with_id_no_underscore, name_ends_with_code_or_num
+        FROM iceberg.predictions.queue
         WHERE processed = FALSE
         LIMIT :batch_size
     """)
@@ -758,9 +980,15 @@ def fetch_new_rows(batch_size: int = 100) -> pd.DataFrame:
 
 
 @task(name="predict-batch", retries=2, retry_delay_seconds=10)
-def predict_batch(rows: pd.DataFrame) -> list[dict]:
-    """Call the pk/fk/cpk/cfk endpoints for each queued row."""
+def predict_batch(rows: pd.DataFrame) -> tuple[list[dict], list[str]]:
+    """
+    Call the pk/fk/cpk/cfk endpoints for each queued row.
+
+    Returns the predictions plus the distinct reasons calls failed, so a run that
+    predicted nothing can say why instead of only that it happened.
+    """
     predictions = []
+    failure_reasons: set[str] = set()
 
     for _idx, row in rows.iterrows():
         row_data = row.to_dict()
@@ -793,8 +1021,13 @@ def predict_batch(rows: pd.DataFrame) -> list[dict]:
                 if prediction_value is None:
                     all_predictions_successful = False
                     print(f"Warning: {model_type} prediction returned None for row {row['id']}")
+                    failure_reasons.add(f"{model_type}: the service answered with no prediction")
             except (requests.RequestException, requests.Timeout, requests.HTTPError) as e:
-                print(f"Error predicting {model_type} for row {row['id']}: {e}")
+                # The status line alone ("400 Bad Request") is the one part of the
+                # response that carries no information - keep what the service said.
+                detail = failure_detail(e)
+                print(f"Error predicting {model_type} for row {row['id']}: {detail}")
+                failure_reasons.add(detail)
                 row_predictions[f"{model_type}_prediction"] = None
                 row_predictions[f"{model_type}_confidence"] = 0.0
                 all_predictions_successful = False
@@ -811,7 +1044,7 @@ def predict_batch(rows: pd.DataFrame) -> list[dict]:
         )
         predictions.append(row_predictions)
 
-    return predictions
+    return predictions, sorted(failure_reasons)
 
 
 @task(name="store-predictions", cache_policy=NO_CACHE)
@@ -859,7 +1092,7 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
             df[col] = df[col].fillna("NULL").astype(str)
 
     with trino_engine.connect() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS duckdb.prediction_results"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.prediction_results"))
         df.to_sql(
             "key_results",
             conn,
@@ -878,7 +1111,7 @@ def store_predictions_to_trino(predictions: list[dict]) -> None:
         params["current_timestamp"] = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
         update_query = text(f"""
-            UPDATE duckdb.predictions.queue
+            UPDATE iceberg.predictions.queue
             SET processed = TRUE,
                 processed_at = :current_timestamp
             WHERE id IN ({placeholders})
@@ -912,7 +1145,7 @@ def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
 
     query = text(f"""
         SELECT COUNT(*)
-        FROM duckdb.predictions.queue
+        FROM iceberg.predictions.queue
         WHERE processed = FALSE
           AND ({" OR ".join(predicates)})
     """)  # noqa: S608 - predicates are built from bound parameters
@@ -921,25 +1154,118 @@ def count_unprocessed_for_tables(tables: list[TableRef]) -> int:
         return conn.execute(query, params).scalar() or 0
 
 
+@task(name="get-fully-queued-tables", cache_policy=NO_CACHE)
+def get_fully_queued_tables(target_schemas: list[str]) -> set[tuple[str, str, str]]:
+    """
+    Return the tables whose every current column already has a queue row.
+
+    These are exactly the tables that profiling would gain nothing from on a
+    full-scan run: populate_prediction_queue's dedup discards any column that
+    already has a row (unprocessed, or processed and not flagged for requeue), so
+    the COUNT(DISTINCT) work would be paid and then thrown away. This mirrors the
+    normalform track's get_processed_tables, which skips at table grain because it
+    stores one row per table.
+
+    Matching on *columns* rather than tables is what makes this safe: a table that
+    gained a column has an unmatched column and is therefore not skipped, so the
+    new column still gets profiled and queued.
+
+    Returns an empty set when the queue does not exist yet (first ever run).
+    """
+    engine = get_trino_engine()
+    schema_filter = "', '".join(target_schemas)
+
+    with engine.connect() as conn:
+        queue_exists = conn.execute(
+            text("""
+                SELECT COUNT(*) FROM iceberg.information_schema.tables
+                WHERE table_schema = 'predictions' AND table_name = 'queue'
+            """),
+        ).scalar()
+        if not queue_exists:
+            print("No queue table yet - nothing to skip.")
+            return set()
+
+        # LEFT JOIN + "no column went unmatched": a column with several queue rows
+        # (one per reload) multiplies the join, which the COUNT_IF is unaffected by.
+        rows = conn.execute(
+            text(f"""
+                SELECT c.table_catalog, c.table_schema, c.table_name
+                FROM iceberg.information_schema.columns AS c
+                LEFT JOIN iceberg.predictions.queue AS q
+                    ON q.database = c.table_catalog
+                    AND q.schema = c.table_schema
+                    AND q.table_name = c.table_name
+                    AND q.column_name = c.column_name
+                WHERE c.table_schema IN ('{schema_filter}')
+                GROUP BY c.table_catalog, c.table_schema, c.table_name
+                HAVING COUNT_IF(q.column_name IS NULL) = 0
+            """),  # noqa: S608 - schema names are operator-supplied config, not user input
+        ).fetchall()
+
+    return {(r[0], r[1], r[2]) for r in rows}
+
+
+@task(name="count-unprocessed-total", cache_policy=NO_CACHE)
+def count_unprocessed_total() -> int:
+    """
+    How many queue rows are waiting to be predicted, across all tables.
+
+    Used to decide whether "nothing new to profile" also means "nothing to do".
+    It does not: an earlier run may have queued rows the model service was too
+    broken to predict, and those must still be drained. Tolerates a missing queue
+    table so a first run on an empty schema does not fail here.
+    """
+    engine = get_trino_engine()
+
+    with engine.connect() as conn:
+        queue_exists = conn.execute(
+            text("""
+                SELECT COUNT(*) FROM iceberg.information_schema.tables
+                WHERE table_schema = 'predictions' AND table_name = 'queue'
+            """),
+        ).scalar()
+        if not queue_exists:
+            return 0
+
+        return (
+            conn.execute(
+                text("SELECT COUNT(*) FROM iceberg.predictions.queue WHERE processed = FALSE"),
+            ).scalar()
+            or 0
+        )
+
+
 @task(name="claim-key-changes", cache_policy=NO_CACHE)
 def claim_key_changes(run_id: str) -> list[TableRef]:
-    """Claim the tables the change detector flagged for the pk/fk track."""
-    with get_trino_engine().begin() as conn:
-        return claim_pending_changes(conn, TRACK_KEYS, run_id)
+    """
+    Claim the tables the change detector flagged for the pk/fk track.
+
+    Retried on commit conflicts: all three tracks are woken by the same event and
+    claim the same rows, so on iceberg two of the three lose the commit race.
+    """
+    return with_commit_retry(
+        get_trino_engine(),
+        lambda conn: claim_pending_changes(conn, TRACK_KEYS, run_id),
+    )
 
 
 @task(name="close-key-changes", cache_policy=NO_CACHE)
 def close_key_changes(run_id: str, *, succeeded: bool) -> int:
     """Complete the claim on success, release it on failure so the next run retries."""
-    with get_trino_engine().begin() as conn:
+
+    def close(conn: Connection) -> int:
         if succeeded:
             return complete_pending_changes(conn, TRACK_KEYS, run_id)
         return release_pending_changes(conn, TRACK_KEYS, run_id)
 
+    return with_commit_retry(get_trino_engine(), close)
 
-def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
+
+def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> tuple[int, list[str]]:
     """
-    Predict unprocessed queue rows and return how many predictions were made.
+    Predict unprocessed queue rows and return how many predictions were made,
+    together with the distinct reasons any calls failed.
 
     With ``drain_queue`` the loop keeps going until the backlog is empty. It stops
     early when a batch fails to reduce the unprocessed count - rows whose model call
@@ -948,6 +1274,7 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
     """
     predictions_made = 0
     previous_unprocessed = None
+    failure_reasons: set[str] = set()
 
     while True:
         queue_stats = check_queue_status()
@@ -959,8 +1286,9 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
 
         if previous_unprocessed is not None and unprocessed >= previous_unprocessed:
             print(
-                f"Stopping: {unprocessed} rows still unprocessed after a full batch "
-                "(their model calls are failing). Check the model service.",
+                f"Stopping: {unprocessed} rows still unprocessed after a full batch, "
+                f"because their model calls are failing.\n"
+                f"{diagnose(failure_reasons, MODEL_API_URL)}",
             )
             break
         previous_unprocessed = unprocessed
@@ -971,7 +1299,8 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
         if rows.empty:
             break
 
-        predictions = predict_batch(rows)
+        predictions, batch_failures = predict_batch(rows)
+        failure_reasons.update(batch_failures)
         store_predictions_to_trino(predictions)
         predictions_made += len(predictions)
         print(f"Processed {len(predictions)} predicts in {round(time.time() - start_time, 1)}s")
@@ -979,7 +1308,7 @@ def _drain_queue(prediction_batch_size: int, drain_queue: bool) -> int:
         if not drain_queue:
             break
 
-    return predictions_made
+    return predictions_made, sorted(failure_reasons)
 
 
 @flow(name="key-prediction-pipeline")
@@ -1008,6 +1337,7 @@ def feature_engineering_pipeline(
         target_schemas = ["new_predict_data"]
 
     only_tables: list[TableRef] | None = None
+    skip_tables: set[tuple[str, str, str]] | None = None
     run_id = str(flow_run.get_id())
 
     if use_pending_changes:
@@ -1019,30 +1349,51 @@ def feature_engineering_pipeline(
             print("No pending changes to process - nothing to do.")
             return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0, "tables": 0}
         print(f"Claimed {len(only_tables)} changed tables")
+    else:
+        # Full-scan mode: don't re-profile tables whose columns are all queued
+        # already. The queue dedup would discard those rows anyway, so the
+        # COUNT(DISTINCT) per column would be paid for nothing.
+        print("Step 0: Checking which tables are already fully queued...")
+        skip_tables = get_fully_queued_tables(target_schemas)
+        print(f"{len(skip_tables)} tables are fully queued already")
 
     succeeded = False
     try:
-        # Step 1: Extract features into duckdb.staging.stg_column_features
+        # Step 1: Extract features into iceberg.staging.stg_column_features
         print("Step 1: Extracting features from information_schema...")
         rows_written = extract_features(
             target_schemas=target_schemas,
             batch_size=batch_size,
             only_tables=only_tables,
+            skip_tables=skip_tables,
         )
 
-        if rows_written == 0:
+        rows_inserted = 0
+        if rows_written:
+            # Step 2: Populate the prediction queue
+            print("Step 2: Populating prediction queue...")
+            rows_inserted = populate_prediction_queue(requeue_tables=only_tables)
+        elif use_pending_changes:
             print("No features extracted - stopping pipeline.")
             # Nothing to predict, but the claim is genuinely handled: the flagged
             # tables are unreadable or gone, so retrying them would loop forever.
             succeeded = True
             return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0}
-
-        # Step 2: Populate the prediction queue
-        print("Step 2: Populating prediction queue...")
-        rows_inserted = populate_prediction_queue(requeue_tables=only_tables)
+        else:
+            # Everything was skipped, which is the healthy steady state of a full
+            # run. It does NOT mean there is nothing to do: an earlier run may have
+            # queued rows that the model service was too broken to predict, and
+            # those still need draining. Returning here would strand them until a
+            # table happened to change.
+            backlog = count_unprocessed_total()
+            if backlog == 0:
+                print("Nothing new to profile and no backlog - nothing to do.")
+                succeeded = True
+                return {"rows_written": 0, "rows_queued": 0, "predictions_made": 0}
+            print(f"Nothing new to profile; draining {backlog} unprocessed rows.")
 
         # Step 3: Predict unprocessed rows and store the results.
-        predictions_made = _drain_queue(prediction_batch_size, drain_queue)
+        predictions_made, failure_reasons = _drain_queue(prediction_batch_size, drain_queue)
 
         # Step 4: A run only counts as done once the claimed tables actually have
         # predictions. Without this check a run whose every model call returned an
@@ -1051,10 +1402,16 @@ def feature_engineering_pipeline(
         if use_pending_changes:
             leftover = count_unprocessed_for_tables(only_tables)
             if leftover:
+                # Lead with the cause: retriggering is pointless until it is fixed,
+                # and the row count alone has sent people looking at the queue.
                 msg = (
-                    f"{leftover} queue rows for the claimed tables are still "
-                    f"unpredicted (model calls failing). Releasing the changes so the "
-                    f"next detection pass retries them."
+                    f"Nothing could be predicted - {leftover} queue "
+                    f"{'row' if leftover == 1 else 'rows'} for the claimed tables are "
+                    f"still unpredicted.\n"
+                    f"{diagnose(failure_reasons, MODEL_API_URL)}\n"
+                    f"  Note:  retriggering this flow changes nothing until the above is "
+                    f"fixed. The claimed changes are released, so the next detection pass "
+                    f"picks these tables up again automatically."
                 )
                 print(msg)
                 raise RuntimeError(msg)

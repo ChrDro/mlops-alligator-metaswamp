@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Column-name tokens that mark free-form prose. Matched as a lowercase SUBSTRING of the",
+    "column name, so 'kommentar' also catches 'bemerkung_kunde' style variants via its own",
+    "entry and 'kommentar_2'. A match forces is_this_col_violating_1nf to 0 for that column;",
+    "the column stays in every other statistic. See TASK_3_PLAN.md Phase 0.5.",
+    "",
+    "Deliberately NOT included:",
+    "- Short generic tokens ('text', 'info', 'version'): as substrings they would also hit",
+    "  context_text, info_id and version_number.",
+    "- Audit and soft-delete columns (created_at, updated_at, modified_by, is_deleted,",
+    "  active, import_id, batch_id): they never trip the list detector and violate neither",
+    "  2NF nor 3NF. They become relevant only for the column-pair features, where a",
+    "  single-batch created_at fabricates dependencies to everything."
+  ],
+  "freetext_name_tokens": [
+    "bemerkung",
+    "kommentar",
+    "comment",
+    "beschreibung",
+    "description",
+    "freitext",
+    "freetext",
+    "memo",
+    "notiz",
+    "note",
+    "zusatzinfo",
+    "feedback",
+    "review"
+  ]
+}

@@ -11,7 +11,7 @@
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -55,7 +55,7 @@
       "id": 1,
       "type": "stat",
       "title": "F1 (current)",
-      "description": "Latest live-window F1. Empty until the first classification window fills - the service needs classification.window_size labelled events with both classes present.",
+      "description": "Latest live-window F1. Empty until the first classification window fills - the service needs classification.window_size labelled events with both classes present. CAUTION: this replays the labelled holdout through the live model, and the key models are refit on every labelled row before being registered - so these rows were in the model's own training set. Read it as a regression canary (a drop means something broke), not as generalization quality. The honest number is the cross-validated one in the 'Offline F1 of the served version' panel below.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -326,7 +326,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "F1-Score (current vs. reference)",
-      "description": "Live window against the baseline. The reference is a flat dashed line - it is scored once at service startup from a fixed dataset, so it does not move. Sustained separation below it means the live data has moved away from what the model was validated on.",
+      "description": "Live window against the baseline. The reference is a flat dashed line - it is scored once at service startup from a fixed dataset, so it does not move. Sustained separation below it means the live data has moved away from what the model was validated on. CAUTION: this replays the labelled holdout through the live model, and the key models are refit on every labelled row before being registered - so these rows were in the model's own training set. Read it as a regression canary (a drop means something broke), not as generalization quality. The honest number is the cross-validated one in the 'Offline F1 of the served version' panel below.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -683,6 +683,74 @@
             ]
           }
         ]
+      }
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "Offline F1 of the served version (honest, per model)",
+      "description": "Cross-validated F1 of the model version each alias currently resolves to, read from its MLflow run by the model service at startup. Unlike the panels above, no row here was scored by a model that had seen it.\n\nThe estimator in each label matters. cv_mean_5fold_grouped is a 5-fold StratifiedGroupKFold mean over all labelled rows, grouped by database. single_fold_holdout is the older one-fold score, whose fold-to-fold spread was measured at up to 0.21 F1 - treat those as indicative only until those models are migrated.\n\nOnly refreshes when model-service restarts, which is also what makes a retrained model take effect (its models are pinned by lru_cache).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "model_offline_f1",
+          "instant": true,
+          "legendFormat": "{{model}} - {{estimator}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
+            ]
+          }
+        },
+        "overrides": []
       }
     }
   ]

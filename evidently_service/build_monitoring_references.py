@@ -43,6 +43,14 @@ import requests
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The fk model's cross-table features are computed, not stored, so this script needs the
+# same module the training script used - see add_derived_features.
+sys.path.insert(0, str(REPO_ROOT))
+
+from src.cross_table_features import add_cross_table_features  # noqa: E402
+
+
 HERE = Path(__file__).resolve().parent
 
 # One entry per monitored model. The track name is what appears as dataset_name on
@@ -54,19 +62,18 @@ HERE = Path(__file__).resolve().parent
 # no 'char'/'timestamp'; normalform is the other way round. Encoding one model's
 # data with the other's vocabulary silently produces the wrong feature set.
 KEY_COLUMN_TYPES = ["bigint", "boolean", "date", "decimal", "double", "integer", "varchar"]
-NF_COLUMN_TYPES = [
-    "bigint",
-    "char",
-    "date",
-    "decimal",
-    "double",
-    "integer",
-    "timestamp",
-    "varchar",
-]
+
+# Imported rather than repeated. This file was the fourth place the normalform vocabulary
+# lived, and it had drifted: 'char', 'decimal' and 'timestamp' do not occur in the training
+# data at all. Phase 2 replaced that data wholesale - see E3 in TASK_3_PLAN.md.
+sys.path.insert(0, str(REPO_ROOT / "prefect"))
+from nf_features import COLUMN_TYPE_CATEGORIES  # noqa: E402 - path set on the line above
+
+
+NF_COLUMN_TYPES = list(COLUMN_TYPE_CATEGORIES)
 
 KEY_TRAINING_DATA = "data/summary_output_task_1_2_training.csv"
-NF_TRAINING_DATA = "data/nf_test_analyse.csv"
+NF_TRAINING_DATA = "data/nf_training.csv"
 
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "pk_columns": {
@@ -150,6 +157,23 @@ def assign_split(df: pd.DataFrame, reference_pct: int) -> pd.Series:
         ["reference" if b < reference_pct else "holdout" for b in buckets],
         index=df.index,
     )
+
+
+def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add features the training scripts compute rather than read from the CSV.
+
+    The fk model's seven cross-table features are derived from the identity columns at
+    training time (src/cross_table_features.py), so they are absent from the labelled CSV
+    and have to be recomputed here or `build_one` would refuse the fk track outright.
+
+    Scoped by `database`, matching the training script. The serving pipeline scopes by
+    Trino schema instead and the model is trained to tolerate both widths, but a baseline
+    should describe the width the labels were collected in.
+
+    The other tracks ignore the extra columns: each one selects features by name from its
+    Pydantic model.
+    """
+    return add_cross_table_features(df) if "database" in df.columns else df
 
 
 def encode_column_type(df: pd.DataFrame, categories: list[str]) -> pd.DataFrame:
@@ -386,7 +410,7 @@ def main() -> int:
         # trained on the same column_type vocabulary, so grouping by source is
         # enough here - the assertion inside encode_column_type catches it if not.
         categories = MODEL_SPECS[source_tracks[0]]["column_types"]
-        encoded = encode_column_type(df, categories)
+        encoded = encode_column_type(add_derived_features(df), categories)
         split = assign_split(encoded, args.reference_pct)
         logging.info(
             f"  split by identity hash: {(split == 'reference').sum()} reference / "
