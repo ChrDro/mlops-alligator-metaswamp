@@ -149,6 +149,11 @@ activemq-data/
 
 # Environments
 .env
+# Every .env sidecar - .env.bak, .env.local, .env.old. A backup of .env holds the
+# same secrets as .env, so the pattern is deliberately wider than the one file that
+# prompted it. .env.example is the only one meant to be shared and is re-included.
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -245,3 +250,10 @@ trino-iceberg/data/*.db.wal
 # trino-iceberg/etc/ is committed and reads its secrets from .env instead.
 trino-iceberg/etc/keystore.jks
 trino-iceberg/etc/trino/password.db
+# Derived from that keystore by scripts/setup_stack.sh: the exported public
+# certificate and the JDBC client truststore built from it. Both are rewritten
+# whenever the keystore is regenerated, and the truststore is opened with
+# TRINO_KEYSTORE_PASSWORD from .env, so they are per-machine artifacts like the two
+# above rather than shared config.
+trino-iceberg/etc/trino-cert.crt
+trino-iceberg/etc/trino-truststore.jks

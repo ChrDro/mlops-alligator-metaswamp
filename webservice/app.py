@@ -8,6 +8,8 @@ This module owns the public API surface used in the monitoring tutorial:
 """
 
 import traceback
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 
 import pandas as pd
@@ -21,19 +23,52 @@ from data_model_pk import PrimaryKey, PrimaryKeyPrediction
 from data_model_subject_area import SubjectArea, SubjectAreaPrediction
 from event_publisher import EventPublishError, publish_new_data_event
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
-from metrics import record_error
+from metrics import record_error, record_offline_quality
 from monitoring_client import forward_to_monitoring
 from predict import (
     MODEL_ALIAS,
     predict,
     predict_domain,
     predict_with_probabilities,
+    read_offline_quality,
     resolve_model_versions,
 )
 from prometheus_fastapi_instrumentator import Instrumentator
 
 
-app = FastAPI()
+def publish_offline_quality() -> None:
+    """Export the offline F1 of each served model version as a Prometheus gauge.
+
+    Startup is the right moment and the only one needed: the served model is pinned by
+    lru_cache until the process restarts, so its offline score cannot change while the
+    process lives. Restarting after a retrain - already the documented step, because the
+    cache would otherwise keep serving the old model - is what refreshes this too.
+
+    Failures are swallowed deliberately. This is provenance for a dashboard, not part of
+    serving, and MLflow being briefly unreachable must not stop the container from coming
+    up and answering with models it may already have cached.
+    """
+    try:
+        for model_name, quality in read_offline_quality().items():
+            record_offline_quality(
+                model=model_name,
+                f1=quality["f1"],
+                estimator=quality["estimator"],
+                version=quality["version"],
+                f1_std=quality["f1_std"],
+            )
+    except Exception:  # noqa: BLE001 - a metrics export may never block startup
+        traceback.print_exc()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Startup/shutdown hook. `on_event` is deprecated in this FastAPI version."""
+    publish_offline_quality()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Expose default FastAPI request metrics on /metrics for Prometheus.
 Instrumentator().instrument(app).expose(app)

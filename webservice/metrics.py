@@ -10,7 +10,9 @@ prometheus_client is pulled in transitively by prometheus-fastapi-instrumentator
 so no extra dependency is required.
 """
 
-from prometheus_client import Counter, Histogram
+import contextlib
+
+from prometheus_client import Counter, Gauge, Histogram
 
 
 # Count of predictions returned, split by model and the class it predicted.
@@ -42,6 +44,60 @@ PREDICTION_DURATION = Histogram(
     "Time spent inside the model prediction call.",
     ["model"],
 )
+
+
+# The offline F1 of the model version currently served, read from its MLflow run.
+#
+# This exists because the only F1 Grafana had came from the Prefect backtest, and that
+# one is in-sample: the key models are refit on every labelled row, so the backtest
+# replays rows the model trained on and reads far too high (~0.99 accuracy for fk_model
+# against an honest 0.81). A number that looks like quality but is not gets read as
+# quality, so the honest one is published next to it.
+#
+# The `estimator` label says how it was measured, which is not cosmetic: fk_model and
+# composite_pk_model report a 5-fold grouped cross-validation mean, while the models
+# that have not been migrated yet still report a single-fold holdout score whose
+# fold-to-fold spread was measured at up to 0.21 F1. Same gauge, very different
+# trustworthiness, so the panel can show which is which.
+MODEL_OFFLINE_F1 = Gauge(
+    "model_offline_f1",
+    "Offline F1 of the served model version, from its MLflow run. See estimator label.",
+    ["model", "estimator"],
+)
+
+# Spread of the offline estimate. Only set for models evaluated by cross-validation -
+# a single holdout has no spread to report, which is precisely its weakness.
+MODEL_OFFLINE_F1_STD = Gauge(
+    "model_offline_f1_std",
+    "Standard deviation of the served model's per-fold offline F1.",
+    ["model"],
+)
+
+# Which registry version each alias currently resolves to. Lets a quality change on the
+# dashboard be lined up against a deployment instead of guessed at.
+MODEL_SERVED_VERSION = Gauge(
+    "model_served_version",
+    "Registry version number the serving alias currently points at.",
+    ["model"],
+)
+
+
+def record_offline_quality(
+    model: str,
+    f1: float,
+    estimator: str,
+    version: str | None = None,
+    f1_std: float | None = None,
+) -> None:
+    """Publish one served model's offline quality, as logged by its training run."""
+    MODEL_OFFLINE_F1.labels(model=model, estimator=estimator).set(f1)
+    if f1_std is not None:
+        MODEL_OFFLINE_F1_STD.labels(model=model).set(f1_std)
+    if version is not None:
+        # Registry versions are numeric strings today; a non-numeric one is not worth
+        # failing a metrics export over.
+        with contextlib.suppress(TypeError, ValueError):
+            MODEL_SERVED_VERSION.labels(model=model).set(float(version))
 
 
 def record_success(
