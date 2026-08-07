@@ -178,6 +178,54 @@ def test_predict_requires_a_tracking_uri(monkeypatch):
         predict_module.predict("pk_model", pd.DataFrame([{"a": 1.0}]))
 
 
+# --- predict_with_probabilities ------------------------------------------------
+
+
+def test_predict_with_probabilities_returns_the_full_distribution(monkeypatch, tracking_uri):
+    """The normalform table-level vote needs every class's probability, not just the max."""
+    model = FakePyFuncModel(["a"], prediction=3, probabilities=(0.10, 0.20, 0.15, 0.55))
+    monkeypatch.setattr(predict_module, "load_model", lambda _name: model)
+
+    prediction, probability, distribution = predict_module.predict_with_probabilities(
+        "denormalization_model",
+        pd.DataFrame([{"a": 1.0}]),
+    )
+
+    assert prediction == 3.0
+    assert probability == pytest.approx(0.55)
+    assert distribution == {
+        "0": pytest.approx(0.10),
+        "1": pytest.approx(0.20),
+        "2": pytest.approx(0.15),
+        "3": pytest.approx(0.55),
+    }
+
+
+def test_predict_with_probabilities_keys_by_label_not_position(monkeypatch, tracking_uri):
+    """
+    `classes_` need not be sorted ascending in general - keying by position instead
+    of by label would silently attach probabilities to the wrong class.
+    """
+    model = FakePyFuncModel(
+        ["a"],
+        prediction=2,
+        probabilities=(0.60, 0.30, 0.10),
+        classes=[2, 0, 1],
+    )
+    monkeypatch.setattr(predict_module, "load_model", lambda _name: model)
+
+    _prediction, _probability, distribution = predict_module.predict_with_probabilities(
+        "denormalization_model",
+        pd.DataFrame([{"a": 1.0}]),
+    )
+
+    assert distribution == {
+        "2": pytest.approx(0.60),
+        "0": pytest.approx(0.30),
+        "1": pytest.approx(0.10),
+    }
+
+
 # --- load_model ---------------------------------------------------------------
 
 

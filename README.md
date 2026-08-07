@@ -305,23 +305,34 @@ the datasets can be small and varied without any real records being stored.
 | File | Rows (columns) | Databases | Tables | Used by |
 | :--- | ---: | ---: | ---: | :--- |
 | `data/summary_output_task_1_2_training.csv` | 10,348 | 241 | 1,706 | Tasks 1 & 2 |
-| `data/nf_test_analyse.csv` | 13,822 | 503 | 1,560 | Task 3 |
+| `data/nf_training.csv` | 6,575 | 1 | 432 | Task 3 |
+| `data/nf_test_analyse.csv` | 13,822 | 503 | 1,560 | Task 3 (superseded) |
 | `data/raw_metadata.csv` | 3,009 | 54 | 466 | raw extract / EDA |
+
+`data/nf_training.csv` is not a hand-labelled extract like the others. It is *generated*:
+[`task_3/nf_recipes.py`](task_3/nf_recipes.py) materialises 432 tables in Iceberg whose
+normal form is known by construction, and [`nf_features.py`](prefect/nf_features.py)
+profiles them through the same code path that serves live predictions. A build ends with
+seven checks — among them that all 432 labels survive verification against the
+dependencies actually discovered, and that no single feature predicts the label better
+than a fixed threshold, which would mean the generator left a fingerprint.
 
 ### Class balance
 
 Keys are rare by construction (a table has one PK and many ordinary columns), so the
 targets are imbalanced — **accuracy is meaningless here; we track F1 and PR-AUC instead.**
 
-| Task 1 / 2 target | Positive rate | | Task 3 class | Share |
-| :--- | ---: | --- | :--- | ---: |
-| Single primary key | 12.0 % | | 0NF (violates 1NF) | 22.8 % |
-| Composite primary key | 8.7 % | | 1NF | 23.7 % |
-| Single foreign key | 16.5 % | | 2NF | 22.1 % |
-| Composite foreign key | 2.1 % | | 3NF | 31.4 % |
+| Task 1 / 2 target | Positive rate | | Task 3 class | Tables | Rows |
+| :--- | ---: | --- | :--- | ---: | ---: |
+| Single primary key | 12.0 % | | 0NF (violates 1NF) | 22.9 % | 20.1 % |
+| Composite primary key | 8.7 % | | 1NF | 22.0 % | 24.2 % |
+| Single foreign key | 16.5 % | | 2NF | 26.6 % | 28.5 % |
+| Composite foreign key | 2.1 % | | 3NF | 28.5 % | 27.2 % |
 
-Task 3 data is synthetically generated to keep the four classes balanced — a luxury the
-key tasks do not have.
+Task 3 data is generated to keep the four classes balanced — a luxury the key tasks do not
+have. Both units are shown because they differ: the label is per table, but the model
+predicts per column, so a wide table contributes more rows than a narrow one. The
+**table** column is the honest balance.
 
 <details>
 <summary><b>Source databases</b> (click to expand)</summary>
@@ -427,18 +438,170 @@ Identifier columns (`database`, `schema`, `table_name`, `column_name`) and raw
 The cross-table features are *derived from* the identifiers rather than using them
 directly, which is why they are computed at runtime instead of stored in the CSV.
 
-> **Note on Task 3 features.** `is_this_col_violating_1nf`, `is_composite_key_part` and
-> `is_this_col_partial_dependency` are close to the *definitions* of 1NF/2NF, so the model
-> partly learns from labels derived the same way the target is. `target_normal_form` and
-> `table_contains_1nf_violation` are dropped from the features to avoid direct leakage.
-> This is a known limitation we call out rather than hide.
+### Task 3: the feature set was rebuilt, not extended
+
+The previous Task 3 set had 29 features and a leakage problem it could not be patched out
+of: `is_this_col_violating_1nf`, `is_composite_key_part` and
+`is_this_col_partial_dependency` were hand-labelled *alongside* the target, so the model
+partly read the answer off its own input. Those three plus their table-level aggregates
+carried 90.6 % of the gain importance; without them the score fell to **0.7117**, and that
+was the honest baseline.
+
+The rebuilt set removes the cause rather than the symptom. Every feature is now derived
+from data the profiler discovers itself:
+
+- **Atomicity** is measured — separator density, token counts, the share of values that
+  look like a packed list — instead of asserted by a `is_this_col_violating_1nf` flag.
+- **Keys** come from a level-wise unique-column-combination search up to size 3, ranked by
+  a birthday estimate. Nobody declares the primary key.
+- **Dependencies** come from `count(DISTINCT …)` comparisons over column pairs, then get
+  classified as partial or transitive by where the determinant sits relative to the
+  discovered key.
+
+`nf_features.py` is the single source of that contract: the training script's `X`, the
+Pydantic request schema, the Prefect pipeline payload and the MLflow signature all read
+`FEATURE_COLUMNS` from it, and a test fails if any of them drift apart. The four
+`column_type_*` dummies are appended by the one-hot encoder — `bigint` is the reference
+category and has no column of its own.
+
+**Three feature groups are unusual enough to explain.**
+
+*Cost budgets are features.* A profiler that must answer within a budget is guaranteed to
+give partial answers on large tables. Rather than hide that, the budgets report themselves:
+`table_sampled`, `table_sample_ratio`, `table_search_truncated`, `table_pair_coverage` and
+`table_ucc_search_coverage` tell the model how completely the table was actually examined,
+so it can discount a `table_fd_count` of 0 that means "none found" differently from one
+that means "we stopped looking".
+
+*Both a strict and a relaxed dependency count.* The textbook definition of a partial
+dependency also requires the *dependent* to be non-prime. That is correct when the keys are
+known and useless when they are discovered: a near-unique column forms a valid UCC with
+almost every other column, so the union of all UCCs covers the table and everything comes
+out prime. Measured on the generated set, the strict filter drove both counts to zero for
+every single table. Both variants are therefore reported and the model decides which
+carries signal.
+
+*Approximate dependencies.* `table_near_fd_*` and `table_near_ucc_count` hold at a strength
+threshold rather than exactly, which is what survives sampling and dirty data.
+`table_has_near_key_but_no_key` is the specific "there is almost a key here" signal.
+
+> **What is still a limitation.** 3NF and 0NF tables have near-identical medians on every
+> dependency feature, so the whole 0NF/3NF boundary rests on the atomicity detector. Its
+> blind spot is a repeating group with obfuscated column names — two tables in the
+> generated set are labelled 0NF with no violation any feature can see. See
+> [TASK_3_PLAN.md](TASK_3_PLAN.md).
 
 <details>
-<summary><b>Full metadata &amp; statistics dictionary</b> (click to expand)</summary>
+<summary><b>Task 3 feature dictionary — all 47</b> (click to expand)</summary>
+
+Source of truth: `FEATURE_COLUMNS` and `COLUMN_TYPE_DUMMIES` in
+[`prefect/nf_features.py`](prefect/nf_features.py). Listed in the order the model sees
+them. `database`, `schema`, `table_name`, `column_name` and `column_type` are identity
+columns and never features.
+
+**Per column — shape and name (8)**
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `ordinal_position` | Position of the column in the table (1-based) | int |
+| `col_unique_ratio` | Distinct values ÷ rows | float |
+| `col_null_ratio` | NULLs ÷ rows | float |
+| `col_list_like_ratio` | Share of values that look like a packed list | float |
+| `col_mean_token_length` | Mean length of the tokens a value splits into | float |
+| `col_mean_token_count` | Mean number of tokens per value | float |
+| `col_separator_density` | Separator characters per character | float |
+| `col_is_freetext_name` | The column's *name* suggests prose (`comment`, `description`, …) | 0/1 |
+
+**Per column — position in the discovered structure (6)**
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `col_violates_1nf` | Measured non-atomic: list-like beyond threshold and not prose | 0/1 |
+| `col_in_repeating_group` | Name belongs to a numbered family (`phone1`, `phone2`, …) | 0/1 |
+| `col_in_candidate_key` | Part of the chosen minimal key | 0/1 |
+| `col_is_prime` | Prime attribute (part of the primary key) | 0/1 |
+| `col_determines_count` | Discovered dependencies where this column is the determinant | int |
+| `col_depends_on_count` | Discovered dependencies where this column is the dependent | int |
+
+**Per table — how completely it was examined (6)**
+
+These describe the *measurement*, not the table. See "Cost budgets are features" above.
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `table_row_count` | Rows in the table | int |
+| `table_sampled` | Profiling used a deterministic row sample | 0/1 |
+| `table_sample_ratio` | Sampled rows ÷ total rows (1.0 when unsampled) | float |
+| `table_search_truncated` | A budget cut the search short | 0/1 |
+| `table_pair_coverage` | Share of column pairs actually tested for dependencies | float |
+| `table_ucc_search_coverage` | Share of key candidates actually tested | float |
+
+**Per table — atomicity (5)**
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `table_column_count` | Columns in the table | int |
+| `table_max_list_like_ratio` | Highest `col_list_like_ratio` in the table | float |
+| `table_ratio_list_like_columns` | Share of columns that look list-like | float |
+| `table_repeating_group_ratio` | Share of columns in a numbered family | float |
+| `table_constant_column_ratio` | Share of columns with exactly one distinct value | float |
+
+**Per table — keys (5)**
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `table_has_no_ucc_le3` | No unique column combination found up to size 3 | 0/1 |
+| `table_candidate_key_count` | Unique column combinations found | int |
+| `table_key_size` | Columns in the chosen primary key | int |
+| `table_composite_key_count` | Candidate keys with more than one column | int |
+| `table_prime_ratio` | Prime attributes ÷ columns | float |
+
+**Per table — functional dependencies (8)**
+
+`partial` = determinant is a proper part of a composite key (breaks 2NF) ·
+`transitive` = determinant sits outside every key (breaks 3NF) · `strict` = additionally
+requires a non-prime dependent, the textbook definition.
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `table_fd_count` | Dependencies discovered | int |
+| `table_fd_ratio` | …÷ the number of pairs tested | float |
+| `table_partial_fd_count` | Of those, partial | int |
+| `table_partial_fd_ratio` | …as a share | float |
+| `table_transitive_fd_count` | Of those, transitive | int |
+| `table_transitive_fd_ratio` | …as a share | float |
+| `table_strict_partial_fd_count` | Partial under the strict definition | int |
+| `table_strict_transitive_fd_count` | Transitive under the strict definition | int |
+
+**Per table — approximate structure (5)**
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `table_near_fd_count` | Dependencies holding for ≥ 95 % of rows | int |
+| `table_near_fd_ratio` | …as a share of pairs tested | float |
+| `table_max_near_fd_strength` | Strength of the strongest near-dependency | float |
+| `table_near_ucc_count` | Column combinations that are nearly unique | int |
+| `table_has_near_key_but_no_key` | A near-key exists but no exact key was found | 0/1 |
+
+**Data type (4)**
+
+One-hot over the five types that occur in the data. `bigint` is the reference category and
+therefore has no column — it is 89 % of all rows, so encoding it too would be collinear.
+
+| Feature | Type |
+| :--- | :--- |
+| `column_type_date`, `column_type_double`, `column_type_integer`, `column_type_varchar` | bool |
+
+</details>
+
+<details>
+<summary><b>Tasks 1 &amp; 2 metadata &amp; statistics dictionary</b> (click to expand)</summary>
 
 `T1` = single/composite primary key · `T2` = single/composite foreign key ·
-`T3` = normal form · `identifier` = used for grouping only · `—` = present in the data
-but not used as a training feature.
+`T3-legacy` = a column of `data/nf_test_analyse.csv`, the hand-labelled dataset the
+**previous** Task 3 model used; the rebuilt Task 3 uses none of them (see the dictionary
+above) · `identifier` = used for grouping only · `—` = present in the data but not used as
+a training feature.
 
 | Variable | Description | Example | Used in |
 | :--- | :--- | :--- | :--- |
@@ -449,57 +612,57 @@ but not used as a training feature.
 | `column_type` | Raw data type (one-hot encoded for training) | "int" | — |
 | `min_value` | Minimum value of the column | "18" | — |
 | `max_value` | Maximum value of the column | "44" | — |
-| `number_unique_values` | Count of distinct values in the column | "23" | T1, T2, T3 |
-| `count` | Number of rows in the table | "25" | T1, T2, T3 |
-| `null_count` | Raw count of null values in the column | "0" | T3 |
-| `null_ratio` | `null_count / count` | "0.0" | T3 |
-| `is_unique` | Column values are fully unique | 0 or 1 | T1, T2, T3 |
-| `ordinal_position` | Position of the column in the table (1-based) | "2" | T1, T2, T3 |
-| `unique_ratio` | `number_unique_values / count` | "0.177" | T1, T2, T3 |
-| `is_non_null` | Column has no null values | 0 or 1 | T3 |
-| `is_first_column` | Column is the first in the table | 0 or 1 | T1, T2, T3 |
-| `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | T1, T2, T3 |
-| `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | T1, T2, T3 |
-| `table_column_count` | Total columns in the table | "9" | T1, T2, T3 |
-| `table_unique_column_count` | Number of fully unique columns in the table | "0" | T1, T2, T3 |
-| `table_row_count` | Number of rows in the table | "768" | T1, T2, T3 |
-| `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | T3 |
-| `table_has_unique_column` | Table has at least one unique column | 0 or 1 | T1, T2, T3 |
-| `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | T1, T2, T3 |
-| `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | T1, T2, T3 |
-| `table_id_named_column_count` | Number of ID-named columns in the table | "0" | T1, T2, T3 |
-| `table_non_null_column_count` | Number of non-null columns in the table | "9" | T1, T2, T3 |
-| `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | T1, T2, T3 |
-| `table_integer_column_count` | Number of integer-typed columns in the table | "7" | T3 |
-| `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | T1, T2, T3 |
-| `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | T1, T2, T3 |
-| `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | T1, T2, T3 |
-| `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | T1, T2, T3 |
-| `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | T3 |
-| `name_ends_with_id` | Column name ends with "id" | 0 or 1 | T1, T2, T3 |
-| `name_contains_key` | Column name contains "key" | 0 or 1 | T3 |
-| `name_contains_table_name` | Column name contains the table name | 0 or 1 | T1, T2, T3 |
-| `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | T1, T2, T3 |
-| `name_length` | Length of the column name | "7" | T1, T2, T3 |
+| `number_unique_values` | Count of distinct values in the column | "23" | T1, T2 |
+| `count` | Number of rows in the table | "25" | T1, T2 |
+| `null_count` | Raw count of null values in the column | "0" | — (dropped, redundant) |
+| `null_ratio` | `null_count / count` | "0.0" | — (dropped, redundant) |
+| `is_unique` | Column values are fully unique | 0 or 1 | T1, T2 |
+| `ordinal_position` | Position of the column in the table (1-based) | "2" | T1, T2 |
+| `unique_ratio` | `number_unique_values / count` | "0.177" | T1, T2, T3-legacy |
+| `is_non_null` | Column has no null values | 0 or 1 | — (dropped, redundant) |
+| `is_first_column` | Column is the first in the table | 0 or 1 | T1, T2 |
+| `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | T1, T2, T3-legacy |
+| `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | T1, T2, T3-legacy |
+| `table_column_count` | Total columns in the table | "9" | T1, T2, T3-legacy |
+| `table_unique_column_count` | Number of fully unique columns in the table | "0" | T1, T2 |
+| `table_row_count` | Number of rows in the table | "768" | T1, T2, T3-legacy |
+| `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | — (dropped, redundant) |
+| `table_has_unique_column` | Table has at least one unique column | 0 or 1 | T1, T2 |
+| `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | T1, T2 |
+| `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | T1, T2, T3-legacy |
+| `table_id_named_column_count` | Number of ID-named columns in the table | "0" | T1, T2, T3-legacy |
+| `table_non_null_column_count` | Number of non-null columns in the table | "9" | T1, T2 |
+| `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | T1, T2, T3-legacy |
+| `table_integer_column_count` | Number of integer-typed columns in the table | "7" | T3-legacy |
+| `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | T1, T2, T3-legacy |
+| `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | T1, T2 |
+| `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | T1, T2 |
+| `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | T1, T2 |
+| `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | — (dropped, redundant) |
+| `name_ends_with_id` | Column name ends with "id" | 0 or 1 | T1, T2, T3-legacy |
+| `name_contains_key` | Column name contains "key" | 0 or 1 | — (dropped, redundant) |
+| `name_contains_table_name` | Column name contains the table name | 0 or 1 | T1, T2 |
+| `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | T1, T2 |
+| `name_length` | Length of the column name | "7" | T1, T2, T3-legacy |
 | `column_type_boolean` | One-hot: boolean | 0 or 1 | T1, T2 |
-| `column_type_char` | One-hot: char | 0 or 1 | T3 |
-| `column_type_date` | One-hot: date | 0 or 1 | T1, T2, T3 |
-| `column_type_decimal` | One-hot: decimal | 0 or 1 | T1, T2, T3 |
-| `column_type_double` | One-hot: double | 0 or 1 | T1, T2, T3 |
-| `column_type_integer` | One-hot: integer | 0 or 1 | T1, T2, T3 |
-| `column_type_timestamp` | One-hot: timestamp | 0 or 1 | T3 |
-| `column_type_varchar` | One-hot: varchar | 0 or 1 | T1, T2, T3 |
-| `is_this_col_violating_1nf` | Column has non-atomic / multi-valued entries | 0 or 1 | T3 |
-| `is_composite_key_part` | Column is part of a composite primary key | 0 or 1 | T3 |
-| `is_this_col_partial_dependency` | Column partially depends on the composite PK | 0 or 1 | T3 |
-| `table_avg_unique_ratio` | Mean `unique_ratio` across the table's columns | "0.312" | T3 |
-| `table_avg_null_ratio` | Mean `null_ratio` across the table's columns | "0.05" | T3 |
-| `table_std_unique_ratio` | Std dev of `unique_ratio` across the table | "0.21" | T3 |
-| `table_ratio_of_pk_candidates` | Ratio of PK-candidate columns to total columns | "0.11" | T3 |
-| `table_has_composite_pk` | Table uses a composite primary key | 0 or 1 | T3 |
-| `table_ratio_composite_key_cols` | Ratio of composite-key columns to total | "0.22" | T3 |
-| `table_ratio_1nf_violations` | Ratio of 1NF-violating columns to total | "0.0" | T3 |
-| `table_has_partial_dependency` | Any column in the table is a partial dependency | 0 or 1 | T3 |
+| `column_type_char` | One-hot: char | 0 or 1 | T3-legacy |
+| `column_type_date` | One-hot: date | 0 or 1 | T1, T2, T3-legacy |
+| `column_type_decimal` | One-hot: decimal | 0 or 1 | T1, T2, T3-legacy |
+| `column_type_double` | One-hot: double | 0 or 1 | T1, T2, T3-legacy |
+| `column_type_integer` | One-hot: integer | 0 or 1 | T1, T2, T3-legacy |
+| `column_type_timestamp` | One-hot: timestamp | 0 or 1 | T3-legacy |
+| `column_type_varchar` | One-hot: varchar | 0 or 1 | T1, T2, T3-legacy |
+| `is_this_col_violating_1nf` | Column has non-atomic / multi-valued entries | 0 or 1 | T3-legacy |
+| `is_composite_key_part` | Column is part of a composite primary key | 0 or 1 | T3-legacy |
+| `is_this_col_partial_dependency` | Column partially depends on the composite PK | 0 or 1 | T3-legacy |
+| `table_avg_unique_ratio` | Mean `unique_ratio` across the table's columns | "0.312" | T3-legacy |
+| `table_avg_null_ratio` | Mean `null_ratio` across the table's columns | "0.05" | — (dropped, redundant) |
+| `table_std_unique_ratio` | Std dev of `unique_ratio` across the table | "0.21" | T3-legacy |
+| `table_ratio_of_pk_candidates` | Ratio of PK-candidate columns to total columns | "0.11" | T3-legacy |
+| `table_has_composite_pk` | Table uses a composite primary key | 0 or 1 | T3-legacy |
+| `table_ratio_composite_key_cols` | Ratio of composite-key columns to total | "0.22" | T3-legacy |
+| `table_ratio_1nf_violations` | Ratio of 1NF-violating columns to total | "0.0" | T3-legacy |
+| `table_has_partial_dependency` | Any column in the table is a partial dependency | 0 or 1 | T3-legacy |
 | `table_contains_1nf_violation` | Table has a 1NF violation | 0 or 1 | — (dropped, leakage guard) |
 | `pk_target` | Is the column a single primary key? | 0 or 1 | **target: T1** |
 | `composite_pk_target` | Is the column part of a composite PK? | 0 or 1 | **target: T1** |
@@ -518,10 +681,8 @@ The current pipeline covers standard scalar types. Future work should add types 
 
 ## Model & results
 
-Every task uses a **RandomForestClassifier** with `class_weight="balanced"` and otherwise
-default hyperparameters. The train/test split is **grouped by database** (`StratifiedGroupKFold`),
-so columns from one database never appear on both sides — otherwise the model memorises a
-naming convention and the test score lies.
+Task 1 and Task 2 both use a **RandomForestClassifier** with `class_weight="balanced"` and otherwise
+default hyperparameters. The train/test split is **grouped by database** (`StratifiedGroupKFold`).
 
 Example F1 scores from the registry:
 
@@ -531,8 +692,37 @@ Example F1 scores from the registry:
 | `composite_fk_model` | 1.000 | 0.811 |
 
 The high train F1 is an un-tuned RandomForest memorising the training set. Tuning it is a
-non-goal — the graded surface is the engineering. Instead, the plan is a CI **model-quality
-gate** that refuses to register a model whose test F1 falls below the current baseline.
+non-goal — the graded surface is the engineering. These two models have no CI quality gate
+yet; Task 3 below has one, and it is the pattern the key models should follow.
+
+### Task 3
+
+Four candidates are cross-validated and the best is registered: XGBoost and LightGBM, each
+plain and with a randomised search. The reported number is the mean over **five**
+`StratifiedGroupKFold` folds, not one split — with ~85 tables per holdout, a single draw
+swings several points.
+
+The grouping is by **recipe and matched pair**, joined with union-find, not by
+`table_name`. Grouping by table name alone looked reasonable and was wrong: the generated
+set contains matched pairs — the same schema once with a 0NF violation injected and once
+without — that carry different recipe ids and opposite labels. Under a table-name split all
+24 pairs straddled the boundary, so the model could see one half of a pair in training and
+be scored on the other. Linking recipe and pair leaves 327 groups and zero pairs spanning
+the split.
+
+| | Column F1 | Table accuracy |
+| :--- | ---: | ---: |
+| `denormalization_model` (XGBoost, randomised search) | 0.9823 ± 0.0182 | **0.9724 ± 0.0261** |
+
+Table accuracy is the headline, because the pipeline stores one normal form per table: in
+the column-level metric a 40-column table would otherwise count eight times as much as a
+five-column one.
+
+[`test/test_models/test_normalform_baseline.py`](test/test_models/test_normalform_baseline.py)
+holds this to a floor in CI. CI has neither MLflow nor Trino and so cannot retrain, but
+every training run writes `data/nf_baseline.json`, and a worse run fails the gate. The
+floors are the measured mean minus two standard deviations — the only way past them is
+lowering a number in a visible diff.
 
 ---
 

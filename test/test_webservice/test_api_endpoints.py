@@ -38,6 +38,10 @@ ROUTE_IDS = [route[0] for route in ROUTES]
 
 PREDICTED_CLASS = 1
 PREDICTED_PROBABILITY = 0.87
+# Only /predict_normalform calls predict_with_probabilities, but the fakes below are
+# shared across all five routes for symmetry with `fake_predict` - the content is
+# never asserted on the other four.
+PREDICTED_DISTRIBUTION = {"1": PREDICTED_PROBABILITY}
 
 
 class Recorder:
@@ -57,10 +61,15 @@ def api(monkeypatch):
         recorder.predict_calls.append((model_name, list(frame.columns)))
         return float(PREDICTED_CLASS), PREDICTED_PROBABILITY
 
+    def fake_predict_with_probabilities(model_name, frame):
+        recorder.predict_calls.append((model_name, list(frame.columns)))
+        return float(PREDICTED_CLASS), PREDICTED_PROBABILITY, PREDICTED_DISTRIBUTION
+
     def fake_forward(payload, track):
         recorder.monitoring_calls.append((track, payload))
 
     monkeypatch.setattr(app_module, "predict", fake_predict)
+    monkeypatch.setattr(app_module, "predict_with_probabilities", fake_predict_with_probabilities)
     monkeypatch.setattr(app_module, "forward_to_monitoring", fake_forward)
 
     with TestClient(app_module.app) as client:
@@ -155,6 +164,7 @@ def test_predict_route_maps_a_model_failure_to_400(
         raise ValueError(message)
 
     monkeypatch.setattr(app_module, "predict", failing_predict)
+    monkeypatch.setattr(app_module, "predict_with_probabilities", failing_predict)
     monkeypatch.setattr(app_module, "forward_to_monitoring", lambda *_args: None)
 
     with TestClient(app_module.app) as client:
@@ -199,7 +209,11 @@ def test_predict_route_normalises_every_prediction_shape(
     def fake_predict(_model_name_arg, _frame):
         return raw_prediction, PREDICTED_PROBABILITY
 
+    def fake_predict_with_probabilities(_model_name_arg, _frame):
+        return raw_prediction, PREDICTED_PROBABILITY, PREDICTED_DISTRIBUTION
+
     monkeypatch.setattr(app_module, "predict", fake_predict)
+    monkeypatch.setattr(app_module, "predict_with_probabilities", fake_predict_with_probabilities)
     monkeypatch.setattr(app_module, "forward_to_monitoring", lambda *_args: None)
 
     with TestClient(app_module.app) as client:

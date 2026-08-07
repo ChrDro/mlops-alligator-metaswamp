@@ -4,6 +4,7 @@ import os
 from functools import lru_cache
 
 import mlflow
+import numpy as np
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -226,10 +227,16 @@ def predict_domain(model_name: str, data: pd.DataFrame) -> tuple[str, float]:
     return str(prediction[0]), float(probabilities[0].max())
 
 
-def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
+def _predict_raw(model_name: str, data: pd.DataFrame) -> tuple[float, np.ndarray, list]:
+    """Shared prediction path: align, predict, and read off the raw probabilities.
+
+    Returns the predicted class, its full probability row, and `classes_` (the
+    label each position of that row belongs to) - callers that only need the top
+    class use `predict`; a caller that needs the whole distribution, because it
+    has to combine several predictions itself, uses `predict_with_probabilities`.
+    """
     _configure_tracking()
 
-    # Ensure data is a DataFrame and convert to proper dtypes
     if not isinstance(data, pd.DataFrame):
         msg_type_error_dataframe = f"Expected DataFrame, got {type(data)}"
         raise TypeError(msg_type_error_dataframe)
@@ -255,8 +262,33 @@ def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
     raw_sklearn_model = model._model_impl.get_raw_model()
     probabilities = raw_sklearn_model.predict_proba(model_input)
 
+    return float(prediction[0]), probabilities[0], list(raw_sklearn_model.classes_)
+
+
+def predict(model_name: str, data: pd.DataFrame) -> tuple[int, float]:
+    prediction, probabilities, _classes = _predict_raw(model_name, data)
+
     # Confidence = probability of the PREDICTED class. Since the models predict via
     # argmax, this is max(probabilities). Works for both binary (pk/fk/cpk/cfk) and
     # the multiclass normalform model. Previously this returned probabilities[0][1]
     # (hardcoded class index 1), which is meaningless for a >2-class model.
-    return float(prediction[0]), float(probabilities[0].max())
+    return prediction, float(probabilities.max())
+
+
+def predict_with_probabilities(
+    model_name: str, data: pd.DataFrame
+) -> tuple[int, float, dict[str, float]]:
+    """Like `predict`, but also returns the full per-class probability distribution.
+
+    For the normalform track: a table's normal form is decided by combining several
+    columns' predictions, and that combination should weigh a confident column more
+    than an unsure one - which needs the whole distribution, not just its max. Keyed
+    by class label (as a string, so it round-trips through JSON) rather than
+    positional, because `classes_` is not guaranteed to be `[0, 1, 2, 3]` in order for
+    every estimator - callers must not assume position i means class i.
+    """
+    prediction, probabilities, classes = _predict_raw(model_name, data)
+    distribution = {
+        str(label): float(prob) for label, prob in zip(classes, probabilities, strict=True)
+    }
+    return prediction, float(probabilities.max()), distribution

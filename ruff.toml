@@ -126,6 +126,7 @@ ignore = [
     "PLW0603",
     "C901",
     "PLR0917",
+    "SIM108", # i like if-else blocks
 
     # Rules the FORMATTER owns. Selecting these alongside `ruff-format` (the pre-commit
     # ruff-format hook) makes the two fight: e.g. COM812 adds a trailing comma, then the
