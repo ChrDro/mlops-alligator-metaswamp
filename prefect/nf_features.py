@@ -885,6 +885,163 @@ def find_near_uccs(
     return near
 
 
+MIN_PAIR_FD_SUPPORT = 10
+MAX_PAIR_FD_TRIPLES = 1500
+
+
+def pair_fd_candidates(profile: TableProfile) -> list[tuple[frozenset[str], str]]:
+    """
+    The ``(determinant pair, dependent)`` triples worth measuring, best-evidenced first.
+
+    Three prunes, all free - they run on numbers the pair matrix already holds:
+
+    * **Support.** ``rows - distinct(pair)`` is how often the determinant repeats; below
+      ``MIN_PAIR_FD_SUPPORT`` there is nothing for a dependency to hold *over*.
+    * **Single-explained.** ``{a, b} -> c`` restates ``a -> c`` whenever the single holds,
+      so those dependents are skipped. Judged on the raw single-attribute facts, before
+      any guard: a pair FD is not news just because its single was dropped as trivial.
+    * **Eligibility.** Prose and list columns cannot be determinant parts, and a constant
+      dependent is determined by everything (see ``find_dependencies``).
+    """
+    rows = profile.row_count
+    if not rows:
+        return []
+    names = [column.name for column in profile.columns]
+    eligible = key_eligible_columns(profile)
+    constants = constant_columns(profile)
+
+    explained: set[tuple[str, str]] = set()
+    for pair, both in profile.pair_distinct.items():
+        left, right = sorted(pair)
+        for determinant, dependent in ((left, right), (right, left)):
+            if both == profile.distinct.get(determinant):
+                explained.add((determinant, dependent))
+
+    candidates: list[tuple[frozenset[str], str]] = []
+    for pair, both in profile.pair_distinct.items():
+        if not pair <= eligible:
+            continue
+        if rows - both < MIN_PAIR_FD_SUPPORT:
+            continue
+        left, right = sorted(pair)
+        for dependent in names:
+            if dependent in pair or dependent in constants:
+                continue
+            if (left, dependent) in explained or (right, dependent) in explained:
+                continue
+            # Necessary conditions, free from counts already measured: the triple count
+            # is at least every projection's count, so ``distinct(a,b,c) == distinct(a,b)``
+            # is impossible whenever the dependent alone - or either sub-pair - already
+            # exceeds the determinant's count. This is what keeps a wide table's
+            # candidate list from being C(n,2) * (n-2) queries.
+            if profile.distinct.get(dependent, 0) > both:
+                continue
+            left_pair = profile.pair_distinct.get(frozenset({left, dependent}))
+            right_pair = profile.pair_distinct.get(frozenset({right, dependent}))
+            if (left_pair is not None and left_pair > both) or (
+                right_pair is not None and right_pair > both
+            ):
+                continue
+            candidates.append((pair, dependent))
+
+    candidates.sort(
+        key=lambda item: (
+            -(rows - profile.pair_distinct[item[0]]),
+            _positions(profile, item[0]),
+            _positions(profile, [item[1]]),
+        ),
+    )
+    return candidates
+
+
+def find_pair_dependencies(
+    conn: Connection,
+    qualified: str,
+    profile: TableProfile,
+    batch_size: int = 40,
+    search: dict | None = None,
+) -> list[tuple[frozenset[str], str]]:
+    """
+    Exact dependencies ``{a, b} -> c`` whose determinant is a column pair.
+
+    ``{a, b} -> c`` holds when ``distinct(a, b, c) == distinct(a, b)`` - the same test the
+    single search uses, one level up. The pair counts are already in the profile; only the
+    triple counts cost queries, measured on the same (possibly sampled) source as the pair
+    matrix so the two sides of the comparison come from identical rows. Sampling keeps its
+    one-sided error: a pair FD can be invented by a sample, never lost to one.
+
+    Args:
+        search: If given, filled with ``pair_candidates`` / ``pair_tested`` /
+            ``pair_truncated`` - "found nothing" and "stopped looking" must stay
+            distinguishable, exactly as with the UCC search.
+    """
+    if search is not None:
+        search.update({"pair_candidates": 0, "pair_tested": 0, "pair_truncated": False})
+
+    candidates = pair_fd_candidates(profile)
+    if search is not None:
+        search["pair_candidates"] = len(candidates)
+        search["pair_tested"] = min(len(candidates), MAX_PAIR_FD_TRIPLES)
+    if not candidates:
+        return []
+
+    if len(candidates) > MAX_PAIR_FD_TRIPLES:
+        if search is not None:
+            search["pair_truncated"] = True
+        print(
+            f"  {qualified}: pair-FD search capped at {MAX_PAIR_FD_TRIPLES} of "
+            f"{len(candidates)} candidates, highest support first",
+        )
+        candidates = candidates[:MAX_PAIR_FD_TRIPLES]
+
+    source = profile.source or qualified
+    triples = sorted({pair | {dependent} for pair, dependent in candidates}, key=sorted)
+    counts = count_distinct_combinations(conn, source, triples, batch_size, tolerate_errors=True)
+    if search is not None and len(counts) < len(triples):
+        search["pair_truncated"] = True
+        search["pair_tested"] -= sum(
+            1 for pair, dependent in candidates if (pair | {dependent}) not in counts
+        )
+
+    return [
+        (pair, dependent)
+        for pair, dependent in candidates
+        if counts.get(pair | {dependent}) == profile.pair_distinct[pair]
+    ]
+
+
+@dataclass(frozen=True)
+class PairDependencyClasses:
+    """Discovered pair-determinant dependencies split by what they would violate."""
+
+    partial: list[tuple[frozenset[str], str]]
+    transitive: list[tuple[frozenset[str], str]]
+
+
+def classify_pair_dependencies(
+    dependencies: Sequence[tuple[frozenset[str], str]],
+    uccs: Sequence[frozenset[str]],
+) -> PairDependencyClasses:
+    """
+    Where a pair determinant sits relative to the discovered keys.
+
+    * a proper subset of a candidate key -> **partial**, breaks 2NF
+    * containing no key and inside none -> **transitive**, breaks 3NF
+    * a superset of a key -> neither: a superkey determines everything, trivially
+
+    Judged against ALL discovered keys, not the top-ranked one - see the anykey variants
+    in ``build_features`` for why both judgements exist.
+    """
+    partial: list[tuple[frozenset[str], str]] = []
+    transitive: list[tuple[frozenset[str], str]] = []
+    for determinant, dependent in dependencies:
+        if any(determinant < key for key in uccs):
+            partial.append((determinant, dependent))
+        elif not any(key <= determinant for key in uccs):
+            transitive.append((determinant, dependent))
+    return PairDependencyClasses(partial=partial, transitive=transitive)
+
+
 def constant_columns(profile: TableProfile) -> set[str]:
     """
     Columns holding a single value across the whole table.
@@ -1012,6 +1169,23 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "table_max_near_fd_strength",
     "table_near_ucc_count",
     "table_has_near_key_but_no_key",
+    # The single-attribute counts above judge partial-vs-transitive against the TOP-RANKED
+    # key only (see classify_dependencies for the nf_018 measurement behind that). These
+    # judge against ALL discovered keys instead. Both are reported because each is wrong in
+    # a different direction - top-1 misread Willibald's kunde (GueltigBis sits in the
+    # third-ranked key, so its FD was counted transitive and the table came back 2NF
+    # instead of 1NF), while any-key inflates on tables with many accidental UCCs. Which
+    # judgement carries signal is the model's question, not this module's.
+    "table_partial_fd_count_anykey",
+    "table_transitive_fd_count_anykey",
+    # Pair-determinant dependencies - see MIN_PAIR_FD_SUPPORT for the Willibald
+    # measurement that forced these to exist. Classified against all keys: a top-1-only
+    # judgement makes no sense for pairs, since a single-column top key can never contain
+    # one.
+    "table_pair_fd_count",
+    "table_pair_partial_fd_count",
+    "table_pair_transitive_fd_count",
+    "table_pair_fd_search_coverage",
 )
 
 # Features the serving schema has to accept as float; everything else in FEATURE_COLUMNS is
@@ -1039,6 +1213,7 @@ FLOAT_FEATURE_COLUMNS: frozenset[str] = frozenset(
         "table_transitive_fd_ratio",
         "table_near_fd_ratio",
         "table_max_near_fd_strength",
+        "table_pair_fd_search_coverage",
     },
 )
 
@@ -1118,6 +1293,16 @@ def build_features(
     uccs, no_key_found = find_uccs(conn, qualified, profile, batch_size=batch_size, search=search)
     ucc_coverage = search["tested"] / search["candidates"] if search.get("candidates") else 1.0
     dependencies = find_dependencies(profile)
+    pair_dependencies = find_pair_dependencies(
+        conn,
+        qualified,
+        profile,
+        batch_size=batch_size,
+        search=search,
+    )
+    pair_fd_coverage = (
+        search["pair_tested"] / search["pair_candidates"] if search.get("pair_candidates") else 1.0
+    )
 
     # The best-ranked UCC is treated as *the* key, and prime means "part of it".
     #
@@ -1144,6 +1329,33 @@ def build_features(
     constants = constant_columns(profile)
 
     classes = classify_dependencies(dependencies, [primary_key] if primary_key else [], prime)
+    # The same dependencies judged against every discovered key instead of the best-ranked
+    # one, plus the pair-determinant findings - see FEATURE_COLUMNS for why both exist.
+    all_prime = frozenset().union(*uccs) if uccs else frozenset()
+    classes_anykey = classify_dependencies(dependencies, uccs, all_prime)
+    pair_classes = classify_pair_dependencies(pair_dependencies, uccs)
+    # Keys whose uniqueness is SURPRISING (>= 1 expected collision under independence,
+    # and none observed - the birthday estimate the ranking already uses). kunde's
+    # {gueltigbis, mobil, telefon} is unique over 300 rows at 0.014 expected collisions:
+    # arithmetic, not structure. Only these keys decide prime-ness in the rule label,
+    # otherwise every accidental composite turns a transitive dependency into a
+    # "partial" one and demotes the table a form too far.
+    #
+    # KNOWN LIMITATION: this filter degrades to no-op on very small tables. For any single
+    # column that happens to be fully unique, ucc_score is rows/2 - so it clears the 1.0
+    # bar for every table with >= 2 rows, unique or not. Measured on Chinook's real
+    # employee table (8 rows, not in training): lastname/firstname/address/postalcode/
+    # fax/email are each "structural" keys on that basis alone, {phone, reportsto} clears
+    # the bar too (1.14 expected collisions), and the rule label reads {phone} -> city and
+    # {reportsto} -> city off them as partial dependencies - a phone number does not
+    # determine an office city by any design, it is 8 people's data agreeing by chance.
+    # The row-count floor on the *reviewer* side catches this in practice (see
+    # LOW_EVIDENCE_MIN_ROWS in normalform_pipeline.py: 8 rows is far under 30), but the
+    # score itself carries no lower bound on rows and will keep making the same mistake
+    # wherever nobody is checking the row count. Tightening ucc_score to also require a
+    # minimum row count is the fix, not yet done - kunde's 300-row case is why the >= 1.0
+    # bar exists at all; Chinook's 8-row case is why it is not sufficient by itself.
+    structural_uccs = [key for key in uccs if ucc_score(profile, key) >= 1.0]
     if diagnostics is not None:
         diagnostics.update(
             {
@@ -1154,9 +1366,14 @@ def build_features(
                 "pair_coverage": profile.pair_coverage,
                 "ucc_search_coverage": ucc_coverage,
                 "uccs": [sorted(key) for key in uccs],
+                "structural_uccs": [sorted(key) for key in structural_uccs],
                 "primary_key": sorted(primary_key),
                 "no_key_found": no_key_found,
                 "dependencies": [list(pair) for pair in dependencies],
+                "pair_dependencies": [
+                    [sorted(determinant), dependent] for determinant, dependent in pair_dependencies
+                ],
+                "constant_columns": sorted(constants),
                 "near_dependencies": [
                     [determinant, dependent, round(strength, 4)]
                     for determinant, dependent, strength in near_dependencies
@@ -1184,7 +1401,9 @@ def build_features(
         "table_sampled": int(profile.sampled_from is not None),
         "table_sample_ratio": rows / profile.total_rows if profile.total_rows else 1.0,
         "table_search_truncated": int(
-            profile.pair_coverage < 1.0 or search.get("truncated", False)
+            profile.pair_coverage < 1.0
+            or search.get("truncated", False)
+            or search.get("pair_truncated", False),
         ),
         "table_pair_coverage": profile.pair_coverage,
         "table_ucc_search_coverage": ucc_coverage,
@@ -1228,6 +1447,14 @@ def build_features(
         ),
         "table_near_ucc_count": len(near_uccs),
         "table_has_near_key_but_no_key": int(bool(near_uccs) and no_key_found),
+        # Judged against all keys instead of the top-ranked one - see FEATURE_COLUMNS.
+        "table_partial_fd_count_anykey": len(classes_anykey.partial),
+        "table_transitive_fd_count_anykey": len(classes_anykey.transitive),
+        # Pair-determinant findings; the Willibald misses live here.
+        "table_pair_fd_count": len(pair_dependencies),
+        "table_pair_partial_fd_count": len(pair_classes.partial),
+        "table_pair_transitive_fd_count": len(pair_classes.transitive),
+        "table_pair_fd_search_coverage": pair_fd_coverage,
     }
 
     records = []
@@ -1337,3 +1564,61 @@ def classify_dependencies(
         strict_partial=strict_partial,
         strict_transitive=strict_transitive,
     )
+
+
+def derive_rule_normal_form(diagnostics: dict) -> tuple[int, str]:
+    """
+    The normal form the discovered structure implies, decided by rule rather than model.
+
+    Consumed by the serving pipeline as a cross-check stored NEXT TO the model's
+    prediction - never as a feature. It exists because the Willibald run showed the model
+    being confidently wrong (0.97+ on six mispredicted tables): the model is a function of
+    the features, so when the two disagree, either the features missed something or the
+    model did - and both cases belong in front of a human rather than silently in
+    nf_results.
+
+    Judgements are the textbook ones with one refinement: prime-ness is decided over the
+    STRUCTURAL candidate keys (``structural_uccs`` - uniqueness with at least one
+    expected collision behind it, see ``ucc_score``), not over every accidental UCC a
+    finite table happens to satisfy. kunde_periode_1 is the measured case: the trio
+    {gueltigbis, mobil, telefon} is unique over 300 rows at 0.014 expected collisions,
+    and counting it as a key turned the real transitive dependency
+    gueltigbis -> kkfirma into a "partial" one - one normal form too low.
+    ``diagnostics`` is the dict ``build_features`` fills - the discovered structure
+    comes out of the same pass that built the features, so this costs no extra query.
+
+    Returns:
+        ``(normal_form, evidence)`` - the class 0..3 and the finding that decided it.
+    """
+    key_evidence = diagnostics.get("structural_uccs", diagnostics.get("uccs", []))
+    uccs = [frozenset(key) for key in key_evidence]
+    violating = diagnostics.get("violating_columns", [])
+    repeating = diagnostics.get("repeating_columns", [])
+    if violating or repeating:
+        evidence = ", ".join(sorted({*violating, *repeating}))
+        return 0, f"non-atomic values or repeating group: {evidence}"
+
+    singles = [tuple(pair) for pair in diagnostics.get("dependencies", [])]
+    all_prime = frozenset().union(*uccs) if uccs else frozenset()
+    classes = classify_dependencies(singles, uccs, all_prime)
+    pairs = [
+        (frozenset(determinant), dependent)
+        for determinant, dependent in diagnostics.get("pair_dependencies", [])
+    ]
+    pair_classes = classify_pair_dependencies(pairs, uccs)
+
+    def render(determinant: str | frozenset[str], dependent: str) -> str:
+        names = [determinant] if isinstance(determinant, str) else sorted(determinant)
+        return f"{{{', '.join(names)}}} -> {dependent}"
+
+    partial = [render(d, a) for d, a in classes.partial]
+    partial += [render(d, a) for d, a in pair_classes.partial]
+    if partial:
+        return 1, f"partial dependency: {'; '.join(partial)}"
+
+    transitive = [render(d, a) for d, a in classes.transitive]
+    transitive += [render(d, a) for d, a in pair_classes.transitive]
+    if transitive:
+        return 2, f"transitive dependency: {'; '.join(transitive)}"
+
+    return 3, "no partial and no transitive dependency discovered"

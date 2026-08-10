@@ -64,6 +64,14 @@ class NormalForm(BaseModel):
     table_max_near_fd_strength: float
     table_near_ucc_count: int
     table_has_near_key_but_no_key: int
+    # Single-attribute FDs judged against ALL discovered keys instead of the top-ranked
+    # one, and the pair-determinant search
+    table_partial_fd_count_anykey: int
+    table_transitive_fd_count_anykey: int
+    table_pair_fd_count: int
+    table_pair_partial_fd_count: int
+    table_pair_transitive_fd_count: int
+    table_pair_fd_search_coverage: float
 
     # One-hot column type. `bigint` is the reference category and has
     # no field of its own: all-zero dummies mean that type. An unseen type (decimal,

@@ -45,6 +45,14 @@ COLUMN_F1_FLOOR = 0.94
 MIN_TABLES = 400
 MIN_SPLIT_GROUPS = 300
 
+# The real-world gate (2026-08-07). The model that scored 0.97 CV table accuracy got 6 of
+# the 10 hand-verified Willibald period-1 tables wrong, at 0.97+ confidence - synthetic CV
+# structurally cannot catch a dependency shape the generator never produces, so the
+# baseline now has to clear a floor on real tables too. 0.8 allows one miss out of ten;
+# below that, the extractor or the training set has lost something real.
+WILLIBALD_ACCURACY_FLOOR = 0.8
+WILLIBALD_MIN_TABLES = 10
+
 # The split has to be the honest one. Recorded rather than assumed, because grouping by
 # table_name alone would lift every number above by several points for free.
 REQUIRED_GROUP_LINKS = {"meta_recipe_id", "meta_pair_id"}
@@ -96,6 +104,24 @@ def test_the_baseline_was_measured_on_the_honest_split(baseline):
 def test_the_baseline_covers_enough_data_to_compare(baseline):
     assert baseline["n_tables"] >= MIN_TABLES
     assert baseline["n_split_groups"] >= MIN_SPLIT_GROUPS
+
+
+def test_willibald_accuracy_clears_the_floor(baseline):
+    """
+    The one check the CV numbers cannot stand in for: accuracy on real tables.
+
+    A baseline without the key predates the gate (or the eval snapshot was missing when
+    training ran) - both mean the registered model shipped unmeasured, which is exactly
+    the failure mode the Willibald run exposed.
+    """
+    assert "willibald_table_accuracy" in baseline, (
+        "no willibald_table_accuracy recorded - run nf_willibald_eval.py --extract and retrain"
+    )
+    measured = baseline["willibald_table_accuracy"]
+    assert measured >= WILLIBALD_ACCURACY_FLOOR, (
+        f"Willibald accuracy fell to {measured:.4f}, floor is {WILLIBALD_ACCURACY_FLOOR}"
+    )
+    assert baseline["willibald_tables"] >= WILLIBALD_MIN_TABLES
 
 
 def test_the_feature_count_matches_the_serving_contract(baseline):

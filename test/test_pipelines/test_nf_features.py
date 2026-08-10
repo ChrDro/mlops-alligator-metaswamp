@@ -745,6 +745,213 @@ def test_an_exact_key_is_not_also_a_near_key():
     assert find_near_uccs(profile) == []
 
 
+def _produkt_like_profile():
+    """
+    The produkt_periode_1 shape: {katid, umfang} -> typ, and no single explains typ.
+
+    The pair counts are consistent with that dependency actually holding - every
+    projection of the (katid, umfang, typ) triple counts at most distinct(katid, umfang),
+    which is what the arithmetic prune in ``pair_fd_candidates`` relies on.
+    """
+    return _profile(
+        row_count=126,
+        distinct={"katid": 8, "umfang": 6, "typ": 12, "produktid": 126},
+        pair_distinct={
+            frozenset({"katid", "umfang"}): 30,
+            frozenset({"katid", "typ"}): 28,
+            frozenset({"umfang", "typ"}): 25,
+            frozenset({"katid", "produktid"}): 126,
+            frozenset({"umfang", "produktid"}): 126,
+            frozenset({"typ", "produktid"}): 126,
+        },
+    )
+
+
+def test_pair_candidates_need_support_not_a_ratio():
+    """
+    The lieferung_periode_1 case: {bestellungid, lieferdienstid} is 99.3% unique over
+    1951 rows - past any ratio guard - yet its 13 repeating pairs are exactly the
+    evidence the dependency rests on. An absolute floor keeps it; the ratio killed it.
+    """
+    profile = _profile(
+        row_count=1951,
+        distinct={"bestellungid": 800, "lieferdienstid": 6, "lieferdatum": 900, "posid": 1951},
+        pair_distinct={
+            frozenset({"bestellungid", "lieferdienstid"}): 1938,  # support 13
+            frozenset({"bestellungid", "posid"}): 1951,  # support 0 - never repeats
+            frozenset({"lieferdienstid", "posid"}): 1951,
+            frozenset({"bestellungid", "lieferdatum"}): 1930,
+            frozenset({"lieferdienstid", "lieferdatum"}): 940,
+            frozenset({"lieferdatum", "posid"}): 1949,  # support 2 - below the floor
+        },
+    )
+
+    pairs = {pair for pair, _dep in nf_features.pair_fd_candidates(profile)}
+
+    assert frozenset({"bestellungid", "lieferdienstid"}) in pairs
+    assert frozenset({"bestellungid", "posid"}) not in pairs, "support 0 is no evidence"
+    assert frozenset({"lieferdatum", "posid"}) not in pairs, "below the support floor"
+
+
+def test_a_pair_dependency_explained_by_a_single_is_not_a_candidate():
+    """
+    ``{a, b} -> c`` restates ``a -> c`` whenever the single holds - judged on the raw
+    facts, before any guard, so a near-unique single still prunes its pair restatements.
+    """
+    profile = _profile(
+        row_count=100,
+        distinct={"a": 80, "b": 5, "c": 80},
+        pair_distinct={
+            frozenset({"a", "b"}): 85,  # support 15 - eligible
+            frozenset({"a", "c"}): 80,  # a -> c holds raw (a would be guard-dropped)
+            frozenset({"b", "c"}): 99,
+        },
+    )
+
+    dependents = {dep for _pair, dep in nf_features.pair_fd_candidates(profile)}
+
+    assert "c" not in dependents
+
+
+def test_a_pair_dependency_is_measured_like_a_single_one_level_up():
+    """``{katid, umfang} -> typ`` holds exactly when the triple count equals the pair's."""
+    profile = _produkt_like_profile()
+    # The arithmetic prunes leave exactly one candidate, so one aggregate is issued -
+    # and its count (30) equals distinct(katid, umfang), which is the dependency holding.
+    conn = FakeConnection(rows=[(30,)])
+
+    found = nf_features.find_pair_dependencies(conn, "t", profile)
+
+    assert found == [(frozenset({"katid", "umfang"}), "typ")]
+
+
+def test_the_pair_search_reports_its_budget():
+    """ "Found nothing" and "stopped looking" must not arrive as the same number."""
+    profile = _produkt_like_profile()
+    conn = FakeConnection(rows=[(30,)])
+    search: dict = {}
+
+    nf_features.find_pair_dependencies(conn, "t", profile, search=search)
+
+    assert search["pair_candidates"] == 1
+    assert search["pair_tested"] == 1
+    assert search["pair_truncated"] is False
+
+
+def test_impossible_pair_dependencies_are_pruned_before_any_sql():
+    """
+    ``{a, b} -> c`` cannot hold when ``distinct(c)`` (or either sub-pair's count)
+    exceeds ``distinct(a, b)`` - the triple count is at least every projection's.
+    Those candidates must die on arithmetic, not on a query.
+    """
+    profile = _produkt_like_profile()
+    conn = FakeConnection(rows=[(30,)])
+
+    nf_features.find_pair_dependencies(conn, "t", profile)
+
+    assert len(conn.executed) == 1, "one batch, one aggregate - nothing else was asked"
+    dependents = {dep for _pair, dep in nf_features.pair_fd_candidates(profile)}
+    assert "produktid" not in dependents, "distinct(produktid)=126 > any pair count"
+
+
+def test_a_determinant_pair_inside_a_key_is_partial_and_outside_is_transitive():
+    keys = [frozenset({"k1", "k2", "k3"}), frozenset({"id"})]
+    inside = (frozenset({"k1", "k2"}), "x")
+    outside = (frozenset({"a", "b"}), "y")
+    superkey = (frozenset({"id", "a"}), "z")  # contains a key - trivial, neither class
+
+    classes = nf_features.classify_pair_dependencies([inside, outside, superkey], keys)
+
+    assert classes.partial == [inside]
+    assert classes.transitive == [outside]
+
+
+# --------------------------------------------------------------------------------------
+# The rule label the pipeline stores next to the prediction
+# --------------------------------------------------------------------------------------
+
+
+def test_rule_label_ignores_accidental_keys_when_judging_prime_ness():
+    """
+    The kunde case, settled 2026-08-07: {gueltigbis, mobil, telefon} is unique over 300
+    rows at 0.014 expected collisions - arithmetic, not structure. With it counted as a
+    key, gueltigbis -> kkfirma reads as partial (1NF); with prime-ness decided over the
+    STRUCTURAL keys only, it reads as what it is - transitive (2NF).
+    """
+    diagnostics = {
+        "uccs": [["kundeid"], ["kreditkarte"], ["gueltigbis", "mobil", "telefon"]],
+        "structural_uccs": [["kundeid"], ["kreditkarte"]],
+        "dependencies": [["gueltigbis", "kkfirma"]],
+        "pair_dependencies": [],
+        "violating_columns": [],
+        "repeating_columns": [],
+    }
+
+    form, evidence = nf_features.derive_rule_normal_form(diagnostics)
+
+    assert form == 2
+    assert "gueltigbis" in evidence
+
+
+def test_rule_label_reads_a_partial_dependency_off_a_structural_composite_key():
+    """
+    The counterpart: when the composite key IS structural (a real two-part key next to a
+    surrogate), a dependency hanging off half of it stays partial - 1NF.
+    """
+    diagnostics = {
+        "uccs": [["surrogate_id"], ["orderkey", "linenumber"]],
+        "structural_uccs": [["surrogate_id"], ["orderkey", "linenumber"]],
+        "dependencies": [["orderkey", "orderdate"]],
+        "pair_dependencies": [],
+        "violating_columns": [],
+        "repeating_columns": [],
+    }
+
+    form, evidence = nf_features.derive_rule_normal_form(diagnostics)
+
+    assert form == 1
+    assert "orderkey" in evidence
+
+
+def test_rule_label_reads_a_pair_transitive_dependency_as_2nf():
+    diagnostics = {
+        "uccs": [["produktid"], ["bezeichnung"]],
+        "dependencies": [],
+        "pair_dependencies": [[["katid", "umfang"], "typ"]],
+        "violating_columns": [],
+        "repeating_columns": [],
+    }
+
+    form, evidence = nf_features.derive_rule_normal_form(diagnostics)
+
+    assert form == 2
+    assert "katid" in evidence
+
+
+def test_rule_label_is_3_when_nothing_was_discovered():
+    diagnostics = {
+        "uccs": [["id"]],
+        "dependencies": [],
+        "pair_dependencies": [],
+        "violating_columns": [],
+        "repeating_columns": [],
+    }
+
+    assert nf_features.derive_rule_normal_form(diagnostics)[0] == 3
+
+
+def test_rule_label_puts_atomicity_above_everything():
+    diagnostics = {
+        "uccs": [["id"]],
+        "dependencies": [["a", "b"]],
+        "pair_dependencies": [],
+        "violating_columns": ["tags_list"],
+        "repeating_columns": [],
+    }
+
+    assert nf_features.derive_rule_normal_form(diagnostics)[0] == 0
+
+
 def test_a_failed_batch_leaves_the_measurement_unknown_not_zero():
     """
     A timeout must not turn into ``distinct = 0``.
