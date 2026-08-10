@@ -414,16 +414,17 @@ tables" is the size of each source database, not the number of feature rows.
 Features are engineered per column, per table, and — for the single-FK model — across
 tables. Generated directly from the training scripts:
 
-- **Tasks 1 & 2 — 31 features** from the training CSV (identical set; only the target
-  differs), except:
+- **Tasks 1 & 2 — 31 features** (identical set; only the target differs), engineered in the
+  training scripts from the bundled metadata CSV.
 - **Task 2 single FK — 37 features**: 30 of the shared set plus **7 cross-table features**
   computed by [`src/cross_table_features.py`](src/cross_table_features.py). A foreign key
   is a property of a *pair* of columns in two tables, so this is the only model that looks
   outside the table being classified. They raised its cross-validated F1 from 0.696 to
   0.810; that module's docstring carries the measurements, including three further ideas
   that were measured and rejected.
-- **Task 3 — 50 features** (adds normalization-specific signals and a few columns Tasks 1
-  & 2 drop)
+- **Task 3 — 53 features**, computed by [`prefect/nf_features.py`](prefect/nf_features.py)
+  by *measuring* each table in Trino. Nothing in this set is read from a CSV column
+  someone typed.
 
 > **Reference scope.** The cross-table features are relative to the set of other tables
 > they may look at. Training scopes that to one `database`; the serving pipeline can only
@@ -464,7 +465,7 @@ Pydantic request schema, the Prefect pipeline payload and the MLflow signature a
 `column_type_*` dummies are appended by the one-hot encoder — `bigint` is the reference
 category and has no column of its own.
 
-**Three feature groups are unusual enough to explain.**
+**Four feature groups are unusual enough to explain.**
 
 *Cost budgets are features.* A profiler that must answer within a budget is guaranteed to
 give partial answers on large tables. Rather than hide that, the budgets report themselves:
@@ -485,14 +486,36 @@ carries signal.
 threshold rather than exactly, which is what survives sampling and dirty data.
 `table_has_near_key_but_no_key` is the specific "there is almost a key here" signal.
 
+*Any-key judgement and pair-determinant search.* Added 2026-08-07 after a real-world run
+(Willibald period-1) mispredicted 6 of 10 tables. The original partial/transitive counts
+judge a dependency against the top-ranked key only; `table_partial_fd_count_anykey` and
+`table_transitive_fd_count_anykey` judge the same dependencies against every discovered
+key, which catches a determinant that only a lower-ranked key makes prime. The original
+search also only ever compared single columns; `table_pair_fd_count` and its
+`partial`/`transitive` split extend it to two-column determinants (`{a, b} -> c`), which
+is how a rule like `{category_id, weight_class} -> shipping_tier` becomes visible at all.
+Pairs are the more suggestible half of that search — almost any two columns "explain" a
+third on a small table — so they are gated by an absolute row-support floor rather than a
+ratio, calibrated against a real accidental pair sitting well below a real one.
+
 > **What is still a limitation.** 3NF and 0NF tables have near-identical medians on every
 > dependency feature, so the whole 0NF/3NF boundary rests on the atomicity detector. Its
 > blind spot is a repeating group with obfuscated column names — two tables in the
 > generated set are labelled 0NF with no violation any feature can see. See
 > [TASK_3_PLAN.md](TASK_3_PLAN.md).
+>
+> The structural-key filter (`ucc_score >= 1`, see "Labelling conventions" below) has a
+> second blind spot at the opposite end: on a table with only a handful of rows, a fully
+> unique single column clears the bar for free (`ucc_score` is `rows / 2` there), whether
+> its uniqueness means anything or not. Measured on Chinook's real `employee` table (8
+> rows, never part of training): six ordinary columns each pass as a "structural" key on
+> that basis alone, which turns `{phone} -> city` into a "partial dependency" that no
+> designer intended — a coincidence of 8 people's data, not a rule. `LOW_EVIDENCE_MIN_ROWS`
+> flags this table for review regardless (see below), so it does not reach a human
+> unchecked, but the filter itself carries no row-count floor yet.
 
 <details>
-<summary><b>Task 3 feature dictionary — all 47</b> (click to expand)</summary>
+<summary><b>Task 3 feature dictionary — all 53</b> (click to expand)</summary>
 
 Source of truth: `FEATURE_COLUMNS` and `COLUMN_TYPE_DUMMIES` in
 [`prefect/nf_features.py`](prefect/nf_features.py). Listed in the order the model sees
@@ -572,6 +595,25 @@ requires a non-prime dependent, the textbook definition.
 | `table_transitive_fd_ratio` | …as a share | float |
 | `table_strict_partial_fd_count` | Partial under the strict definition | int |
 | `table_strict_transitive_fd_count` | Transitive under the strict definition | int |
+
+**Per table — any-key and pair-determinant dependencies (6)**
+
+Added 2026-08-07 after the Willibald period-1 run exposed two blind spots: the
+partial/transitive counts above are classified against the top-ranked key only, and the
+dependency search only ever looked at single-column determinants. `_anykey` judges the
+same discovered dependencies against *every* candidate key instead of just the top-ranked
+one; `table_pair_*` extends the search itself to two-column determinants
+(`{a, b} -> c`), gated by an absolute support floor (`MIN_PAIR_FD_SUPPORT`) so a pair that
+repeats in too few rows to be more than coincidence is not counted.
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `table_partial_fd_count_anykey` | Partial dependencies, judged against all discovered keys | int |
+| `table_transitive_fd_count_anykey` | Transitive dependencies, judged against all discovered keys | int |
+| `table_pair_fd_count` | Two-column-determinant dependencies discovered | int |
+| `table_pair_partial_fd_count` | Of those, partial | int |
+| `table_pair_transitive_fd_count` | Of those, transitive | int |
+| `table_pair_fd_search_coverage` | Share of eligible column pairs actually tested | float |
 
 **Per table — approximate structure (5)**
 
@@ -723,6 +765,40 @@ holds this to a floor in CI. CI has neither MLflow nor Trino and so cannot retra
 every training run writes `data/nf_baseline.json`, and a worse run fails the gate. The
 floors are the measured mean minus two standard deviations — the only way past them is
 lowering a number in a visible diff.
+
+#### Serving-time cross-check and the Willibald eval gate
+
+Every prediction [`normalform_pipeline.py`](prefect/normalform_pipeline.py) stores in
+`iceberg.prediction_results.nf_results` carries a second, independently-computed reading
+of the same evidence next to the model's class — never as a feature, only as a check:
+
+| Column | What it is |
+| :--- | :--- |
+| `rule_normal_form` | The class a deterministic decision procedure (`nf_features.derive_rule_normal_form`) reads off the discovered structure — keys, dependencies, atomicity violations — from the same profiling pass that built the features. No learning involved. |
+| `rule_agrees` | Whether `rule_normal_form` matches the model's prediction. |
+| `needs_review` | `True` when the two disagree, or when the table has fewer than 30 rows (`LOW_EVIDENCE_MIN_ROWS`) — too few for any dependency statistic to mean more than coincidence. |
+| `review_reasons` | Plain text saying which of the above triggered the flag. |
+| `constant_columns` | Informational only, never a review trigger — a constant column can hide a real rule behind it (`Ort -> Land` with only one country loaded) that only becomes visible once the data varies. |
+
+This exists because confidence turned out not to be a usable review signal: on a real-world
+run (Willibald period-1) every misprediction sat at 0.97+ confidence, indistinguishable
+from the correct ones — the model is a deterministic function of features that had simply
+missed the decisive dependency. A second, rule-based reading of the same evidence catches
+what confidence structurally cannot: disagreement between two independent judgements of the
+same data.
+
+**The Willibald eval gate.** [`task_3/nf_willibald_eval.py`](task_3/nf_willibald_eval.py)
+snapshots features for the 10 real Willibald DWA-Challenge tables (see Source databases
+above) and every training run scores its best candidate against them, logging
+`willibald_table_accuracy` to MLflow and into `data/nf_baseline.json`. It never trains
+anything — unlike the generated set, this is real data nobody constructed to fit the
+model's assumptions, so it stays a held-out gate, floored at 0.8 by
+[`test/test_models/test_normalform_baseline.py`](test/test_models/test_normalform_baseline.py).
+The ground truth it is scored against
+([`task_3/nf_ground_truth_willibald.py`](task_3/nf_ground_truth_willibald.py) →
+`data/willibald_ground_truth.csv`) runs the exact same `derive_rule_normal_form`
+decision procedure over the raw seed data, exhaustively rather than under a search budget
+— model and ground truth are read with one ruler, not two.
 
 ---
 

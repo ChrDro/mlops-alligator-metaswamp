@@ -49,6 +49,7 @@ from nf_features import (
     FEATURE_COLUMNS,
     FLOAT_FEATURE_COLUMNS,
     build_features,
+    derive_rule_normal_form,
     encode_column_type,
 )
 from prefect.cache_policies import NONE as NO_CACHE
@@ -89,6 +90,11 @@ MODEL_FEATURES: list[str] = [*FEATURE_COLUMNS, *EXPECTED_TYPE_COLS]
 # Features the API expects as float; everything else numeric is int, column_type_* are bool.
 FLOAT_FEATURES = FLOAT_FEATURE_COLUMNS
 
+# Below this many rows, any dependency statistic is a handful of coincidences - the
+# 6-row vereinspartner_periode_1 got its (correct) prediction from FDs that three more
+# rows could dissolve. Such tables keep their prediction but carry a review flag.
+LOW_EVIDENCE_MIN_ROWS = 30
+
 
 def get_trino_engine() -> Engine:
     """Create and return a Trino engine instance."""
@@ -108,7 +114,7 @@ def extract_normalform_features(
     batch_size: int = 30,
     skip_tables: set[tuple[str, str, str]] | None = None,
     only_tables: list[TableRef] | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[tuple[str, str, str], dict]]:
     """
     Profile every table in the target schema(s) into the model's feature set, one row per
     column, plus the id columns database/schema/table_name/column_name for aggregation.
@@ -122,7 +128,12 @@ def extract_normalform_features(
         only_tables: Restrict profiling to exactly these tables (streaming mode).
             Takes precedence over skip_tables - see the filter below for why.
 
-    Returns a DataFrame with one row per column.
+    Returns a DataFrame with one row per column, plus one rule-check entry per table:
+    the deterministic label the discovered structure implies (see
+    ``nf_features.derive_rule_normal_form``), its evidence, the true row count and the
+    constant columns. The same profiling pass produces both, so the check costs nothing -
+    and it exists because the Willibald run showed the model confidently wrong wherever
+    the features missed the decisive dependency.
     """
     skip_tables = skip_tables or set()
     engine = get_trino_engine()
@@ -155,14 +166,17 @@ def extract_normalform_features(
     print(f"Processing {len(found)} tables")
 
     all_table_features = []
+    rule_checks: dict[tuple[str, str, str], dict] = {}
     with engine.connect() as connection:
         for database, schema, table in found:
+            diagnostics: dict = {}
             try:
                 df_table = build_features(
                     connection,
                     database,
                     schema,
                     table,
+                    diagnostics=diagnostics,
                     batch_size=batch_size,
                 )
             except SQLAlchemyError as error:
@@ -172,10 +186,17 @@ def extract_normalform_features(
                 print(f"Error at {database}.{schema}.{table}: {message}")
                 continue
             all_table_features.append(encode_column_type(df_table))
+            rule_form, rule_evidence = derive_rule_normal_form(diagnostics)
+            rule_checks[(database, schema, table)] = {
+                "rule_normal_form": rule_form,
+                "rule_evidence": rule_evidence,
+                "row_count": diagnostics["total_row_count"],
+                "constant_columns": diagnostics["constant_columns"],
+            }
 
     if not all_table_features:
         print("No data available - check tables and connection.")
-        return pd.DataFrame()
+        return pd.DataFrame(), rule_checks
 
     df_final = pd.concat(all_table_features, ignore_index=True)
 
@@ -208,7 +229,7 @@ def extract_normalform_features(
         f"Extracted features for {len(df_final)} columns across {n_tables} tables "
         "(written to iceberg.staging.stg_normalform_features)",
     )
-    return df_final
+    return df_final, rule_checks
 
 
 def _row_to_payload(row: pd.Series) -> dict:
@@ -268,7 +289,10 @@ def predict_normalform(features: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]
 
 
 @task(name="aggregate-normalform", cache_policy=NO_CACHE)
-def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
+def aggregate_to_table(
+    predicted: pd.DataFrame,
+    rule_checks: dict[tuple[str, str, str], dict] | None = None,
+) -> pd.DataFrame:
     """
     Collapse per-column predictions to one row per table via confidence-weighted
     (soft) voting: average every column's full probability distribution, then take
@@ -280,12 +304,22 @@ def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
     actually confident. Averaging probabilities fixes both: a confident column
     outweighs unsure ones, and a tie is only a tie when the averaged distribution
     itself is tied.
+
+    Each row also carries the RULE CHECK from the profiling pass: the label the
+    discovered structure implies by rule, whether the model agrees with it, and a
+    review flag. Confidence alone cannot fill that role - on the Willibald run every
+    misprediction sat at 0.97+ confidence, indistinguishable from the correct ones,
+    because the model is a deterministic function of features that had missed the
+    decisive dependency. Disagreement between two readings of the same evidence is a
+    signal confidence structurally cannot give.
     """
     predicted = predicted.dropna(subset=["prediction", "probabilities"]).copy()
     if predicted.empty:
         return pd.DataFrame()
 
+    rule_checks = rule_checks or {}
     rows = []
+    disagreements = 0
     group_cols = ["database", "schema", "table_name"]
     for (database, schema, table), grp in predicted.groupby(group_cols):
         # Each entry in `probabilities` is a {class_label: probability} dict from
@@ -294,10 +328,24 @@ def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
         mean_distribution = pd.DataFrame(list(grp["probabilities"])).astype(float).mean()
         winning_class = int(mean_distribution.idxmax())
         # If NF = 3 then flag_normalized is True
-        if winning_class == 3:
-            flag_normalized = True
-        else:
-            flag_normalized = False
+        flag_normalized = winning_class == 3
+
+        check = rule_checks.get((database, schema, table))
+        reasons: list[str] = []
+        rule_form = None
+        if check is not None:
+            rule_form = check["rule_normal_form"]
+            if rule_form != winning_class:
+                disagreements += 1
+                reasons.append(
+                    f"rule label {rule_form} disagrees with model {winning_class} "
+                    f"({check['rule_evidence']})",
+                )
+            if check["row_count"] < LOW_EVIDENCE_MIN_ROWS:
+                reasons.append(
+                    f"low evidence: {check['row_count']} rows - any dependency here "
+                    "is a handful of coincidences",
+                )
 
         rows.append(
             {
@@ -308,12 +356,37 @@ def aggregate_to_table(predicted: pd.DataFrame) -> pd.DataFrame:
                 "confidence": round(float(mean_distribution.max()), 4),
                 "normalized": flag_normalized,
                 "n_columns": len(grp),
+                "rule_normal_form": rule_form,
+                "rule_agrees": check is None or rule_form == winning_class,
+                "needs_review": bool(reasons),
+                "review_reasons": "; ".join(reasons),
+                # Informational, not a review trigger: a constant column means a real
+                # rule may be hiding behind it (Ort -> Land with one country loaded),
+                # and only new data can tell. Convention decided 2026-08-07.
+                "constant_columns": ", ".join(check["constant_columns"]) if check else "",
             },
         )
 
     result = pd.DataFrame(rows)
     print(f"Aggregated predictions for {len(result)} tables")
+    if disagreements:
+        print(
+            f"{disagreements} table(s) where the rule label disagrees with the model "
+            "- flagged for review in nf_results",
+        )
     return result
+
+
+# Columns added to nf_results on 2026-08-07 (the rule check). Applied with ADD COLUMN
+# IF NOT EXISTS before every append, so a results table written by an older run gains
+# them in place instead of rejecting the new rows.
+_NF_RESULTS_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("rule_normal_form", "integer"),
+    ("rule_agrees", "boolean"),
+    ("needs_review", "boolean"),
+    ("review_reasons", "varchar"),
+    ("constant_columns", "varchar"),
+)
 
 
 @task(name="store-normalform-results", cache_policy=NO_CACHE)
@@ -329,6 +402,20 @@ def store_results(results: pd.DataFrame) -> int:
     engine = get_trino_engine()
     with engine.begin() as conn:
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS iceberg.prediction_results"))
+        table_exists = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM iceberg.information_schema.tables "
+                "WHERE table_schema = 'prediction_results' AND table_name = 'nf_results'",
+            ),
+        ).scalar()
+        if table_exists:
+            for column, column_type in _NF_RESULTS_MIGRATIONS:
+                conn.execute(
+                    text(
+                        "ALTER TABLE iceberg.prediction_results.nf_results "
+                        f"ADD COLUMN IF NOT EXISTS {column} {column_type}",
+                    ),
+                )
         results.to_sql(
             "nf_results",
             conn,
@@ -399,8 +486,10 @@ def normalform_prediction_pipeline(
     use_pending_changes: bool = False,
 ) -> dict:
     """
-    Complete normalform track: pick the tables to process -> extract 29 features ->
-    predict per column -> majority-vote aggregate to one NF class per table -> store.
+    Complete normalform track: pick the tables to process -> extract the feature set
+    (nf_features.FEATURE_COLUMNS plus the column-type dummies) -> predict per column ->
+    confidence-weighted aggregate to one NF class per table -> cross-check against the
+    rule label -> store.
 
     Args:
         target_schemas: Schemas to scan (default: ['new_predict_data']).
@@ -434,7 +523,7 @@ def normalform_prediction_pipeline(
     stored = 0
     try:
         print("Step 2: Extracting normalform features...")
-        features = extract_normalform_features(
+        features, rule_checks = extract_normalform_features(
             target_schemas=target_schemas,
             batch_size=batch_size,
             skip_tables=processed_tables,
@@ -450,8 +539,8 @@ def normalform_prediction_pipeline(
         print("Step 3: Predicting normal form per column...")
         predicted, failure_reasons = predict_normalform(features)
 
-        print("Step 4: Aggregating to one row per table...")
-        table_results = aggregate_to_table(predicted)
+        print("Step 4: Aggregating to one row per table (with the rule cross-check)...")
+        table_results = aggregate_to_table(predicted, rule_checks)
 
         print("Step 5: Storing table-level results...")
         stored = store_results(table_results)

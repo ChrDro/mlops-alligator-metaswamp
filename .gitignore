@@ -229,6 +229,8 @@ mlruns/
 # dbt
 dbt/logs/
 dbt/target/
+dbt/seeds/
+seeds/
 
 # evidently
 # Both directories can be ignored as they are produced again later durin run

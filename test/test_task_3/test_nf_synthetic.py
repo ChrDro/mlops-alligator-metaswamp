@@ -217,15 +217,20 @@ def test_a_dependent_column_goes_null_by_determinant_not_by_row(target):
         null_rate=0.30,
         naming="convention",
     )
-    single_column_fds = [(lhs, rhs) for lhs, rhs in schema.fds if len(lhs) == 1]
-    assert single_column_fds, "a 1NF/2NF schema must declare at least one narrow FD"
+    everything = frozenset(schema.attributes)
+    # Key-style FDs (the key itself, a surrogate) determine every other attribute and
+    # their dependents include ungated columns - the gating rule applies to the chain
+    # and partial FDs, whose determinant may be one column or (since 2026-08-07) a pair.
+    narrow_fds = [(lhs, rhs) for lhs, rhs in schema.fds if rhs != everything - lhs]
+    assert narrow_fds, "a 1NF/2NF schema must declare at least one dependency"
 
-    for lhs, rhs in single_column_fds:
-        determinant, dependent = next(iter(lhs)), next(iter(rhs))
-        line = _select_line(schema.sql, dependent)
-        gate = line[: line.index("THEN NULL")]
-        determinant_expression = _select_line(schema.sql, determinant).rsplit(" AS ", 1)[0]
-        assert determinant_expression.strip() in gate, (determinant, dependent)
+    for lhs, rhs in narrow_fds:
+        for dependent in rhs:
+            line = _select_line(schema.sql, dependent)
+            gate = line[: line.index("THEN NULL")]
+            for determinant in lhs:
+                determinant_expression = _select_line(schema.sql, determinant).rsplit(" AS ", 1)[0]
+                assert determinant_expression.strip() in gate, (determinant, dependent)
 
 
 def test_the_dependency_count_does_not_give_the_label_away():
@@ -237,13 +242,18 @@ def test_the_dependency_count_does_not_give_the_label_away():
     limit and the signature check in 2c failed on it. Only the *position* of a determinant
     may carry the distinction, never how many there are.
 
-    The key's own FD is excluded here for the same reason ``find_dependencies`` drops it: a
-    determinant that is unique determines everything, which is no finding.
+    Key-style FDs are excluded here for the same reason ``find_dependencies`` drops them:
+    a determinant that is unique determines everything, which is no finding. That covers
+    the key's own FD and (since 2026-08-07) the surrogate-key decoy, which declares a
+    second key -> everything dependency on schemas of every class.
     """
     counts = collections.defaultdict(set)
     for spec in SPECS:
         label = spec.generation_params["family"].split("_")[1]
-        counts[label].add(sum(1 for lhs, _ in spec.declared_fds[1:] if len(lhs) == 1))
+        everything = frozenset(spec.attributes)
+        counts[label].add(
+            sum(1 for lhs, rhs in spec.declared_fds if len(lhs) == 1 and rhs != everything - lhs),
+        )
 
     shared = counts["1nf"] & counts["2nf"]
     assert len(shared) >= 3, f"1NF {sorted(counts['1nf'])} vs 2NF {sorted(counts['2nf'])}"

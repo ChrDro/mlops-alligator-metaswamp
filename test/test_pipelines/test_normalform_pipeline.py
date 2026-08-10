@@ -130,3 +130,81 @@ def test_aggregate_separates_tables_with_the_same_column_name():
 
     assert result.loc["t5", "predicted_normal_form"] == 0
     assert result.loc["t6", "predicted_normal_form"] == 3
+
+
+def _check(rule_form: int, evidence: str = "because", rows: int = 500, constants=()) -> dict:
+    return {
+        "rule_normal_form": rule_form,
+        "rule_evidence": evidence,
+        "row_count": rows,
+        "constant_columns": list(constants),
+    }
+
+
+def test_a_rule_disagreement_flags_the_row_for_review():
+    """
+    The Willibald failure mode: the model said 3NF at 0.97 confidence while the
+    discovered structure said 2NF. Confidence cannot catch that - the disagreement can.
+    """
+    predicted = pd.DataFrame([_row("t1", 3, {"0": 0.0, "1": 0.0, "2": 0.03, "3": 0.97})])
+
+    result = nf.aggregate_to_table.fn(
+        predicted,
+        {("iceberg", "new_predict_data", "t1"): _check(2, "{a, b} -> c")},
+    ).iloc[0]
+
+    assert result["rule_normal_form"] == 2
+    assert not result["rule_agrees"]
+    assert result["needs_review"]
+    assert "{a, b} -> c" in result["review_reasons"]
+
+
+def test_an_agreeing_rule_label_needs_no_review():
+    predicted = pd.DataFrame([_row("t1", 2, {"0": 0.0, "1": 0.0, "2": 0.9, "3": 0.1})])
+
+    result = nf.aggregate_to_table.fn(
+        predicted,
+        {("iceberg", "new_predict_data", "t1"): _check(2)},
+    ).iloc[0]
+
+    assert result["rule_agrees"]
+    assert not result["needs_review"]
+    assert result["review_reasons"] == ""
+
+
+def test_a_tiny_table_is_flagged_as_low_evidence_even_when_the_rule_agrees():
+    """vereinspartner_periode_1: 6 rows - the right answer, resting on coincidences."""
+    predicted = pd.DataFrame([_row("t1", 2, {"0": 0.0, "1": 0.0, "2": 0.9, "3": 0.1})])
+
+    result = nf.aggregate_to_table.fn(
+        predicted,
+        {("iceberg", "new_predict_data", "t1"): _check(2, rows=6)},
+    ).iloc[0]
+
+    assert result["rule_agrees"]
+    assert result["needs_review"]
+    assert "low evidence" in result["review_reasons"]
+
+
+def test_constant_columns_are_reported_but_do_not_trigger_review():
+    """Convention 2026-08-07: constants are informational - only new data can tell."""
+    predicted = pd.DataFrame([_row("t1", 3, {"0": 0.0, "1": 0.0, "2": 0.1, "3": 0.9})])
+
+    result = nf.aggregate_to_table.fn(
+        predicted,
+        {("iceberg", "new_predict_data", "t1"): _check(3, constants=["land"])},
+    ).iloc[0]
+
+    assert result["constant_columns"] == "land"
+    assert not result["needs_review"]
+
+
+def test_aggregate_without_rule_checks_keeps_the_columns_but_stays_calm():
+    """Tests and older callers pass no rule info - nothing may explode or flag."""
+    predicted = pd.DataFrame([_row("t1", 3, {"0": 0.0, "1": 0.0, "2": 0.1, "3": 0.9})])
+
+    result = nf.aggregate_to_table.fn(predicted).iloc[0]
+
+    assert result["rule_normal_form"] is None
+    assert result["rule_agrees"]
+    assert not result["needs_review"]

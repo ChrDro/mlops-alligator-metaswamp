@@ -264,6 +264,7 @@ def build_join(
     drop: Iterable[str] = (),
     extra_select: Sequence[str] = (),
     extra_attributes: Sequence[str] = (),
+    extra_fds: Sequence[FunctionalDependency] = (),
     source_schema: str = "tiny",
     limit: int | None = None,
 ) -> Relation:
@@ -286,6 +287,8 @@ def build_join(
         extra_select: Additional select expressions, e.g. the free-text decoy column.
         extra_attributes: Names of those additional columns. They are determined by the
             fact key like every other non-key attribute.
+        extra_fds: Dependencies that hold among the columns beyond what the joins imply -
+            the pair-determinant recipes declare ``{a, b} -> derived`` here.
         source_schema: Schema inside the ``tpch`` catalog ("tiny", "sf1", ...).
         limit: Row cap on the fact table, applied before the joins and ordered by the
             fact key - an unordered LIMIT in Trino does not reproduce.
@@ -349,6 +352,9 @@ def build_join(
         attributes.append(name)
         select_list.append(f'{expression} AS "{name}"')
         fds.append((fact_relation.key, frozenset({name})))
+    # Beyond key -> column: a derived column is also a function of the columns it was
+    # computed from, and that is the dependency the pair recipes exist to declare.
+    fds += list(extra_fds)
 
     keep = [attribute for attribute in attributes if attribute not in set(drop)]
     select_list = [
@@ -381,6 +387,10 @@ class JoinRecipe:
         steps: Dimensions to fold in.
         drop: Attributes to project away after the join.
         decoy: Project the TPC-H ``comment`` column as free text.
+        derived: Extra columns computed from fact columns, as ``(name, sql expression
+            over t0, determinant columns)``. Each declares ``{determinants} -> name`` -
+            the composite-determinant dependency no single-column search can see
+            (the Willibald gap, 2026-08-07).
         note: What this shape is for. Travels into the manifest.
     """
 
@@ -389,15 +399,24 @@ class JoinRecipe:
     steps: tuple[JoinStep, ...] = ()
     drop: frozenset[str] = frozenset()
     decoy: bool = False
+    derived: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
     note: str = ""
 
     def build(self, source_schema: str, limit: int) -> Relation:
+        extra_select = ['t0."comment"'] if self.decoy else []
+        extra_attributes = ["note_text"] if self.decoy else []
+        extra_fds = []
+        for name, expression, determinants in self.derived:
+            extra_select.append(expression)
+            extra_attributes.append(name)
+            extra_fds.append((frozenset(determinants), frozenset({name})))
         return build_join(
             fact=self.fact,
             steps=self.steps,
             drop=self.drop,
-            extra_select=('t0."comment"',) if self.decoy else (),
-            extra_attributes=("note_text",) if self.decoy else (),
+            extra_select=tuple(extra_select),
+            extra_attributes=tuple(extra_attributes),
+            extra_fds=tuple(extra_fds),
             source_schema=source_schema,
             limit=limit,
         )
@@ -487,6 +506,39 @@ JOIN_RECIPES: tuple[JoinRecipe, ...] = (
         steps=(JoinStep("suppkey", "supplier"), JoinStep("supplier_nationkey", "nation")),
         drop=frozenset({"linestatus"}),
         note="2NF with a composite key, two join levels",
+    ),
+    # ---------------------------------------------------- 2NF via a PAIR determinant
+    # The Willibald gap (2026-08-07): {KatID, Umfang} -> Typ, {Bestelldatum, Wunschdatum}
+    # -> Rabatt. A violation whose determinant is a column pair was invisible to the
+    # single-attribute FD search AND absent from this training set, so the model read
+    # every such table as clean 3NF at 0.97+ confidence. The derived column is a function
+    # of two low-cardinality fact columns - neither alone determines it.
+    JoinRecipe(
+        "lineitem_ship_class",
+        "lineitem",
+        drop=frozenset({"linestatus"}),
+        derived=(
+            (
+                "ship_class",
+                'substr(t0."shipmode", 1, 2) || t0."returnflag"',
+                ("shipmode", "returnflag"),
+            ),
+        ),
+        note="2NF via a pair determinant: {shipmode, returnflag} -> ship_class, "
+        "on a composite-key fact",
+    ),
+    JoinRecipe(
+        "orders_handling_code",
+        "orders",
+        derived=(
+            (
+                "handling_code",
+                'substr(t0."orderpriority", 1, 1) || t0."orderstatus"',
+                ("orderpriority", "orderstatus"),
+            ),
+        ),
+        note="2NF via a pair determinant: {orderpriority, orderstatus} -> handling_code, "
+        "on a single-key fact",
     ),
     # ------------------------------------------------------- 1NF, partial dependencies
     JoinRecipe(
@@ -764,10 +816,11 @@ def _indent(sql: str, spaces: int = 2) -> str:
 # Variation axes
 # --------------------------------------------------------------------------------------
 
-# (schema in the tpch catalog, row cap on the fact table). Two tiers, because the plan's
-# cut-down option for 2b allows one - the second is cheap and gives the group split
-# something other than the recipe to group by.
-SOURCES: tuple[tuple[str, int], ...] = (("tiny", 2000), ("sf1", 20000))
+# (schema in the tpch catalog, row cap on the fact table). The third tier is small on
+# purpose: real prediction targets (Willibald period 1) run 6 to 2000 rows, and a model
+# trained only on 2000+ rows meets near-unique columns and guard-dropped dependencies it
+# has never seen at that scale.
+SOURCES: tuple[tuple[str, int], ...] = (("tiny", 2000), ("sf1", 20000), ("tiny", 150))
 
 # Obfuscated names are not cosmetic. The current model leans on name features
 # (`name_ends_with_id`, finding 1.2); half the tables carrying meaningless column names
@@ -859,7 +912,12 @@ def _variants() -> list[_Variant]:
                             params={
                                 **common,
                                 "note": injection.note,
-                                "pair_id": f"{injection.recipe_id}_{source_schema}_{naming}",
+                                # The limit is part of the identity: two tiers share the
+                                # "tiny" schema now, and a pair id that ignored the limit
+                                # would glue four tables into two pairs.
+                                "pair_id": (
+                                    f"{injection.recipe_id}_{source_schema}_{limit}_{naming}"
+                                ),
                             },
                         ),
                     )
