@@ -12,6 +12,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.pyfunc import PyFuncModel
 from mlflow.tracking import MlflowClient
 
+
 load_dotenv()
 
 # Every registered model the API serves, and the alias it serves them under. The
