@@ -109,8 +109,7 @@ def decide_and_promote(
         return PromotionOutcome(
             model_name,
             "noop_same_version",
-            f"{model_name}: prod already at v{prod_version.version} (== dev), "
-            "nothing to do.",
+            f"{model_name}: prod already at v{prod_version.version} (== dev), nothing to do.",
         )
 
     prod_metric = get_metric(client, prod_version, metric_name)
@@ -169,8 +168,7 @@ def main() -> int:
     client = MlflowClient()
 
     outcomes = [
-        decide_and_promote(client, model_name, args.metric, args.dry_run)
-        for model_name in models
+        decide_and_promote(client, model_name, args.metric, args.dry_run) for model_name in models
     ]
 
     for outcome in outcomes:
