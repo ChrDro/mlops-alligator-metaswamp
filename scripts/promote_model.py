@@ -38,6 +38,7 @@ MODEL_NAMES = [
     "fk_model",
     "composite_fk_model",
     "denormalization_model",
+    "subject_area_model",
 ]
 DEFAULT_METRIC = "test_f1_score"
 
