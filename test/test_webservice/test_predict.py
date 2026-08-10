@@ -246,12 +246,16 @@ def test_load_model_requests_the_configured_alias_and_caches_per_model(monkeypat
         return FakePyFuncModel(["a"])
 
     monkeypatch.setattr(predict_module.mlflow.pyfunc, "load_model", fake_load_model)
+    monkeypatch.setattr(predict_module, "MODEL_ALIAS", "dev")
 
     predict_module.load_model("pk_model")
     predict_module.load_model("pk_model")
     predict_module.load_model("fk_model")
 
-    assert loaded_uris == ["models:/pk_model@dev", "models:/fk_model@dev"]
+    assert loaded_uris == [
+        "models:/pk_model@dev",
+        "models:/fk_model@dev",
+    ]
 
 
 def test_load_model_honors_a_non_default_model_alias(monkeypatch):
