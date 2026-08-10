@@ -140,6 +140,36 @@ python task_3/task_3_denormalization_train_and_register.py  # normal form
 python task_4/task_4_subject_area_train_and_register.py     # subject area
 ```
 
+The single-FK script takes **around 9 minutes**, noticeably longer than the others: it
+runs three hyperparameter searches, scores six candidates over five grouped folds each,
+and trains on three reference-scope widths (see [Features](#features)), so ~25k rows per
+fit rather than ~8k. During each search scikit-learn prints `Fitting 5 folds for each of
+30 candidates` and then stays quiet for minutes — that is the expected behaviour, not a
+hang. Piping the output hides progress entirely because Python buffers stdout, so use
+`python -u` if you redirect to a file.
+
+### 2b. Restart the model service after retraining
+
+```bash
+docker compose restart model-service    # only if the stack is already running
+```
+
+**This is not optional after a retrain.** The service resolves each model once and caches
+it with `@lru_cache`, so a freshly registered version is ignored until the process
+restarts. Skipping it produces a confusing failure: the registry holds the new model, but
+every request is scored by the old one, and any request carrying new features comes back
+as `400 Feature mismatch … the model expects N features`. The
+[contract tests](#testing) report the same drift for the same reason.
+
+Whenever the **feature set** changed, also rebuild the monitoring baselines and their
+image — a baseline describes one specific model version, so it is stale the moment that
+version changes:
+
+```bash
+python evidently_service/build_monitoring_references.py --only fk_columns
+docker compose up -d --build evidently_service
+```
+
 ### 3. Run the full stack
 
 ```bash
@@ -381,16 +411,33 @@ tables" is the size of each source database, not the number of feature rows.
 
 ## Features
 
-Features are engineered per column and per table. There are two feature sets:
+Features are engineered per column, per table, and — for the single-FK model — across
+tables. Generated directly from the training scripts:
 
 - **Tasks 1 & 2 — 31 features** (identical set; only the target differs), engineered in the
   training scripts from the bundled metadata CSV.
+- **Task 2 single FK — 37 features**: 30 of the shared set plus **7 cross-table features**
+  computed by [`src/cross_table_features.py`](src/cross_table_features.py). A foreign key
+  is a property of a *pair* of columns in two tables, so this is the only model that looks
+  outside the table being classified. They raised its cross-validated F1 from 0.696 to
+  0.810; that module's docstring carries the measurements, including three further ideas
+  that were measured and rejected.
 - **Task 3 — 53 features**, computed by [`prefect/nf_features.py`](prefect/nf_features.py)
   by *measuring* each table in Trino. Nothing in this set is read from a CSV column
   someone typed.
 
+> **Reference scope.** The cross-table features are relative to the set of other tables
+> they may look at. Training scopes that to one `database`; the serving pipeline can only
+> scope to a Trino schema, which may hold many unrelated tables. A model trained only on
+> the narrow scope drops to F1 0.666 on a wide one — below the 0.696 it gets with no
+> cross-table features at all. The fk model is therefore trained on several scope widths at
+> once, which holds it at 0.783 even in the worst case. `cv_f1_by_scope_*` in MLflow reports
+> the estimate per width.
+
 Identifier columns (`database`, `schema`, `table_name`, `column_name`) and raw
 `min_value` / `max_value` are never used as features — only for grouping and traceability.
+The cross-table features are *derived from* the identifiers rather than using them
+directly, which is why they are computed at runtime instead of stored in the CSV.
 
 ### Task 3: the feature set was rebuilt, not extended
 
@@ -765,7 +812,7 @@ decision procedure over the raw seed data, exhaustively rather than under a sear
 | Service monitoring | Prometheus + Grafana | ✅ golden signals, 10 alert rules, 5 provisioned dashboards |
 | Model monitoring | Evidently | ✅ input drift against a real reference set |
 | Data pipeline | Prefect + dbt | 🔜 planned |
-| Retraining | manual trigger | 🔜 planned — no trigger in code yet; models are cached per name via `@lru_cache`, so a reload hook would start at `load_model.cache_clear()` |
+| Retraining | manual trigger | 🔜 planned — no trigger in code yet. Models are cached per name via `@lru_cache`, so today a retrain needs `docker compose restart model-service` to take effect ([step 2b](#2b-restart-the-model-service-after-retraining)); a reload hook would start at `load_model.cache_clear()` |
 
 ### Monitoring detail
 
@@ -779,7 +826,20 @@ decision procedure over the raw seed data, exhaustively rather than under a sear
   plus a drift and a quality board each for the key and the normal-form models. A fresh
   `docker compose up` shows all of them with no manual setup.
 - `evidently_service/build_monitoring_references.py` regenerates the drift reference sets
-  from the training data. **Re-run it whenever the feature set changes.**
+  from the training data. **Re-run it whenever the feature set changes**, then rebuild the
+  image so the new baseline is baked in — see [step 2b](#2b-restart-the-model-service-after-retraining).
+- **Two different F1s are on the quality board, on purpose.** The Evidently
+  `evidently_clf_f1score` series comes from the Prefect backtest, which replays the
+  labelled holdout through the live model — and since the key models are refit on every
+  labelled row, those rows were in its training set. It is a *regression canary*: a drop
+  means something broke, but the level says nothing about unseen data. The honest number is
+  `model_offline_f1`, the cross-validated score of the version actually being served, which
+  the model service reads off its MLflow run at startup. The `estimator` label separates
+  `cv_mean_5fold_grouped` (fk, and cpk once retrained) from the older
+  `single_fold_holdout`, whose fold-to-fold spread was measured at up to 0.21 F1 — so a
+  model still on the old estimator cannot silently read as if it were cross-validated.
+  `model_served_version` sits alongside it, so a quality change can be lined up against a
+  deployment.
 
 ---
 

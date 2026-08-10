@@ -22,7 +22,7 @@ graph TD
         DQ --> SCRIPTS["5 Trainingsskripte<br/>task_1 pk + cpk<br/>task_2 fk + cfk<br/>task_3 normalform"]
         SCRIPTS --> CAND["je 4 Kandidaten<br/>RandomForest und XGBoost,<br/>Baseline + RandomizedSearchCV"]
         CAND --> TRACK["MLflow Tracking<br/>Params, Metriken, Confusion Matrix"]
-        TRACK --> BEST{"bester nach test_f1"}
+        TRACK --> BEST{"bester nach cv_f1_mean<br/>fk + cpk: 5-fold grouped CV<br/>pk, cfk, normalform: noch test_f1"}
         BEST --> REG["Registry: register_model<br/>+ Alias 'dev'"]
     end
 

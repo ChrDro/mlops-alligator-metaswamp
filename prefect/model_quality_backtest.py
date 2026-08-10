@@ -16,6 +16,31 @@ versions serving right now still score the way their baselines did?"
 That catches model-version regressions, a broken feature pipeline, and a bad
 rollback. It does NOT catch real-world drift, because the input rows never change.
 The drift dashboard covers that, fed automatically from the predict endpoints.
+
+These numbers are NOT generalization quality - read them as a canary
+--------------------------------------------------------------------
+"Excluded from each baseline" means excluded from the Evidently *reference*, not
+from *training*. The two splits are unrelated: build_monitoring_references.py
+splits by hashing a column's identity, while the training scripts split by
+`database`. Worse, the key models are refit on every labelled row before being
+registered (see task_2/task_2_fk_train_and_register.py), so as of 2026-08-05
+**100% of these holdout rows were in the training set of the model scoring them.**
+
+The absolute values are therefore an in-sample upper bound. For fk_model the gap is
+large and worth remembering: this backtest reports ~0.99 accuracy where the honest
+out-of-fold estimate is F1 0.81.
+
+That does not make the flow useless - a canary only has to be *consistent*, and
+scoring the same rows every run is exactly what makes a drop mean "something
+broke". It does mean the level carries no information about unseen data. The honest
+quality number is the cross-validated one the training script logs to MLflow
+(`cv_f1_mean`, with `cv_f1_std` for its spread), which the model service republishes
+as the `model_offline_f1` gauge so Grafana can show both side by side.
+
+Closing the gap properly would mean holding a grouped fold back from the final
+refit. Measured cost for fk_model: -0.008 F1 on the served model, in exchange for
+an estimate with *higher* variance than the 5-fold CV already gives - so the
+trade was declined deliberately rather than overlooked.
 """
 
 import os

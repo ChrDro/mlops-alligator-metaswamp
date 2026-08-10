@@ -12,6 +12,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.pyfunc import PyFuncModel
 from mlflow.tracking import MlflowClient
 
+load_dotenv()
 
 # Every registered model the API serves, and the alias it serves them under. The
 # health endpoint reports on exactly this set, so a new model has to be listed here
@@ -23,7 +24,7 @@ MODEL_NAMES = (
     "composite_fk_model",
     "denormalization_model",
 )
-MODEL_ALIAS = "dev"
+MODEL_ALIAS = os.getenv("MODEL_ALIAS", "dev")
 
 # Budget for the reachability check below. Short on purpose: it exists to keep a
 # readiness probe inside a probe-sized deadline, not to wait out a slow server.
@@ -97,6 +98,57 @@ def resolve_model_versions() -> dict[str, str | None]:
             versions[model_name] = None
 
     return versions
+
+
+# Offline F1 metric names a training run may carry, best estimator first. `cv_f1_mean` is
+# the 5-fold grouped cross-validation mean that fk_model and composite_pk_model log since
+# 2026-08-05; `test_f1_score` is the older single-fold holdout the remaining models still
+# use, whose fold-to-fold spread was measured at up to 0.21 F1. The label published
+# alongside the value says which one it was, so the weaker estimator cannot silently pass
+# for the stronger one.
+OFFLINE_F1_METRICS = (
+    ("cv_f1_mean", "cv_mean_5fold_grouped"),
+    ("test_f1_score", "single_fold_holdout"),
+)
+
+
+def read_offline_quality() -> dict[str, dict[str, object]]:
+    """Per model, the offline F1 its currently-served version was scored at.
+
+    Read from the MLflow run behind the serving alias, so it always describes the version
+    actually in memory rather than the newest one in the registry. That distinction is
+    real: the service caches models with lru_cache, so a fresh registration does not take
+    effect until a restart.
+
+    Best-effort by design. A missing metric, an unregistered model or an unreachable
+    registry each yield no entry for that model, because a metrics export must never be
+    the reason the service fails to start.
+    """
+    tracking_uri = _configure_tracking()
+    if not _registry_reachable(tracking_uri):
+        return {}
+
+    client = MlflowClient()
+    quality: dict[str, dict[str, object]] = {}
+
+    for model_name in MODEL_NAMES:
+        try:
+            version = client.get_model_version_by_alias(model_name, MODEL_ALIAS)
+            metrics = client.get_run(version.run_id).data.metrics
+        except (MlflowException, OSError):
+            continue
+
+        for metric_name, estimator in OFFLINE_F1_METRICS:
+            if metric_name in metrics:
+                quality[model_name] = {
+                    "f1": float(metrics[metric_name]),
+                    "estimator": estimator,
+                    "version": version.version,
+                    "f1_std": (float(metrics["cv_f1_std"]) if "cv_f1_std" in metrics else None),
+                }
+                break
+
+    return quality
 
 
 def _align_to_signature(
