@@ -41,7 +41,8 @@ MODEL_NAMES = [
     "subject_area_model",
 ]
 DEFAULT_METRIC = "test_f1_score"
-# fk/cpk switched to grouped CV (no single held-out split) and log oof_f1_score instead.
+# fk/cpk runs registered before the grouped-CV metrics were renamed to test_f1_score
+# still carry the old oof_f1_score name; kept so those older versions stay promotable.
 FALLBACK_METRIC = "oof_f1_score"
 
 
