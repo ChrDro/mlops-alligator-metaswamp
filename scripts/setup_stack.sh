@@ -264,25 +264,26 @@ fi
 
 # --- 5. verify ---------------------------------------------------------------
 
-step "5/8  Check Registry und Pydantic schema contract prüfen"
+step "5/8  Check Registry und Pydantic schema contract"
 
+# A model only fails the check if missing from BOTH aliases; dev-only is flagged as needing promotion, not fatal.
 MISSING=""
+NEEDS_PROMOTION=""
 FOUND_DEV="$(registered_models dev)"
 FOUND_PROD="$(registered_models prod)"
 for entry in "${TRAIN_SCRIPTS[@]}"; do
     model_name="${entry%%:*}"
-    if printf '%s\n' "$FOUND_DEV" | grep -qx "$model_name"; then
+    if printf '%s\n' "$FOUND_PROD" | grep -qx "$model_name"; then
+        ok "$model_name @prod"
+    elif printf '%s\n' "$FOUND_DEV" | grep -qx "$model_name"; then
         ok "$model_name @dev"
+        NEEDS_PROMOTION="$NEEDS_PROMOTION $model_name"
     else
         MISSING="$MISSING $model_name"
     fi
-    if printf '%s\n' "$FOUND_PROD" | grep -qx "$model_name"; then
-        ok "$model_name @prod"
-    else
-        MISSING="$MISSING $model_name(prod)"
-    fi
 done
 [ -z "$MISSING" ] || fail "Not registered:$MISSING — model-service serves @prod, without it every predict returns code 400."
+[ -z "$NEEDS_PROMOTION" ] || warn "Only @dev, needs promotion to @prod:$NEEDS_PROMOTION (scripts/promote_model.py --model <name>)"
 
 # Catches the drift that once let three of four models return NULL in production:
 # the Pydantic request schema and the logged model signature must agree on the

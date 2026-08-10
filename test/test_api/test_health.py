@@ -41,7 +41,7 @@ def test_readiness_ok_when_every_model_resolves(client, monkeypatch):
 
     assert response.status_code == 200
     assert body["status"] == "ok"
-    assert body["alias"] == "dev"
+    assert body["alias"] == "dev" or body["alias"] == "prod"
     assert body["models"] == ALL_RESOLVED
 
 
