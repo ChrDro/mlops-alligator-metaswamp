@@ -193,6 +193,12 @@ def verify_label_against_discovered(
             (frozenset({determinant}), frozenset({dependent}))
             for determinant, dependent in diagnostics["dependencies"]
         ]
+        # Pair-determinant findings (2026-08-07) go through the same question: not "do
+        # extras exist" but "would they move the label".
+        extra += [
+            (frozenset(determinant), frozenset({dependent}))
+            for determinant, dependent in diagnostics.get("pair_dependencies", [])
+        ]
         combined = normalise_fds([*declared, *extra], diagnostics["columns"])
         recomputed = normal_form(diagnostics["columns"], combined, row.violates_1nf)
 

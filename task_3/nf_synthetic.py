@@ -52,7 +52,11 @@ if TYPE_CHECKING:
 # Variation axes (TASK_3_PLAN.md, 2d)
 # --------------------------------------------------------------------------------------
 
-ROW_COUNTS: tuple[int, ...] = (500, 5_000, 50_000)
+# 60 and 150 exist because real prediction targets are small: the Willibald period-1
+# tables run 6 to 2000 rows, while this axis used to start at 500 - so every tiny table
+# arrived out of distribution, with near-unique columns everywhere and key-derived
+# dependencies dropped by guards the training set never exercised at that scale.
+ROW_COUNTS: tuple[int, ...] = (60, 150, 500, 5_000, 50_000)
 COLUMN_COUNTS: tuple[int, ...] = (5, 10, 20, 40)
 NULL_RATES: tuple[float, ...] = (0.0, 0.05, 0.30)
 KEY_SIZES: tuple[int, ...] = (1, 2, 3)
@@ -275,7 +279,12 @@ def _product(values: Iterable[int]) -> int:
 MAX_COUNTED_DEPENDENCIES = 6
 
 
-def _dependency_counts(structure: int, schema_id: int, available: int) -> tuple[int, int]:
+def _dependency_counts(
+    structure: int,
+    schema_id: int,
+    available: int,
+    determinant_columns: int = 1,
+) -> tuple[int, int]:
     """
     How many transitive and partial dependencies this schema gets, and it varies on purpose.
 
@@ -287,6 +296,10 @@ def _dependency_counts(structure: int, schema_id: int, available: int) -> tuple[
     A 1NF schema always keeps at least one of each - the partial dependency is what makes it
     1NF, and the transitive one is inherited from the 2NF structure it is built on.
 
+    Args:
+        determinant_columns: How many columns the transitive determinant occupies - 1 for
+            the single-column chain, 2 when the chain hangs off a column pair.
+
     Returns:
         ``(n_transitive, n_partial)``; both zero for a 3NF structure, which has neither.
     """
@@ -296,8 +309,8 @@ def _dependency_counts(structure: int, schema_id: int, available: int) -> tuple[
     minimum = 1 if structure == 2 else 2
     spread = MAX_COUNTED_DEPENDENCIES - minimum + 1
     total = minimum + _deterministic_index(schema_id, 71, spread)
-    # One column carries the determinant, every dependency needs one of its own.
-    total = min(total, max(minimum, available - 1))
+    # The determinant claims its columns first; every dependency needs one of its own.
+    total = min(total, max(minimum, available - determinant_columns))
 
     if structure == 2:
         return total, 0
@@ -377,39 +390,74 @@ def build_schema(
         expression = _hashed("row_id", schema_id * 131 + position, cardinality)
         select[name] = _nullable(expression, schema_id * 977 + position, null_rate)
 
-    n_transitive, n_partial = _dependency_counts(structure, schema_id, len(others))
+    # Composite determinants (the Willibald gap, 2026-08-07). Roughly a third of the
+    # schemas hang their transitive chain off a column PAIR instead of a single column
+    # ({KatID, Umfang} -> Typ is the real-world shape), and some 1NF schemas with a
+    # three-part key use TWO key columns as the partial determinant. Applied across
+    # structures 1 and 2 (and the 0NF bases built on them), so "has a pair dependency"
+    # never separates one class from another - only *where* the determinant sits does.
+    needed_with_pair = {2: 2, 1: 3}.get(structure, 99) + 1
+    pair_transitive = (
+        structure <= 2
+        and len(others) >= needed_with_pair
+        and _deterministic_index(schema_id, 101, 3) == 0
+    )
+    pair_partial = structure <= 1 and key_size >= 3 and _deterministic_index(schema_id, 103, 2) == 0
+    determinant_columns = 2 if pair_transitive else 1
 
-    # 2NF and below: a transitive chain, key -> determinant -> dependents.
+    n_transitive, n_partial = _dependency_counts(
+        structure,
+        schema_id,
+        len(others),
+        determinant_columns,
+    )
+
+    # 2NF and below: a transitive chain, key -> determinant(s) -> dependents.
     if structure <= 2:
-        determinant = others[0]
-        determinant_cardinality = max(4, min(n_rows // 4, 64))
-        select[determinant] = _hashed("row_id", schema_id * 31 + 3, determinant_cardinality)
-        for offset, dependent in enumerate(others[1 : 1 + n_transitive]):
-            # The determinant's expression, not its alias: Trino cannot reference an output
-            # alias from elsewhere in the same SELECT list. Inlining it also keeps the
-            # dependency exact - the dependent is a function of the very same value.
+        determinants = others[:determinant_columns]
+        if pair_transitive:
+            # Two independent low-cardinality columns; their product stays far below the
+            # row count so the pair repeats often - the absolute-support evidence the
+            # pair-FD search needs (see nf_features.MIN_PAIR_FD_SUPPORT).
+            for index, name in enumerate(determinants):
+                cardinality = max(3, min(9 - 2 * index, n_rows // 40))
+                select[name] = _hashed("row_id", schema_id * (31 + 16 * index) + 3, cardinality)
+        else:
+            determinant_cardinality = max(4, min(n_rows // 4, 64))
+            select[determinants[0]] = _hashed("row_id", schema_id * 31 + 3, determinant_cardinality)
+        # The determinants' expressions, not their aliases: Trino cannot reference an
+        # output alias from elsewhere in the same SELECT list. Inlining also keeps the
+        # dependency exact - the dependent is a function of the very same value(s).
+        determinant_expression = (
+            "(" + " * 1000003 + ".join(f"({select[name]})" for name in determinants) + ")"
+        )
+        for offset, dependent in enumerate(
+            others[determinant_columns : determinant_columns + n_transitive],
+        ):
             select[dependent] = _nullable(
-                _hashed(f"({select[determinant]})", schema_id * 37 + 5 + offset * 3, 6 + offset),
+                _hashed(determinant_expression, schema_id * 37 + 5 + offset * 3, 6 + offset),
                 schema_id * 41 + offset,
                 null_rate,
-                gate_on=f"({select[determinant]})",
+                gate_on=determinant_expression,
             )
-            fds.append((frozenset({determinant}), frozenset({dependent})))
+            fds.append((frozenset(determinants), frozenset({dependent})))
 
-    # 1NF and below: half the key determines non-key attributes.
+    # 1NF and below: part of the key determines non-key attributes - one key column, or
+    # two of a three-part key when pair_partial fired.
     if structure <= 1:
-        partial_source = key_columns[0]
-        first = 1 + n_transitive
+        partial_sources = key_columns[:2] if pair_partial else key_columns[:1]
+        source_expression = (
+            "(" + " * 1000003 + ".join(f"({select[name]})" for name in partial_sources) + ")"
+        )
+        first = determinant_columns + n_transitive
         for offset, partial_target in enumerate(others[first : first + n_partial]):
             select[partial_target] = _nullable(
-                _hashed(
-                    f"({select[partial_source]})", schema_id * 53 + 7 + offset * 3, 10 + offset
-                ),
+                _hashed(source_expression, schema_id * 53 + 7 + offset * 3, 10 + offset),
                 schema_id * 59 + offset,
                 null_rate,
-                gate_on=f"({select[partial_source]})",
+                gate_on=source_expression,
             )
-            fds.append((frozenset({partial_source}), frozenset({partial_target})))
+            fds.append((frozenset(partial_sources), frozenset({partial_target})))
 
     # Decoy columns, on the attributes no dependency structure claimed. Both are trivial
     # dependencies dressed up as real ones, and both cost a normal form on real TPC-H before
@@ -421,8 +469,8 @@ def build_schema(
     # Neither changes the label, and neither needs a declared FD beyond `key -> others`: a
     # constant column is determined by the key like any other attribute, and a near-unique
     # column is simply a non-key attribute with a lot of values.
-    spare = others[1 + n_transitive + n_partial :]
-    constant_column, near_unique_column = None, None
+    spare = others[determinant_columns + n_transitive + n_partial :]
+    constant_column, near_unique_column, surrogate_column = None, None, None
     if len(spare) >= 1 and _deterministic_index(schema_id, 83, 3) == 0:
         constant_column = spare[0]
         select[constant_column] = "0"
@@ -430,6 +478,19 @@ def build_schema(
         near_unique_column = spare[1]
         # One collision per ~20 rows: high enough to look like a key, not unique.
         select[near_unique_column] = f"mod(row_id, {max(2, n_rows - n_rows // 20)})"
+    if len(spare) >= 3 and _deterministic_index(schema_id, 97, 3) == 0:
+        # A surrogate key next to the structural one - the Willibald kunde shape. A single
+        # unique column scores rows/2 in the UCC ranking while a composite whose
+        # cardinalities just cover the rows scores slightly less, so the surrogate takes
+        # rank 1 and the structural key drops to rank 2+. A partial dependency off that
+        # lower-ranked key is then invisible to the top-1 judgement (kunde was read as 2NF
+        # for exactly this reason) and visible only to the anykey features - this decoy is
+        # what gives those features cases to learn from. Declared like any key: it
+        # determines every other attribute, and on 2NF/3NF/0NF schemas it changes nothing,
+        # which keeps "has a surrogate" from correlating with any class.
+        surrogate_column = spare[2]
+        select[surrogate_column] = "row_id"
+        fds.append((frozenset({surrogate_column}), frozenset(names) - {surrogate_column}))
 
     # 0NF: a list-valued column. Never nulled - the detector measures a share of non-null
     # values, and thinning them out would only blur what it is being tested on.
@@ -472,8 +533,11 @@ def build_schema(
             "row_count": n_rows,
             "n_transitive": n_transitive,
             "n_partial": n_partial,
+            "pair_transitive": pair_transitive,
+            "pair_partial": pair_partial,
             "constant_column": constant_column,
             "near_unique_column": near_unique_column,
+            "surrogate_column": surrogate_column,
             "null_rate": null_rate,
             "naming": naming,
             "base": structure,

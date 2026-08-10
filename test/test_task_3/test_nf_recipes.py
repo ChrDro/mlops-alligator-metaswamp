@@ -48,6 +48,10 @@ EXPECTED_LABELS = {
     "lineitem_with_status": 2,
     "lineitem_part": 2,
     "lineitem_supplier_nation": 2,
+    # 2NF via a PAIR determinant - a derived column is a
+    # function of two low-cardinality fact columns, and neither alone determines it.
+    "lineitem_ship_class": 2,
+    "orders_handling_code": 2,
     # 1NF, partial dependencies
     "lineitem_orders": 1,
     "lineitem_orders_customer": 1,
