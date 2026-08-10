@@ -92,7 +92,7 @@ models:
     - prediction
     # The strongest normalisation signals: repeated values within a column and
     # duplicated groups across the table.
-    - col_unique_ratio
+    - unique_ratio
     - table_row_count
 
   cfk_columns:

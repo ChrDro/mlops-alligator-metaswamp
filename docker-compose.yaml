@@ -38,7 +38,7 @@ services:
       - ml-services-monitoring
 
   prometheus:
-    image: prom/prometheus:v3.7.3
+    image: prom/prometheus:v3.13.2
     ports:
       - "9090:9090"
     volumes:
@@ -49,7 +49,7 @@ services:
       - ml-services-monitoring
 
   alertmanager:
-    image: prom/alertmanager:v0.28.1
+    image: prom/alertmanager:v0.33.1
     ports:
       - "9093:9093"
     volumes:
@@ -65,7 +65,7 @@ services:
       - ml-services-monitoring
 
   grafana:
-    image: grafana/grafana:13.0.1
+    image: grafana/grafana:13.0.6
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -212,7 +212,11 @@ services:
       - ml-services-monitoring
 
   minio:
-    image: minio/minio:latest
+    # minio/minio was archived upstream (2026-02) and is frozen on
+    # RELEASE.2025-09-07 with unpatched CRITICAL CVEs. pgsty/minio is a
+    # community-maintained drop-in fork: same env vars, same server command,
+    # same on-disk format, ships mc at the same path, and gets CVE backports.
+    image: pgsty/minio:latest
     container_name: mlflow_minio
     ports:
       - "9000:9000"
@@ -345,6 +349,7 @@ services:
       # --workers 1 below it takes the server from 18 processes and a 2.3 GiB
       # peak down to 5 processes and ~350 MiB.
       - MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
     depends_on:
       minio:
         condition: service_healthy

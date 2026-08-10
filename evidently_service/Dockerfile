@@ -2,6 +2,10 @@ FROM python:3.11.13-slim-bookworm
 
 WORKDIR /app
 
+# Patch the base image's OS packages (libgnutls30/libssl3/openssl CVEs) to
+# whatever Debian security has shipped as of build time.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 COPY . /app
 
 # One layer, and --no-cache-dir so pip's download cache does not end up in the
