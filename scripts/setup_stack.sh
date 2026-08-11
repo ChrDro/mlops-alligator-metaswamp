@@ -198,6 +198,27 @@ wait_for_http "http://localhost:8080/" "model-service" 180
 # the first boot after a rebuild is slow. Its healthcheck allows 300s start period.
 wait_for_http "http://localhost:4200/api/health" "prefect" 420
 
+wait_for_healthy trino 60
+
+# new_predict_data is where manually/externally loaded prediction data lands
+# (see prefect/change_events.py); nothing in this repo creates that schema, so
+# a fresh clone's Iceberg catalog has no such schema until someone tries to
+# load into it and hits "schema does not exist". Create it once, idempotently,
+# reusing the same Trino engine helper the pipelines use. Location is explicit
+# (rather than relying on the catalog's default-warehouse-dir) so the data
+# lands at a predictable spot in the warehouse bucket: s3://warehouse/new_predict_data/.
+docker compose exec -T prefect python -c "
+from change_detector import get_trino_engine
+from sqlalchemy import text
+with get_trino_engine().begin() as conn:
+    conn.execute(text(
+        \"CREATE SCHEMA IF NOT EXISTS iceberg.new_predict_data \"
+        \"WITH (location = 's3://warehouse/new_predict_data/')\"
+    ))
+print('iceberg.new_predict_data ready')
+" || fail "Could not create iceberg.new_predict_data schema. Check: docker compose logs trino"
+ok "iceberg.new_predict_data schema present"
+
 # The task_4 training script asks this service to name each discovered subject area,
 # so it has to be up before step 3. Its healthcheck only passes once the model is
 # pulled into the volume, which on a cold start means a multi-GB download.
