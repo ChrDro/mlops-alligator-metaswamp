@@ -687,9 +687,9 @@ def print_candidate_summary(candidates: list[dict]) -> None:
                 "cv_f1_std": round(c["cv"]["cv_f1_std"], 4),
                 "cv_f1_min": round(c["cv"]["cv_f1_min"], 4),
                 "cv_f1_max": round(c["cv"]["cv_f1_max"], 4),
-                "oof_precision": round(c["cv_metrics"]["precision"], 4),
-                "oof_recall": round(c["cv_metrics"]["recall"], 4),
-                "oof_pr_auc": round(c["cv_metrics"]["pr_auc"], 4),
+                "test_precision": round(c["cv_metrics"]["precision"], 4),
+                "test_recall": round(c["cv_metrics"]["recall"], 4),
+                "test_pr_auc": round(c["cv_metrics"]["pr_auc"], 4),
                 "train_f1": round(c["train_metrics"]["f1_score"], 4),
                 **{f"f1@{label}": round(score, 4) for label, score in c["cv"]["scope_f1"].items()},
             }
@@ -829,14 +829,22 @@ def log_candidate_run(
 ) -> str:
     """Log one candidate as its own MLflow run and return the run id.
 
-    Metric naming, all three prefixes describing different things:
-    - `cv_f1_*`   : mean/std/min/max over the five per-fold F1 scores. The spread is
-                    the number that showed the old single-fold score was noise.
-    - `oof_*`     : computed once over the pooled out-of-fold predictions. These are
-                    the honest quality estimates - judge the model by them.
+    Metric naming matches the train_*/test_* convention every other task's training
+    script uses, plus two pairs those don't need:
     - `train_*`   : in-sample on the full refit, logged purely as an overfitting tell
-                    (a large oof/train gap).
-    The old `test_*` prefix is gone because there is no single holdout any more.
+                    (a large test/train gap).
+    - `test_*`    : computed once over the pooled out-of-fold predictions, at the
+                    evaluation scope width. These are the honest quality estimates -
+                    judge the model by them. Named `test_*` for consistency even though
+                    the predictions were pooled from grouped CV rather than a single
+                    holdout split.
+    - `cv_f1_mean` / `cv_f1_std` : mean and spread over the five per-fold F1 scores,
+                    kept under this exact name because webservice/predict.py reads it
+                    to tell this grouped-CV estimate apart from the single-holdout
+                    `test_f1_score` the other models still log.
+    - `cv_f1_by_scope_{label}` : the same per-fold mean as `cv_f1_mean`, broken down by
+                    reference-scope width instead of pooled to one number - see the
+                    module docstring's scope augmentation section.
 
     The model artifact is logged with the sklearn flavor (works for RandomForest,
     XGBClassifier, LGBMClassifier and the TunedThresholdClassifierCV wrapper) so
@@ -866,20 +874,16 @@ def log_candidate_run(
         mlflow.log_param("alias", MODEL_ALIAS)
         mlflow.log_param("candidate", candidate["name"])
 
+        for metric_name, value in candidate["train_metrics"].items():
+            mlflow.log_metric(f"train_{metric_name}", value)
+        for metric_name, value in candidate["cv_metrics"].items():
+            mlflow.log_metric(f"test_{metric_name}", value)
         mlflow.log_metric("cv_f1_mean", cv_result["cv_f1_mean"])
         mlflow.log_metric("cv_f1_std", cv_result["cv_f1_std"])
-        mlflow.log_metric("cv_f1_min", cv_result["cv_f1_min"])
-        mlflow.log_metric("cv_f1_max", cv_result["cv_f1_max"])
         # What the model would score if the serving schema is wider than one database.
         # cv_f1_by_scope_pooled is the worst case: every table in one reference scope.
         for label, score in cv_result["scope_f1"].items():
             mlflow.log_metric(f"cv_f1_by_scope_{label}", score)
-        for fold, fold_score in enumerate(cv_result["fold_f1"]):
-            mlflow.log_metric("cv_f1_per_fold", fold_score, step=fold)
-        for metric_name, value in candidate["cv_metrics"].items():
-            mlflow.log_metric(f"oof_{metric_name}", value)
-        for metric_name, value in candidate["train_metrics"].items():
-            mlflow.log_metric(f"train_{metric_name}", value)
 
         mlflow.set_tags(
             {
@@ -901,7 +905,7 @@ def log_candidate_run(
                 "f1_by_reference_scope": cv_result["scope_f1"],
                 "fold_thresholds": cv_result["fold_thresholds"],
                 "oof_confusion_matrix": cv_result["oof_confusion_matrix"].tolist(),
-                "oof_metrics": candidate["cv_metrics"],
+                "test_metrics": candidate["cv_metrics"],
                 "train_metrics": candidate["train_metrics"],
             },
             "cross_validation.json",
