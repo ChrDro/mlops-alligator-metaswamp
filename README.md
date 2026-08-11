@@ -1,5 +1,7 @@
 # Alligator Metaswamp
 
+Say goodbye to manual database archaeology. Automatically discover primary and foreign keys, normalization forms, and data domains using only metadata and statistics—privacy-safe, automated, effortless.
+
 **Predicting primary keys, foreign keys and normal forms from database metadata alone.**
 
 Point this service at a database with no documented constraints and it suggests, for
@@ -58,13 +60,13 @@ Each task is a separate model, so six models are trained and served in total:
                             TRAINING (offline)
    ┌────────────┐   ┌────────────────────┐   ┌──────────────────────┐
    │ Source DBs │──▶│  training scripts  │──▶│   MLflow Registry    │
-   │ Trino / CSV│   │  5 models (sklearn)│   │  versions + @alias   │
+   │ Trino / CSV│   │  6 models          │   │  versions + @alias   │
    └────────────┘   └────────────────────┘   └──────────┬───────────┘
                                                          │ resolve models:/name@alias
                             SERVING (online)             ▼
    ┌────────────┐   ┌────────────────────┐   ┌──────────────────────┐
    │  client    │──▶│  FastAPI service   │──▶│  model held in memory │
-   │ REST / curl│   │  5 typed endpoints │   │  (cached, per model)  │
+   │ REST / curl│   │  6 typed endpoints │   │  (cached, per model)  │
    └────────────┘   └─────────┬──────────┘   └──────────────────────┘
                               │ /metrics, prediction events
                               ▼
@@ -96,13 +98,13 @@ pip install -e .
 Copy the environment template and fill in the values:
 
 ```bash
-cp env.template .env
+cp .env.example .env
 ```
 
 | Variable | Purpose |
 | :--- | :--- |
 | `MLFLOW_TRACKING_URI` | Where the service and training scripts reach MLflow (e.g. `http://127.0.0.1:5000`). **Required.** |
-| `MLFLOW_MODEL_ALIAS` | Which registry alias the service serves. Defaults to `dev`. |
+| `MODEL_ALIAS` | Which registry alias the running model-service resolves each model from. Defaults to `dev`; `docker-compose.yaml` sets it to `prod`, so the full stack needs a model promoted to `prod` before predictions work (see [step 2b](#2b-promote-a-model-to-prod)). |
 | `TRINO_USERNAME` / `TRINO_PASSWORD` / `TRINO_IP_ADDRESS` | Trino connection for pulling live metadata (optional; training also works from the bundled CSVs). `TRINO_IP_ADDRESS` is a host without a port - use `localhost` for the Trino container from `docker-compose.yaml`. The user is created in `password.db` by the credential script below. |
 | `TRINO_KEYSTORE_PASSWORD` / `TRINO_SHARED_SECRET` | Protect the generated TLS keystore and Trino's internal communication. Any non-empty values work locally. |
 | `OLLAMA_MODEL` / `OLLAMA_MODEL_FAMILY` | Which open-weights model names the task_4 subject areas. Defaults to `qwen2.5:3b`; use `qwen2.5:7b` if Docker has ≥8 GB RAM. Keep the two in sync — the container healthcheck greps for the family. |
@@ -148,14 +150,31 @@ fit rather than ~8k. During each search scikit-learn prints `Fitting 5 folds for
 hang. Piping the output hides progress entirely because Python buffers stdout, so use
 `python -u` if you redirect to a file.
 
-### 2b. Restart the model service after retraining
+### 2b. Promote a model to `prod`
+
+Training always registers under the `dev` alias, but the model-service in
+`docker-compose.yaml` serves `@prod` (see the `MODEL_ALIAS` table above). Move the alias
+with:
+
+```bash
+python scripts/promote_model.py                  # all 6 models
+python scripts/promote_model.py --model pk_model  # just one
+python scripts/promote_model.py --dry-run         # print the decision, move nothing
+```
+
+It only moves `prod` to the `dev` candidate when its metric (`test_f1_score` by default,
+override with `--metric`) is at least as good as the model currently serving `prod` — or
+unconditionally the first time, when `prod` does not exist yet. Safe to re-run: if `dev`
+and `prod` already point at the same version, it is a no-op.
+
+### 2c. Restart the model service after promoting
 
 ```bash
 docker compose restart model-service    # only if the stack is already running
 ```
 
-**This is not optional after a retrain.** The service resolves each model once and caches
-it with `@lru_cache`, so a freshly registered version is ignored until the process
+**This is not optional after a promotion.** The service resolves each model once and
+caches it with `@lru_cache`, so a freshly promoted version is ignored until the process
 restarts. Skipping it produces a confusing failure: the registry holds the new model, but
 every request is scored by the old one, and any request carrying new features comes back
 as `400 Feature mismatch … the model expects N features`. The
@@ -194,16 +213,15 @@ takes the stack from a fresh clone to a working prediction in one command.
 
 On first start the `ollama` service pulls its model (~2 GB for the default
 `qwen2.5:3b`) into a named volume, so the container reports `starting` for a few
-minutes before it turns `healthy`. Every later `up` reuses the volume. This replaces
-the previous OpenRouter call — no API key, and label generation needs no internet.
+minutes before it turns `healthy`. Every later `up` reuses the volume. Label generation
+needs no API key and no internet access.
 | MLflow | http://localhost:5000 |
 | Prefect | http://localhost:4200 |
 | MinIO console | http://localhost:9001 |
 | Trino (self-signed TLS, password auth) | https://localhost:8443 |
 | Nessie (Iceberg catalog) API | http://localhost:19120/api/v1 |
 
-Trino, Nessie and the `warehouse` bucket are part of this stack - the separate
-`docker run` setup under `trino-iceberg/` is gone, and its MinIO is now the same
+Trino, Nessie and the `warehouse` bucket are part of this stack, sharing the same
 `minio` service that MLflow stores artifacts in. Catalogs: `iceberg` (Nessie on
 MinIO), `duckdb` (`trino-iceberg/data/capstone.db`) and `tpch`.
 
@@ -439,17 +457,11 @@ Identifier columns (`database`, `schema`, `table_name`, `column_name`) and raw
 The cross-table features are *derived from* the identifiers rather than using them
 directly, which is why they are computed at runtime instead of stored in the CSV.
 
-### Task 3: the feature set was rebuilt, not extended
+### Task 3: feature engineering
 
-The previous Task 3 set had 29 features and a leakage problem it could not be patched out
-of: `is_this_col_violating_1nf`, `is_composite_key_part` and
-`is_this_col_partial_dependency` were hand-labelled *alongside* the target, so the model
-partly read the answer off its own input. Those three plus their table-level aggregates
-carried 90.6 % of the gain importance; without them the score fell to **0.7117**, and that
-was the honest baseline.
-
-The rebuilt set removes the cause rather than the symptom. Every feature is now derived
-from data the profiler discovers itself:
+None of the 47 features are hand-labelled alongside the target — each is derived from
+data the profiler discovers itself, which rules out a model partly reading the answer off
+its own input:
 
 - **Atomicity** is measured — separator density, token counts, the share of values that
   look like a packed list — instead of asserted by a `is_this_col_violating_1nf` flag.
@@ -640,10 +652,8 @@ therefore has no column — it is 89 % of all rows, so encoding it too would be 
 <summary><b>Tasks 1 &amp; 2 metadata &amp; statistics dictionary</b> (click to expand)</summary>
 
 `T1` = single/composite primary key · `T2` = single/composite foreign key ·
-`T3-legacy` = a column of `data/nf_test_analyse.csv`, the hand-labelled dataset the
-**previous** Task 3 model used; the rebuilt Task 3 uses none of them (see the dictionary
-above) · `identifier` = used for grouping only · `—` = present in the data but not used as
-a training feature.
+`identifier` = used for grouping only · `—` = present in the data but not used as a
+training feature.
 
 | Variable | Description | Example | Used in |
 | :--- | :--- | :--- | :--- |
@@ -660,57 +670,42 @@ a training feature.
 | `null_ratio` | `null_count / count` | "0.0" | — (dropped, redundant) |
 | `is_unique` | Column values are fully unique | 0 or 1 | T1, T2 |
 | `ordinal_position` | Position of the column in the table (1-based) | "2" | T1, T2 |
-| `unique_ratio` | `number_unique_values / count` | "0.177" | T1, T2, T3-legacy |
+| `unique_ratio` | `number_unique_values / count` | "0.177" | T1, T2 |
 | `is_non_null` | Column has no null values | 0 or 1 | — (dropped, redundant) |
 | `is_first_column` | Column is the first in the table | 0 or 1 | T1, T2 |
-| `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | T1, T2, T3-legacy |
-| `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | T1, T2, T3-legacy |
-| `table_column_count` | Total columns in the table | "9" | T1, T2, T3-legacy |
+| `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | T1, T2 |
+| `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | T1, T2 |
+| `table_column_count` | Total columns in the table | "9" | T1, T2 |
 | `table_unique_column_count` | Number of fully unique columns in the table | "0" | T1, T2 |
-| `table_row_count` | Number of rows in the table | "768" | T1, T2, T3-legacy |
+| `table_row_count` | Number of rows in the table | "768" | T1, T2 |
 | `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | — (dropped, redundant) |
 | `table_has_unique_column` | Table has at least one unique column | 0 or 1 | T1, T2 |
 | `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | T1, T2 |
-| `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | T1, T2, T3-legacy |
-| `table_id_named_column_count` | Number of ID-named columns in the table | "0" | T1, T2, T3-legacy |
+| `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | T1, T2 |
+| `table_id_named_column_count` | Number of ID-named columns in the table | "0" | T1, T2 |
 | `table_non_null_column_count` | Number of non-null columns in the table | "9" | T1, T2 |
-| `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | T1, T2, T3-legacy |
-| `table_integer_column_count` | Number of integer-typed columns in the table | "7" | T3-legacy |
-| `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | T1, T2, T3-legacy |
+| `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | T1, T2 |
+| `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | T1, T2 |
 | `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | T1, T2 |
 | `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | T1, T2 |
 | `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | T1, T2 |
 | `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | — (dropped, redundant) |
-| `name_ends_with_id` | Column name ends with "id" | 0 or 1 | T1, T2, T3-legacy |
+| `name_ends_with_id` | Column name ends with "id" | 0 or 1 | T1, T2 |
 | `name_contains_key` | Column name contains "key" | 0 or 1 | — (dropped, redundant) |
 | `name_contains_table_name` | Column name contains the table name | 0 or 1 | T1, T2 |
 | `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | T1, T2 |
-| `name_length` | Length of the column name | "7" | T1, T2, T3-legacy |
+| `name_length` | Length of the column name | "7" | T1, T2 |
 | `column_type_boolean` | One-hot: boolean | 0 or 1 | T1, T2 |
-| `column_type_char` | One-hot: char | 0 or 1 | T3-legacy |
-| `column_type_date` | One-hot: date | 0 or 1 | T1, T2, T3-legacy |
-| `column_type_decimal` | One-hot: decimal | 0 or 1 | T1, T2, T3-legacy |
-| `column_type_double` | One-hot: double | 0 or 1 | T1, T2, T3-legacy |
-| `column_type_integer` | One-hot: integer | 0 or 1 | T1, T2, T3-legacy |
-| `column_type_timestamp` | One-hot: timestamp | 0 or 1 | T3-legacy |
-| `column_type_varchar` | One-hot: varchar | 0 or 1 | T1, T2, T3-legacy |
-| `is_this_col_violating_1nf` | Column has non-atomic / multi-valued entries | 0 or 1 | T3-legacy |
-| `is_composite_key_part` | Column is part of a composite primary key | 0 or 1 | T3-legacy |
-| `is_this_col_partial_dependency` | Column partially depends on the composite PK | 0 or 1 | T3-legacy |
-| `table_avg_unique_ratio` | Mean `unique_ratio` across the table's columns | "0.312" | T3-legacy |
-| `table_avg_null_ratio` | Mean `null_ratio` across the table's columns | "0.05" | — (dropped, redundant) |
-| `table_std_unique_ratio` | Std dev of `unique_ratio` across the table | "0.21" | T3-legacy |
-| `table_ratio_of_pk_candidates` | Ratio of PK-candidate columns to total columns | "0.11" | T3-legacy |
-| `table_has_composite_pk` | Table uses a composite primary key | 0 or 1 | T3-legacy |
-| `table_ratio_composite_key_cols` | Ratio of composite-key columns to total | "0.22" | T3-legacy |
-| `table_ratio_1nf_violations` | Ratio of 1NF-violating columns to total | "0.0" | T3-legacy |
-| `table_has_partial_dependency` | Any column in the table is a partial dependency | 0 or 1 | T3-legacy |
+| `column_type_date` | One-hot: date | 0 or 1 | T1, T2 |
+| `column_type_decimal` | One-hot: decimal | 0 or 1 | T1, T2 |
+| `column_type_double` | One-hot: double | 0 or 1 | T1, T2 |
+| `column_type_integer` | One-hot: integer | 0 or 1 | T1, T2 |
+| `column_type_varchar` | One-hot: varchar | 0 or 1 | T1, T2 |
 | `table_contains_1nf_violation` | Table has a 1NF violation | 0 or 1 | — (dropped, leakage guard) |
 | `pk_target` | Is the column a single primary key? | 0 or 1 | **target: T1** |
 | `composite_pk_target` | Is the column part of a composite PK? | 0 or 1 | **target: T1** |
 | `fk_target` | Is the column a foreign key? | 0 or 1 | **target: T2** |
 | `composite_fk_target` | Is the column part of a composite FK? | 0 or 1 | **target: T2** |
-| `target_normal_form` | Highest normal form the table satisfies (0–3) | 0, 1, 2, 3 | **target: T3** |
 
 </details>
 
@@ -745,12 +740,11 @@ plain and with a randomised search. The reported number is the mean over **five*
 swings several points.
 
 The grouping is by **recipe and matched pair**, joined with union-find, not by
-`table_name`. Grouping by table name alone looked reasonable and was wrong: the generated
-set contains matched pairs — the same schema once with a 0NF violation injected and once
-without — that carry different recipe ids and opposite labels. Under a table-name split all
-24 pairs straddled the boundary, so the model could see one half of a pair in training and
-be scored on the other. Linking recipe and pair leaves 327 groups and zero pairs spanning
-the split.
+`table_name`: the generated set contains matched pairs — the same schema once with a 0NF
+violation injected and once without — that carry different recipe ids and opposite
+labels. Grouping by table name alone would let a model see one half of a pair in training
+and be scored on the other. Linking recipe and pair leaves 327 groups and zero pairs
+spanning the split.
 
 | | Column F1 | Table accuracy |
 | :--- | ---: | ---: |
@@ -807,12 +801,13 @@ decision procedure over the raw seed data, exhaustively rather than under a sear
 | Concern | Tool | Status |
 | :--- | :--- | :--- |
 | Experiment tracking & registry | MLflow | ✅ params, metrics, signature, feature list; alias-based deploy |
-| Model service | FastAPI + Docker | ✅ 5 typed endpoints, `/health/live` + `/health/ready`, `/metrics` |
+| Model service | FastAPI + Docker | ✅ 6 typed endpoints, `/health/live` + `/health/ready`, `/metrics` |
 | CI | GitHub Actions | ✅ Ruff lint/format + pytest with coverage |
+| Vulnerability scanning | Trivy | ✅ `scripts/scan_vulnerabilities.sh` scans every compose image, renders a PDF report under `security-reports/` |
 | Service monitoring | Prometheus + Grafana | ✅ golden signals, 10 alert rules, 5 provisioned dashboards |
 | Model monitoring | Evidently | ✅ input drift against a real reference set |
-| Data pipeline | Prefect + dbt | 🔜 planned |
-| Retraining | manual trigger | 🔜 planned — no trigger in code yet. Models are cached per name via `@lru_cache`, so today a retrain needs `docker compose restart model-service` to take effect ([step 2b](#2b-restart-the-model-service-after-retraining)); a reload hook would start at `load_model.cache_clear()` |
+| Data pipeline | Prefect | ✅ event-driven — a webhook (`POST /events/new-data`) or a cron safety net triggers watermark-based change detection, which fans out to three parallel prediction pipelines (keys, normal form, subject area) over the changed tables, plus a separately cron-scheduled quality backtest against the labelled holdout |
+| Retraining | `scripts/promote_model.py` | ✅ metric-gated `dev`→`prod` alias promotion (`test_f1_score` by default; `--model` / `--metric` / `--dry-run`). Models are cached per name via `@lru_cache`, so a promotion still needs `docker compose restart model-service` to take effect ([step 2c](#2c-restart-the-model-service-after-promoting)) |
 
 ### Monitoring detail
 
@@ -827,7 +822,7 @@ decision procedure over the raw seed data, exhaustively rather than under a sear
   `docker compose up` shows all of them with no manual setup.
 - `evidently_service/build_monitoring_references.py` regenerates the drift reference sets
   from the training data. **Re-run it whenever the feature set changes**, then rebuild the
-  image so the new baseline is baked in — see [step 2b](#2b-restart-the-model-service-after-retraining).
+  image so the new baseline is baked in — see [step 2c](#2c-restart-the-model-service-after-promoting).
 - **Two different F1s are on the quality board, on purpose.** The Evidently
   `evidently_clf_f1score` series comes from the Prefect backtest, which replays the
   labelled holdout through the live model — and since the key models are refit on every
@@ -852,35 +847,44 @@ ruff check . && ruff format --check .
 ```
 
 `test/test_api/` covers the health probes against an in-process app, including the
-degraded and unavailable states. `test/test_models/` checks the model/schema contract
-between the Pydantic request models and the registered MLflow signatures, skipping when
-no stack is reachable. `test/test_data/` validates the training CSVs.
-
-The five predict routes, request validation and `/metrics` are not covered yet — they are
-open items under **2.2** in [documentation/MLOPS_PLAN.md](documentation/MLOPS_PLAN.md).
+degraded and unavailable states. `test/test_webservice/` covers the six predict routes
+(success shape, feature forwarding, validation errors, model-failure mapping, monitoring
+events), `/metrics`, and the `/events/new-data` webhook. `test/test_models/` checks the
+model/schema contract between the Pydantic request models and the registered MLflow
+signatures, skipping when no stack is reachable. `test/test_data/` validates the training
+CSVs; `test/test_task_3/` validates the synthetic normal-form generator (recipes,
+labelling, manifest, the split used for cross-validation). `test/test_pipelines/` covers
+the Prefect change-detection and prediction flows against fakes, with no live Trino
+needed. `test/test_features/` covers the cross-table feature module, and
+`test/test_scripts/` covers the promotion gate.
 
 ---
 
 ## Project structure
 
 ```
-webservice/            FastAPI app, Pydantic schemas, predict + metrics
-task_1/ task_2/ task_3/  training + registration scripts, one per model
-evidently_service/     drift-monitoring service + reference builder
-prometheus/            scrape config + alert rules
-grafana/               provisioned datasource + dashboard
-test/                  API, prediction and data-quality tests
-scripts/               stack setup + Docker-out-of-Docker launcher
-data/                  training CSVs
-documentation/         MLOps plan, presentations
+webservice/                     FastAPI app, Pydantic schemas, predict + metrics
+task_1/ task_2/ task_3/ task_4/ training + registration scripts, one set per model
+prefect/                        change detection + prediction pipelines, quality backtest
+trino-iceberg/                  Trino/Nessie config, dev-credential generator
+dbt/                            dbt project scaffold (Trino profile)
+evidently_service/              drift-monitoring service + reference builder
+prometheus/ alertmanager/       scrape config + alert rules + routing
+grafana/                        provisioned datasource + dashboards
+test/                           API, pipeline, prediction and data-quality tests
+scripts/                        stack setup, promotion, vulnerability scan, DooD launcher
+curl_tests/                     one smoke-test script per predict route
+data/                           training CSVs
+documentation/                  MLOps plan, presentations
 ```
 
 ---
 
 ## Tech stack
 
-Python · scikit-learn · FastAPI · Pydantic · MLflow · Docker Compose · Trino ·
-Prometheus · Grafana · Evidently · Ruff · pytest · GitHub Actions · uv
+Python · scikit-learn · XGBoost · LightGBM · sentence-transformers / UMAP / HDBSCAN ·
+Ollama · FastAPI · Pydantic · MLflow · Prefect · Docker Compose · Trino · Nessie · MinIO ·
+Prometheus · Grafana · Evidently · Trivy · Ruff · pytest · GitHub Actions · uv
 
 ---
 
