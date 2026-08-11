@@ -6,6 +6,10 @@
 # start_period. Baked into an image they cost one cached layer instead.
 FROM prefecthq/prefect:3.6.25-python3.11
 
+# Patch the base image's OS packages (libgnutls30t64/libssl3t64/openssl
+# CVEs) to whatever Debian security has shipped as of build time.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
