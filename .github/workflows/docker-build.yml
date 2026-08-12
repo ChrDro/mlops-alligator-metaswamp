@@ -1,0 +1,182 @@
+name: Docker - Build & Push to GHCR
+
+# Builds the three images the compose stack builds locally (webservice,
+# evidently_service, prefect), scans each one with Trivy and publishes them to
+# GHCR. Design and the reasoning behind every choice here:
+# documentation/DOCKER_GHCR_DESIGN.md
+
+on:
+  push:
+    branches: [dev, main]
+    tags: ['v*']
+    paths-ignore: ['**.md', '.gitignore']
+
+  pull_request:
+    branches: [dev, main]
+    paths-ignore: ['**.md', '.gitignore']
+
+  # Republish without a code change. The three Dockerfiles run `apt-get upgrade`
+  # at build time, so a rebuild picks up whatever Debian security has shipped
+  # since - which is otherwise only possible by pushing a commit.
+  #
+  # Note: GitHub only offers this event once the workflow file exists on the
+  # DEFAULT branch, which is `main` and still sits on the initial commit
+  # (MLOPS_PLAN 2.3). The "Run workflow" button therefore stays absent until the
+  # dev -> main merge happens. Declared now so it works the moment it can.
+  workflow_dispatch:
+
+concurrency:
+  # A newer push to the same ref makes the running build obsolete. Tags and
+  # branches get separate groups because github.ref differs.
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # This is what replaces the GHCR_TOKEN secret that MLOPS_PLAN 2.4 asks for:
+      # the built-in GITHUB_TOKEN can publish into the repository owner's
+      # namespace, so there is no secret to create or rotate.
+      packages: write
+
+    strategy:
+      # One broken image must not cut off the results for the other two - which
+      # is exactly the information needed while all three Dockerfiles are being
+      # changed.
+      fail-fast: false
+      matrix:
+        include:
+          - { name: alligator-model-service,     context: webservice }
+          - { name: alligator-evidently-service, context: evidently_service }
+          - { name: alligator-prefect,           context: prefect }
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        # Required for the gha cache backend below.
+        uses: docker/setup-buildx-action@v3
+
+      # The owner is spelled "ChrDro" but GHCR paths have to be lowercase, and
+      # github.repository_owner keeps the mixed case. The image reference is
+      # therefore written out literally rather than built from a context value.
+      - name: Collect tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/chrdro/${{ matrix.name }}
+          # latest is set by the explicit raw line below and nowhere else -
+          # otherwise a v* tag would also claim it and latest would have two
+          # sources.
+          flavor: latest=false
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # latest deliberately follows dev while main still sits on the
+            # initial commit (MLOPS_PLAN 2.3). After the dev -> main merge,
+            # replace 'dev' with 'main' here - that is the only edit needed.
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/dev' }}
+
+      # Build, scan, then push - deliberately not build-and-push in one step.
+      # load: true puts the image into the runner's Docker daemon, which is what
+      # gives Trivy something to look at on pull_request runs, where nothing is
+      # pushed. It also means nothing reaches the registry unscanned, so turning
+      # the scan into a gate later is a one-line change rather than a rebuild of
+      # this workflow.
+      - name: Build (load locally, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          # amd64 only: arm64 would need QEMU emulation, and emulating the
+          # install of scipy/lightgbm/xgboost takes the build from minutes to
+          # tens of minutes. Deployment targets are x86 servers and Docker
+          # Desktop.
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Keeps unknown/unknown attestation entries off the package page.
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      # Same severity filter as scripts/scan_vulnerabilities.sh, so CI and local
+      # numbers are comparable.
+      - name: Scan with Trivy (table)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/chrdro/${{ matrix.name }}:${{ steps.meta.outputs.version }}
+          format: table
+          severity: CRITICAL,HIGH
+          # The vulnerability database is pulled from ghcr.io, where anonymous
+          # pulls are rate limited per IP - the usual reason Trivy steps fail
+          # with TOOMANYREQUESTS on shared runners.
+          github-pat: ${{ secrets.GITHUB_TOKEN }}
+          # Not blocking, on purpose: base image findings are not fixable from
+          # this repository, and a gate on them would keep the pipeline
+          # permanently red and therefore ignored. Flip to 1 once the findings
+          # are clean.
+          exit-code: '0'
+          output: trivy-table.txt
+
+      - name: Append the Trivy table to the job summary
+        if: always()
+        run: |
+          {
+            echo "## Trivy: ${{ matrix.name }} (CRITICAL, HIGH)"
+            echo '```'
+            cat trivy-table.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # JSON as well, because that is the input format of
+      # scripts/generate_vulnerability_report.py - the same PDF report can be
+      # produced from a CI run. SARIF is not an option here: code scanning needs
+      # Advanced Security on private repositories.
+      - name: Scan with Trivy (JSON)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/chrdro/${{ matrix.name }}:${{ steps.meta.outputs.version }}
+          format: json
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+          output: ${{ matrix.name }}.json
+          github-pat: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload the Trivy JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.name }}
+          path: ${{ matrix.name }}.json
+          retention-days: 30
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Fully served from the cache written above, so this costs seconds rather
+      # than a second build.
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.name }}
