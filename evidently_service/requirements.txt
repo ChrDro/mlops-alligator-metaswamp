@@ -6,6 +6,3 @@ prometheus_client==0.21.1
 PyYAML==6.0.2
 requests==2.32.3
 Werkzeug==3.1.8
-# Not used at runtime - pip bootstraps it into every environment regardless.
-# Pinned only to clear CVE-2026-24049 (path traversal, fixed in 0.46.2).
-wheel==0.47.0
