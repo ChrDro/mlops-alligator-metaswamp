@@ -157,8 +157,6 @@ def load_data() -> tuple[Path, pd.DataFrame]:
     """
     Load the generated training set (Phase 2 of TASK_3_PLAN.md).
 
-    Replaces `data/nf_test_analyse.csv`, which was hand-labelled, carried no label
-    generator, and contained two features copied from the label itself (finding 1.1).
     """
     print("\n------Data Loading------")
     input_path = REPO_ROOT / "data" / "nf_training.csv"

@@ -173,7 +173,7 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     The other tracks ignore the extra columns: each one selects features by name from its
     Pydantic model.
     """
-    return add_cross_table_features(df) if "database" in df.columns else df
+    return add_cross_table_features(df) if "is_unique" in df.columns else df
 
 
 def encode_column_type(df: pd.DataFrame, categories: list[str]) -> pd.DataFrame:
