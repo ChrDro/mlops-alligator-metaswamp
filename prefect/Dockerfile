@@ -14,6 +14,17 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
+# Corporate branding: retarget the browser-chrome/tile color. Only the two
+# literal color values are touched (not index.html as a whole), so this
+# survives a Prefect version bump as long as those meta tags keep their
+# current shape. Icon files themselves are bind-mounted, see docker-compose.yaml.
+RUN for ui_dir in /usr/local/lib/python3.11/site-packages/prefect/server/ui /usr/local/lib/python3.11/site-packages/prefect/server/ui-v2; do \
+      sed -i \
+        -e 's/msapplication-TileColor" content="#da532c"/msapplication-TileColor" content="#014B50"/' \
+        -e 's/theme-color" content="#ffffff"/theme-color" content="#014B50"/' \
+        "$ui_dir/index.html"; \
+    done
+
 # The flows stay a bind mount (see docker-compose.yaml), so editing
 # prefect/*.py takes effect on restart without a rebuild.
 WORKDIR /opt/flows

@@ -41,6 +41,7 @@ dependencies = [
     "mpld3>=0.5.10",
     # Talks to the local Ollama service
     "openai>=1.60.0",
+    "reportlab>=5.0.0",
 ]
 
 [project.optional-dependencies]
