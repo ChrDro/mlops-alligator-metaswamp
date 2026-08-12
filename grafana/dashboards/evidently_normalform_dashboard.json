@@ -1,7 +1,7 @@
 {
   "uid": "evidently-normalform-quality",
   "title": "Normalform Model Performance Monitoring",
-  "description": "Multiclass (normal form 0-3) classification quality for the denormalization model, scored against ground truth by the Evidently service. F1/precision/recall are MACRO-averaged across the four classes. Log loss is intentionally absent: the multiclass track has no prediction_proba column. Driven by the hourly model-quality-backtest Prefect deployment replaying a fixed labelled set (data/nf_test_analyse.csv), not by live traffic - live predictions carry no labels.",
+  "description": "Multiclass (normal form 0-3) classification quality for the denormalization model, scored against ground truth by the Evidently service. F1/precision/recall are MACRO-averaged across the four classes. Log loss is intentionally absent: the multiclass track has no prediction_proba column. Driven by the hourly model-quality-backtest Prefect deployment replaying a fixed labelled set (data/nf_training.csv), not by live traffic - live predictions carry no labels.",
   "tags": [
     "evidently",
     "ml-monitoring",
