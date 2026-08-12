@@ -268,19 +268,22 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM python:3.11.13-slim-bookworm AS runtime
+WORKDIR /app
 # libgomp1 fuer LightGBM, apt-get upgrade fuer die OS-CVEs des Basis-Images (wie
-# bisher). Dann fliegt der Installer des Basis-Images raus: ein Serving-Container
-# installiert zur Laufzeit nichts. Reihenfolge wheel->setuptools->pip ist Absicht,
-# pip entfernt sich zuletzt selbst. Erklaerung siehe Punkt 1 unten.
+# bisher).
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
-    && python -m pip uninstall -y wheel setuptools pip \
     && useradd --create-home --uid 1000 appuser
 COPY --from=builder /install /usr/local
+# NACH dem COPY, und mit beiden Mechanismen - siehe Punkt 1 unten, beides in der
+# Umsetzung am 12.08. erzwungen worden.
+RUN python -m pip uninstall -y wheel setuptools pip \
+    && cd /usr/local/lib/python3.11/site-packages \
+    && rm -rf pip pip-*.dist-info setuptools setuptools-*.dist-info \
+              wheel wheel-*.dist-info
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-WORKDIR /app
 COPY --chown=appuser:appuser . /app
 USER appuser
 EXPOSE 8080
@@ -291,21 +294,34 @@ CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
 
 Vier Punkte, die begründet werden müssen:
 
-1. **Kein Installer im Runtime-Image — und damit drei Pins weniger.** Das Basis-Image
-   bringt `pip 24.0`, `setuptools 65.5.1` und `wheel 0.45.1` mit; `wheel 0.45.1` liegt
-   *unterhalb* der für CVE-2026-24049 gefixten 0.46.2. Genau deshalb steht in allen drei
-   `requirements.txt` ein `wheel==0.47.0` mit dem Kommentar „not used at runtime, pinned
-   only to clear CVE-2026-24049". Zwei Mechanismen greifen hier zusammen:
-   `python -m pip uninstall` im Runtime-Stage entfernt die drei Pakete des Basis-Images,
-   und `--prefix=/install` im Builder kopiert nur die Requirements-Pakete herüber — `wheel`
-   landet dort also nur noch, *weil es in der `requirements.txt` steht*. Fällt der Pin,
-   ist es weg. **Die CVE-Fläche verschwindet damit, statt gepatcht zu werden**, und
-   `setuptools 65.5.1` mit seinen eigenen HIGH-Findings gleich mit.
-   ⚠️ Risiko: Pakete, die zur Laufzeit `pkg_resources` importieren, brechen ohne
-   `setuptools`. Kandidat ist `gunicorn` in `evidently_service` (ab 23.x auf
-   `importlib` umgestellt, also erwartet unkritisch). **Fallback, falls ein Smoke-Test
-   bricht:** `setuptools` behalten und stattdessen auf eine gefixte Version pinnen. Die
-   `wheel`-Pins fallen in beiden Fällen.
+1. **Kein Installer im Runtime-Image — Reihenfolge und Mechanismus sind beides nicht
+   beliebig.** Das Basis-Image bringt `pip 24.0`, `setuptools 65.5.1` und `wheel 0.45.1`
+   mit; `wheel 0.45.1` liegt *unterhalb* der für CVE-2026-24049 gefixten 0.46.2, weshalb
+   in allen drei `requirements.txt` ein `wheel==0.47.0` steht.
+
+   **Korrigiert am 12.08., beide Punkte in der Umsetzung erzwungen:**
+
+   - **Der Entfernungsschritt muss *nach* `COPY --from=builder` stehen.** Davor setzt die
+     Kopie aus `/install` das Paket wieder ein. Nicht hypothetisch: der erste gebaute
+     Stand entfernte nur `wheel 0.45.1` des Basis-Images, `wheel-0.47.0.dist-info` aus
+     der `requirements.txt` überlebte, und `import wheel` funktionierte weiter.
+   - **`pip uninstall` allein genügt nicht, `rm` allein auch nicht.** `--prefix` plus
+     `COPY` können *zwei* `dist-info` im selben `site-packages` hinterlassen (eine aus dem
+     Basis-Image, eine aus einer gleitenden transitiven Abhängigkeit); `pip uninstall`
+     behandelt nur eine davon, Trivy liest beide. Umgekehrt ist `pip uninstall` das
+     einzige, was `distutils-precedence.pth` und `_distutils_hack` mitnimmt — bleiben die
+     liegen, wirft jeder Interpreterstart. Deshalb beide, in dieser Reihenfolge, und die
+     Globs ausgeschrieben, damit sie nicht `setuptools_scm` mitreißen.
+
+   Damit fällt der `wheel`-Pin — **im selben Commit wie das Dockerfile, nicht später**:
+   bleibt er stehen, liegt `wheel` über `/install` wieder im Image und die Zusage „kein
+   Installer zur Laufzeit" wäre falsch. **`prefect/requirements.txt` behält seinen Pin**,
+   siehe Abschnitt „Gemessene Ergebnisse".
+
+   Das Risiko, dass etwas zur Laufzeit `pkg_resources` braucht, ist überprüft statt
+   angenommen: `gunicorn 23.0.0` läuft ohne `setuptools`, `mlflow.pyfunc.load_model`
+   importiert ohne es. Der Fallback (statt entfernen: auf eine gefixte Version pinnen)
+   wurde nicht gebraucht.
 2. **`HEALTHCHECK` auf `/health/live`, nicht `/health/ready`.** Der Image-Default gehört
    auf „Prozess lebt". Der strengere Compose-Healthcheck auf `/health/ready` (verlangt,
    dass die Registry die Modelle wirklich auflöst) bleibt unverändert und überschreibt
@@ -365,8 +381,14 @@ lokal vorher gebaut wurde (sonst versucht Trivy zu ziehen und braucht ein Login)
 4. `docker compose exec model-service id` → **nicht** `uid=0`
 5. ein Skript aus [`curl_tests/`](../curl_tests/) liefert eine Prediction — beweist, dass
    der non-root User die MLflow-Artefakte aus MinIO laden kann
-6. `bash scripts/scan_vulnerabilities.sh` → Einträge zu `pip`/`setuptools`/`wheel`
-   verschwunden. **Erst danach** die `wheel`-Pins aus den drei `requirements.txt` löschen
+6. ~~`bash scripts/scan_vulnerabilities.sh`~~ — **ersetzt am 12.08.**: `trivy` ist auf dem
+   Entwicklungsrechner nicht installiert, das Skript läuft dort also nicht. Der Nachweis
+   ist stattdessen **Abwesenheit im Image**, was ohnehin stärker ist als eine gesunkene
+   Findingzahl: `python -m pip --version` und `python -c "import wheel"` müssen scheitern,
+   und `ls -d …/site-packages/{pip,setuptools,wheel}*` muss leer sein. Ein Paket, das nicht
+   im Image liegt, kann keine CVE tragen. Die Bestätigung liefert der Trivy-Schritt des
+   Workflows: der PR-Lauf *vor* der Härtung und der *nach* der Härtung sind ein
+   Vorher/Nachher-Paar aus derselben Quelle
 7. PR öffnen → Actions baut alle drei ohne Push; nach dem Merge nach `dev` erscheinen drei
    Pakete auf der GHCR-Seite
 
@@ -378,6 +400,113 @@ darauf zielen Schritt 3 und 5. **Fallback:** `user: "0:0"` für diesen Service, 
 
 **Rollback:** Revert des PRs. Bereits gepushte Images bleiben in GHCR liegen und werden
 von niemandem gezogen (`pull_policy: build`).
+
+---
+
+## 4a. Gemessene Ergebnisse PR1 + PR2 (12.08.2026)
+
+PR2 = **#51**, gemergt. PR1 = **#52**. PR3–PR5 unverändert nach dem 14.08. (Abschnitt 5).
+
+### Volumen — die Erwartung aus Abschnitt 1 hat sich bestätigt
+
+| Image | vorher (am selben Tag neu gebaut) | nachher | Differenz |
+|---|---|---|---|
+| `model-service` | 1,72 GB | **1,71 GB** | −10 MB (0,6 %) |
+| `evidently_service` | 1,00 GB | **991 MB** | −9 MB (0,9 %) |
+| `prefect` | — | 1,07 GB | nur `HEALTHCHECK`, 0 Bytes |
+
+**Das AP2-Deliverable „<500 MB" ist damit nicht erfüllt und durch diesen PR nicht
+erfüllbar** — genau wie in Abschnitt 1 angekündigt. Es bleibt an PR3 hängen.
+
+Die Vergleichsbasis musste neu gebaut werden: die Images auf dem Entwicklungsrechner
+waren Wochen alt und lasen 1,62 GB / 963 MB. Gegen die zu vergleichen hätte der Härtung
+~100 MB Abhängigkeits-Drift als Erfolg zugeschrieben.
+
+### Sicherheit — vom Workflow selbst gemessen
+
+Gleicher Trivy-Aufruf, `CRITICAL,HIGH`, PR-Lauf vor (`sha-80be188`) gegen nach
+(`sha-cca0002`) der Härtung:
+
+| Image | vorher | nachher | Zuordnung |
+|---|---|---|---|
+| `alligator-model-service` | 6 C / 22 H | 6 C / **20 H** | **−2 HIGH, unsere**: `setuptools 65.5.1` (CVE-2024-6345, CVE-2025-47273) |
+| `alligator-evidently-service` | 6 C / 22 H | 6 C / **18 H** | **−3 HIGH unsere** (`setuptools` 65.5.1 ×2, 70.3.0 ×1); die vierte war `msgpack 1.1.2` und **nicht unsere** — siehe Befund 1 |
+| `alligator-prefect` | 17 C / 99 H | 17 C / 99 H | unverändert, wie erwartet — dieses Image bekommt nur einen `HEALTHCHECK` |
+
+`pip`, `setuptools` und `wheel` erscheinen in keinem der beiden Anwendungs-Images mehr;
+das Python-Target des Evidently-Images ging von 4 HIGH auf **null**.
+
+**`alligator-prefect` ist der Ausreißer und außer Reichweite:** 16 der 17 CRITICAL sind
+Perl (`perl`, `perl-base`, `libperl5.40`, `perl-modules-5.40`, je 4 CVEs auf `5.40.1-6`)
+— eine Sprachlaufzeit, die Prefect nicht benutzt, aus dem Upstream-Image auf Debian 13.6,
+wo die Fixes nicht heraus sind; `apt-get upgrade` läuft im Dockerfile bereits. Der einzige
+echte Hebel wäre, dieses Image aus `python:3.11-slim` + `pip install prefect==3.6.25`
+selbst zu bauen, was es vermutlich auf das Niveau der anderen zwei (28 Findings) brächte.
+Eigene Entscheidung, eigener PR — hier nur festgehalten.
+
+**Der `wheel`-Pin bleibt in `prefect/requirements.txt`.** Direkt am Basis-Image gemessen:
+`prefecthq/prefect:3.6.25-python3.11` liefert `wheel 0.45.1`, unterhalb der gefixten
+0.46.2. Da dieses Image seinen Installer behält, ist der Pin dort weiter tragend — anders
+als in den zwei Anwendungs-Images, wo das Paket jetzt ganz fehlt. Nebenbei gemessen:
+dieses Image läuft **schon heute ohne `setuptools`**, was belegt, dass die Prefect-Laufzeit
+es nicht braucht — ein Argument für PR5, dort ebenfalls `pip`/`wheel` zu entfernen.
+
+### Verifikation am laufenden Stack
+
+| Prüfung | Ergebnis |
+|---|---|
+| `id` in beiden Anwendungs-Containern | `uid=1000(appuser)` — vorher `uid=0(root)` |
+| `python -m pip --version` | `No module named pip` — vorher eine Version |
+| `pip*`/`setuptools*`/`wheel*`-`dist-info` | in keinem der beiden Images übrig |
+| `from mlflow.pyfunc import load_model` | ok |
+| `gunicorn --version` ohne `setuptools` | `23.0.0` |
+| `uvicorn --version` | 0.51.0 — Console-Scripts aus `/install/bin` sind in `/usr/local/bin` angekommen |
+| Evidently-Rebuild nach einer Codezeile | `pip install`-Layer **CACHED** → die Cache-Invalidierung aus 3.3 ist geschlossen |
+| `HEALTHCHECK` unter Compose | `evidently_service` erreicht `healthy`; Prefect-Probe in `.Config.Healthcheck` vorhanden |
+| `GET /health/ready` | `status: ok` — *All 5 models resolve for alias 'prod'* |
+| `GET /tracks` nach dem `col_unique_ratio`-Fix (#53) | **5 Tracks**, inkl. `nf_columns` (1200 Referenzzeilen) |
+| **echte Prediction**, `curl_tests/test_curl_predict_pk.sh` | `prediction: 1, probability: 0,973` |
+| `uv run pytest` | 558/19 mit laufendem Stack (vor dem Merge), 559/12 ohne (danach) — beide ohne Fehler |
+
+Die Prediction ist die tragende Prüfung: sie beweist, dass der non-root User Modelle aus
+der Registry auflöst und Artefakte über den `./mlruns`-Bind-Mount aus MinIO lädt. Das war
+das Einzelrisiko, das lokale Einzelcontainer-Läufe nicht abdecken konnten.
+
+### Drei Befunde, die die späteren PRs betreffen
+
+1. **Der Abhängigkeitsstand ist nicht reproduzierbar — und zwar zwischen Builds derselben
+   Dockerfile.** `requirements.txt` pinnt nur direkte Abhängigkeiten, transitive gleiten.
+   Zwei Belege, beide nur in CI-Builds und in keinem lokalen: `setuptools 70.3.0` (das war
+   der Grund, den Entfernungsschritt hinter das `COPY` zu ziehen) und `msgpack 1.1.2`
+   (dessen Verschwinden deshalb **nicht** der Härtung zugerechnet wird).
+   **Konsequenz für PR3:** dessen Vorher/Nachher muss an *einer* Stelle gemessen werden,
+   nicht lokal gegen CI. Die eigentliche Lösung wäre eine Lock-Datei je Service-Image
+   (`uv pip compile`), nicht mehr handgeschriebene Pins — eigenes Thema, gehört zu 7.3.
+2. **Das in CI gebaute Evidently-Image enthält überhaupt keine Referenzdatensätze.**
+   `evidently_service/references/` ist gitignored (`.gitignore:238`), git verfolgt in
+   diesem Verzeichnis nur 7 Dateien. Das veröffentlichte Image startet also mit null
+   Tracks. **Damit ist PR4 (References mounten statt einbacken) keine Optimierung, sondern
+   die Voraussetzung dafür, dass das publizierte Artefakt benutzbar ist.**
+3. **PR4 muss auf dem `setup_stack.sh` nach #53 aufsetzen.** Dieser Hotfix hat
+   `nf_columns` in `MONITORED_TRACKS` aufgenommen und einen Check ergänzt; die
+   Beschreibung in PR4 unten bezieht sich auf den Stand davor.
+
+### Zwei Probleme, die dabei gefunden wurden und nicht zu diesem Vorhaben gehören
+
+1. **`evidently_service` konnte nicht starten, wenn eine nf-Baseline vorlag** —
+   `config.yaml` listete `unique_ratio` in `nf_columns.drift_columns`, der
+   Normalform-Featureraum nennt es `col_unique_ratio`. Zuordnung per Differenztest: ein
+   Image aus dem Dockerfile **vor** der Härtung scheitert identisch. **Inzwischen mit #53
+   behoben** (`9939980`), danach laden alle 5 Tracks. Latent gewesen, weil `references/`
+   gitignored ist — und #53 hätte es für alle sichtbar gemacht, weil dort jede Maschine
+   diese Datei erzeugt.
+2. **Prometheus und Alertmanager können auf mindestens einem Entwicklungsrechner nicht
+   binden.** WinNAT reserviert TCP **9015–9114**, darin liegen 9090 und 9093;
+   `docker compose up` bricht mit „An attempt was made to access a socket in a way
+   forbidden by its access permissions" ab. Kein Prozess hält die Ports, Windows hat den
+   Bereich reserviert. Maschinenspezifisch, deshalb wurden die Compose-Portmappings
+   bewusst **nicht** angefasst. Behebung: `net stop winnat`, die beiden Ports per
+   `netsh int ipv4 add excludedportrange` ausnehmen, `net start winnat`.
 
 ---
 
@@ -469,13 +598,13 @@ bleibt offen, aber der Grund dagegen ist weg.
 
 ## 5. Zeitplan
 
-| | bis 14.08. (Präsentation) | danach |
-|---|---|---|
-| PR2 CI-Trigger | ✅ verbindlich | |
-| PR1 Workflow + Härtung | ✅ verbindlich | |
-| PR3 Slimming | | ✅ |
-| PR4 References-Mount | | ✅ |
-| PR5 Prefect/GHCR-Pull/Doku | | ✅ |
+| | bis 14.08. (Präsentation) | danach | Stand 12.08. |
+|---|---|---|---|
+| PR2 CI-Trigger | ✅ verbindlich | | **#51 gemergt** |
+| PR1 Workflow + Härtung | ✅ verbindlich | | **#52 offen, Inhalt fertig und verifiziert** |
+| PR3 Slimming | | ✅ | offen |
+| PR4 References-Mount | | ✅ | offen |
+| PR5 Prefect/GHCR-Pull/Doku | | ✅ | offen |
 
 Bewusst *nicht* vor dem 14.08.: PR3 fasst den Serving-Pfad an. Zwei Tage vor einer
 Präsentation an `mlflow` zu drehen ist das falsche Risiko — der Gewinn wäre nur eine
@@ -491,7 +620,7 @@ und in 2.4 steht `[x]` statt `[ ]`.
 
 | AP2-Deliverable | Wie es erfüllt wird |
 |---|---|
-| Docker Image <500 MB | **offen bis PR3 gemessen ist.** Wird nicht versprochen: 1,49 der 1,51 GB sind Python-Abhängigkeiten. Ergebnis wird in jedem Fall mit Zahl dokumentiert |
+| Docker Image <500 MB | **nicht erfüllt, gemessen: 1,71 GB / 991 MB** (Abschnitt 4a). Die Härtung bringt −10 bzw. −9 MB, weil 1,49 der 1,51 GB Python-Abhängigkeiten sind. Hängt vollständig an PR3 |
 | Automatischer Push zu GHCR bei main-Branch | erfüllt, mit dokumentierter Abweichung: `latest` folgt `dev`, weil `main` auf dem Initial Commit steht. `main` ist im Trigger enthalten und übernimmt nach dem Merge per Einzeiler |
 | Docker Compose nutzt GHCR Images | erfüllt über `docker-compose.ghcr.yaml`, mit dokumentierter Abweichung: **zwei Pfade statt Umschalten**. Lokal bauen bleibt Default, weil ein privates Paket sonst jeden Rechner ohne `docker login` blockiert — inklusive `setup_stack.sh` |
 
@@ -526,7 +655,7 @@ und in 2.4 steht `[x]` statt `[ ]`.
 | `docker-compose.yaml` | 1 / 4 | `image:` + `pull_policy` + Healthcheck (1), References-Mount (4) |
 | `webservice/requirements.txt` | 1 / 3 | `wheel`-Pin raus (1), `mlflow-skinny` (3) |
 | `evidently_service/requirements.txt` | 1 | `wheel`-Pin raus |
-| `prefect/requirements.txt` | 1 | `wheel`-Pin raus **nur wenn** der Scan zeigt, dass das Prefect-Basis-Image keine ältere Version mitbringt |
+| `prefect/requirements.txt` | — | **unverändert.** Der `wheel`-Pin bleibt: das Basis-Image liefert `wheel 0.45.1` (gemessen), und dieses Image behält seinen Installer |
 | `evidently_service/.dockerignore` | 4 | `references/` |
 | `prefect/.dockerignore` | 5 | `.env`, Cache-Verzeichnisse |
 | `scripts/setup_stack.sh` | 4 | Rebuild → Restart |

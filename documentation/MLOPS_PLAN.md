@@ -165,6 +165,13 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 
 ## 2. DETAILLIERTE TODO-LISTE
 
+> ⚠️ **Teilaktualisierung 12. August 2026:** die Docker-, GHCR- und CI-Trigger-Punkte
+> (2.3-Trigger, 2.4, 3.3, 4.5-Dockerfile, Arbeitspaket 2) sind nach #51 und #52 auf dem
+> Stand vom 12.08.; Herleitung und Messwerte in
+> [DOCKER_GHCR_DESIGN.md](DOCKER_GHCR_DESIGN.md). **Alles andere unten ist weiterhin der
+> Stand vom 30. Juli** — insbesondere die Testzahl (inzwischen 559 statt 273) und die
+> Coverage-Angaben sind nicht nachgezogen.
+>
 > **Stand: 30. Juli 2026** — abgeglichen mit dem tatsächlichen Repo-Zustand
 > (Branch `dev` auf `e170ae1`, Arbeitsverzeichnis sauber). Zahlen aus einem echten Lauf:
 > `pytest --cov` → 273 passed / 86,38 %, `docker images`, `curl localhost:8080/metrics`
@@ -176,8 +183,8 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 | Phase | Status | Kern-Lücke |
 |-------|--------|------------|
 | 1 Clean Code | 🟢 **100%** | keine offenen Punkte |
-| 2 Testing & CI/CD | 🟡 ~75% | Tests stehen (273, 86 % Coverage); offen: CI horcht auf `develop` statt `dev`, `--cov` fehlt im Workflow, kein Docker-Build-Workflow, `main` steht auf dem Initial Commit |
-| 3 API & Docker | 🟡 ~60% | Kein API-Versioning, keine echten Health-Probes, Dockerfile nicht gehärtet (root, single-stage) |
+| 2 Testing & CI/CD | 🟢 ~90% | Tests stehen (559); **CI horcht seit #51 auf `dev`**, **Docker-Build-Workflow steht (#52, 2.4)**; offen: `--cov` fehlt im Workflow, `main` steht auf dem Initial Commit |
+| 3 API & Docker | 🟡 ~75% | Kein API-Versioning; **Health-Probes und Dockerfile-Härtung erledigt** (`/health/live`+`/health/ready`, multi-stage, non-root, HEALTHCHECK, kein Installer im Runtime-Image); offen: Volumen (hängt an `mlflow-skinny`), `references/` mounten |
 | 4 Data Pipeline | 🟡 ~70% | Streaming steht; dbt praktisch entkernt (keine Models/Seeds), Training nicht orchestriert |
 | 5 MLflow & Retraining | 🟡 ~70% | `dev`→`prod` Promotion mit F1-Gate steht; Retraining selbst (Trigger, Prefect-Flow) offen |
 | 6 Monitoring | 🟢 ~85% | Custom Model-Metriken fehlen, Alert-Receiver leer, kein Pipeline-Dashboard |
@@ -255,13 +262,13 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] `push`/`pull_request` horchen auf `develop`; der Integrationsbranch heißt `dev` → direkte Pushes auf `dev` und PRs *nach* `dev` laufen ohne CI. Entweder `develop` → `dev` umbenennen oder beides listen
   - [ ] `origin/main` steht auf `e203865 Initial commit`, `origin/dev` ist **100 Commits** weiter → der Branch-Schutz („Tests grün vor Merge") greift heute faktisch nirgends; `dev` → `main` mergen und `main` als Default-Ziel etablieren
 
-- [ ] **2.4** Docker Build & GHCR Pipeline  *(offen — TODO „Docker build über github actions")*
-  - [ ] `.github/workflows/docker-build.yml` erstellen
-  - [ ] Multi-stage Dockerfile optimieren (siehe 3.3)
-  - [ ] Docker Build und Push zu GHCR
-  - [ ] Image Tagging (latest, SHA, semantic versioning)
-  - [ ] GitHub Secrets für GHCR_TOKEN einrichten
-  - [ ] `docker-compose.yaml` auf GHCR-Images umstellen (baut heute lokal aus `webservice/` und `evidently_service/`)
+- [x] **2.4** Docker Build & GHCR Pipeline — **erledigt am 12.08. (#52)**, TODO „Docker build über github actions" geschlossen. Entwurf und Begründungen: [DOCKER_GHCR_DESIGN.md](DOCKER_GHCR_DESIGN.md)
+  - [x] [.github/workflows/docker-build.yml](../.github/workflows/docker-build.yml) erstellt — Matrix über **drei** Images (`webservice`, `evidently_service`, `prefect`; der Plan zählte zwei, `prefect/Dockerfile` aus 4.5 existiert inzwischen)
+  - [x] Multi-stage Dockerfile optimiert (siehe 3.3) — für die zwei Anwendungs-Images; `prefect` bewusst single-stage, weil das Basis-Image Prefect im System-Python mitbringt
+  - [x] Docker Build und Push zu GHCR — Reihenfolge bauen → Trivy → pushen, damit nichts ungescannt in die Registry gelangt. PR-Läufe pushen nicht (ein Fork-Token ist read-only)
+  - [x] Image Tagging: `:dev` + `:latest` von `dev`, `:main` von `main`, `:sha-<kurz>` immer, `:1.0.0`/`:1.0` von einem `v*`-Tag. **`latest` folgt bewusst `dev`**, solange `main` auf dem Initial Commit steht — ein Wort im Workflow schaltet es nach dem Merge um
+  - [x] ~~GitHub Secrets für GHCR_TOKEN einrichten~~ — **entfallen, nicht erledigt**: der eingebaute `GITHUB_TOKEN` mit `permissions: packages: write` publiziert in den Namespace des Owners. Es gibt kein Secret anzulegen oder zu rotieren
+  - [~] `docker-compose.yaml` auf GHCR-Images umstellen — die drei Services tragen jetzt den GHCR-**Namen** (`image:` + `pull_policy: build`), gebaut wird weiter lokal. Das echte Ziehen kommt als eigene Override-Datei, weil die Pakete privat sind und eine Maschine ohne `docker login ghcr.io` sonst blockiert wäre — inklusive [setup_stack.sh](../scripts/setup_stack.sh). Nebenwirkung: `scan_vulnerabilities.sh` liest `docker compose config --images` und benennt damit jetzt dieselben Artefakte wie die Registry
 
 ---
 
@@ -293,14 +300,16 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [ ] Model Alias/Version als Env Variable — `alias = "dev"` ist in [predict.py:14](../webservice/predict.py#L14) hart kodiert
   - [ ] `load_dotenv()` und `mlflow.set_tracking_uri()` aus dem Request-Pfad in den Startup ziehen (laufen heute bei **jedem** Predict)
 
-- [~] **3.3** Dockerfile Optimierung ([webservice/Dockerfile](../webservice/Dockerfile))
+- [~] **3.3** Dockerfile Optimierung ([webservice/Dockerfile](../webservice/Dockerfile)) — **Härtung erledigt am 12.08. (#52)**, offen bleibt nur das Volumen und der References-Mount. Messwerte und Begründungen: [DOCKER_GHCR_DESIGN.md](DOCKER_GHCR_DESIGN.md), Abschnitt 4a
   - [x] Minimal Base Image (`python:3.11.13-slim-bookworm`, `libgomp1` für LightGBM)
-  - [ ] Multi-stage Build (builder + runtime)
-  - [ ] Layer Caching optimieren — `COPY . /app` steht **vor** `pip install`, jede Code-Änderung invalidiert also die komplette Dependency-Installation
-  - [ ] Security: Non-root User
-  - [ ] `.dockerignore` erstellen — existiert **weder** im Root noch in `webservice/` oder `evidently_service/`; aktuell wandern `__pycache__/` und alles andere aus dem Build-Kontext ins Image
-  - [ ] `HEALTHCHECK` im Dockerfile (`model-service` ist der einzige Service in Compose ohne Healthcheck, deshalb kann nichts sinnvoll `depends_on: service_healthy` darauf setzen)
-  - [ ] Gleiches Härtungspaket für [evidently_service/Dockerfile](../evidently_service/Dockerfile) — dort zusätzlich: `COPY . /app` backt die Referenz-CSVs ins Image, weshalb [setup_stack.sh](../scripts/setup_stack.sh) den Service nach jedem Baseline-Bau neu bauen muss. Ein Volume-Mount für `references/` würde diesen Rebuild-Schritt ersatzlos streichen
+  - [x] Multi-stage Build (builder + runtime) — `pip install --prefix=/install` im Builder, `COPY --from=builder /install /usr/local` im Runtime. Für `prefect` bewusst **nicht**: dort steckt die Masse im Basis-Image, nicht in der `requirements.txt`
+  - [x] Layer Caching optimieren — in `webservice` war das schon vorher in Ordnung; in `evidently_service` stand `COPY . /app` **vor** `pip install` und ist jetzt danach. Verifiziert: nach einer geänderten Codezeile meldet der `pip install`-Layer `CACHED`
+  - [x] Security: Non-root User — `appuser` (uid 1000) in beiden Anwendungs-Images. Dazu **kein Paketinstaller im Runtime-Image**: `pip`/`setuptools`/`wheel` werden nach dem `COPY` entfernt, was pro Image 2 HIGH-Findings von `setuptools 65.5.1` streicht und die `wheel`-Pins überflüssig macht. `prefect` bleibt vorerst root (einziger Service mit beschreibbarem Bind-Mount und eigenem `PREFECT_HOME`)
+  - [x] ~~`.dockerignore` erstellen~~ — **war schon vorher erledigt**, in allen drei Kontexten. Der Befund hier war überholt. `prefect/.dockerignore` ist allerdings dünner als die anderen zwei (kein `.env`-Ausschluss)
+  - [x] `HEALTHCHECK` im Dockerfile — alle drei Images. `/health/live` im Model-Service (Liveness als Image-Default; der strengere Compose-Probe auf `/health/ready` bleibt und überschreibt ihn), `GET /tracks` im Evidently-Service, `/api/health` im Prefect-Image. Der Klammerzusatz war ebenfalls überholt: `model-service` hatte inzwischen einen Compose-Healthcheck, `evidently_service` war der Service ohne
+  - [x] Gleiches Härtungspaket für [evidently_service/Dockerfile](../evidently_service/Dockerfile) — umgesetzt
+  - [ ] **Volumen: nicht erreicht.** 1,72 → 1,71 GB bzw. 1,00 GB → 991 MB. 1,49 der 1,51 GB sind die eine `pip install`-Layer, und das gesamte `site-packages` des Basis-Images misst 19 MB — das ist das ganze Budget, mit dem Multi-stage arbeiten kann. Das AP2-Ziel „<500 MB" hängt allein an `mlflow` → `mlflow-skinny`
+  - [ ] `references/` mounten statt einbacken — **wichtiger als bisher notiert**: `evidently_service/references/` ist gitignored, das in CI gebaute Image enthält also **überhaupt keine** Referenzdatensätze und startet mit null Tracks. Der Mount ist damit nicht Optimierung, sondern Voraussetzung dafür, dass das publizierte Image benutzbar ist. Setzt auf dem `setup_stack.sh` nach #53 auf
 
 ---
 
@@ -368,7 +377,7 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
   - [x] `prefect`-Service ins `ml-services-monitoring`-Netz geholt und um den `serve()`-Runner erweitert (Server + Flow-Runner in einem Container)
   - [x] Prefect-Serverstate in Postgres statt SQLite: eigene DB `prefect` neben `mlflow_db`, angelegt von [ensure_database.py](../prefect/ensure_database.py) — überlebt jetzt `docker compose down`
   - [x] `prefect`-DB ins stündliche S3-Backup aufgenommen: eigener Service `prefect_postgres_backup` (Prefix `prefect_db_backups`, 7 Tage Retention) — das Image sichert nur je eine DB pro Container
-  - [ ] **`prefect/Dockerfile` bauen** — der Service installiert `asyncpg`, `sqlalchemy`, `trino`, `pandas`, `python-dotenv`, `requests` beim Containerstart per `pip install`. Deshalb braucht der Healthcheck `start_period: 300s`, und jeder `docker compose up` zahlt die Installation erneut. Die Versionen sind hier ein zweites Mal gepinnt, unabhängig von `pyproject.toml` → Driftquelle
+  - [x] **`prefect/Dockerfile` gebaut** — die Abhängigkeiten (`asyncpg`, `sqlalchemy`, `trino`, `pandas`, `python-dotenv`, `requests`) sind ins Image gebacken statt beim Containerstart installiert; `start_period` konnte damit von 300s auf 90s. Seit #52 hat das Image auch einen `HEALTHCHECK` auf `/api/health`. **Bewusst weiter single-stage und root**: das Basis-Image `prefecthq/prefect` bringt Prefect im System-Python mit, die Masse liegt also dort und nicht in der `requirements.txt`; non-root steht noch aus, weil dies der einzige Service mit beschreibbarem Bind-Mount und eigenem `PREFECT_HOME` ist. Die doppelte Pinnung gegenüber `pyproject.toml` bleibt eine Driftquelle. ⚠️ Trivy zählt hier **17 CRITICAL / 99 HIGH** gegen 6/22 bei den anderen zwei Images — 16 der 17 sind Perl-Pakete aus dem Upstream-Image, aus diesem Repo nicht behebbar (Details in [DOCKER_GHCR_DESIGN.md](DOCKER_GHCR_DESIGN.md) 4a)
   - [ ] Event Logging zu Monitoring (Prometheus-Metriken für empfangene Events, Detection-Latenz, Backlog-Tiefe) — Prefect ist **kein** Scrape-Target in [prometheus.yaml](../prometheus/prometheus.yaml), die Streaming-Pipeline ist damit die einzige Komponente ohne Telemetrie
   - [ ] Housekeeping-Job: abgeschlossene `pending_changes`-Zeilen nach N Tagen löschen
   - [x] **Automatisierte Tests für Detector und Claim-Logik (30.07.)** — [test/test_pipelines/](../test/test_pipelines/), 70 Tests ohne Trino: `diff_snapshots` inkl. blindem Fleck, Claim-Protokoll gegen eine mitschreibende `FakeConnection`, `recompute_table_stats`. Details in 2.2
@@ -548,10 +557,10 @@ Dieses Dokument beschreibt die vollständige MLOps-Integration für das PK/FK-De
 ### Nächste 5 sinnvolle Schritte
 
 1. **README auf den Ist-Stand bringen** (7.2) — sie ist das Einstiegsdokument und beschreibt derzeit ein anderes Projekt: nicht existierende Dateien, falsche Zahlen, Fertiges als „geplant" markiert. Billigste Korrektur mit dem größten Effekt.
-2. **`dev` → `main` mergen und CI-Trigger geradeziehen** (2.3) — `main` steht auf dem Initial Commit, der Workflow horcht auf `develop`. Solange beides so ist, schützt kein Gate irgendetwas.
+2. **`dev` → `main` mergen** (2.3) — **CI-Trigger ist erledigt** (#51, 12.08.: `develop` → `dev`; PRs nach `dev` liefen vorher ohne Lint und ohne Tests). `main` steht weiter auf dem Initial Commit, also greift das Merge-Gate erst mit diesem Schritt. Der Docker-Workflow hat `main` schon im Trigger und übernimmt `latest` danach mit einer Wortänderung.
 3. **Retraining-Flow in Prefect** (5.4) — der letzte fehlende Bogen im Kreislauf. Trainings-Scripts sind registrierungsfähig, das Trigger-Signal liefert jetzt der Quality-Backtest; nur Orchestrierung plus Baseline-Invalidierung fehlen.
 4. **Custom Model-Metriken + Coverage** (6.1/2.1) — `pytest-cov` und `[dev]`-Extra nachziehen (reparieren zwei kaputte CI-Steps), Prediction-Counter/Duration/Version-Gauge ergänzen (schalten die letzten Grafana-Panels frei).
-5. **Docker-Build-Workflow + Dockerfile-Härtung** (2.4/3.3) — Multi-stage, non-root, `.dockerignore`, `HEALTHCHECK`, Push zu GHCR. Für `evidently_service` zusätzlich `references/` mounten statt einbacken; das streicht einen Rebuild-Schritt aus dem Setup.
+5. ~~**Docker-Build-Workflow + Dockerfile-Härtung** (2.4/3.3)~~ — **erledigt am 12.08. (#52)**: Matrix-Workflow über drei Images mit Trivy und GHCR-Push, Multi-stage, non-root, `HEALTHCHECK`, kein Installer im Runtime-Image. Nachfolger dieses Punktes sind drei kleinere, in [DOCKER_GHCR_DESIGN.md](DOCKER_GHCR_DESIGN.md) beschriebene Schritte: `mlflow-skinny` (das Volumenziel), `references/` mounten (macht das publizierte Evidently-Image erst benutzbar), Prefect non-root plus GHCR-Pull-Pfad.
 
 **Danach, mit klarem Vorlauf:** dbt-Grundsatzentscheidung (4.1), `prefect/Dockerfile` (4.5), Streaming end-to-end gegen echte Trino-Daten (4.5), Alert-Receiver + ein End-to-End-Test (6.4).
 
@@ -578,7 +587,7 @@ unter dem Arbeitspaket. 9 von 15 Deliverables erfüllt.
 | AP | Deliverable 1 | Deliverable 2 | Deliverable 3 | Fazit |
 |----|---------------|---------------|---------------|-------|
 | **1** Foundation | Ruff fehlerfrei ✅ | ≥10 Tests / >50% Cov ✅ **273 / 86%** | CI auf jedem Push 🟡 | 🟢 **erledigt**, Testziel weit übertroffen |
-| **2** Docker & Registry | Image <500MB ❌ **1,65 GB** | GHCR-Push ❌ | Compose auf GHCR ❌ | 🔴 **nicht begonnen** |
+| **2** Docker & Registry | Image <500MB ❌ **1,71 GB** (nicht erreichbar ohne `mlflow-skinny`) | GHCR-Push ✅ | Compose auf GHCR 🟡 (Namen ja, Ziehen als Override offen) | 🟢 **erledigt bis auf Volumen**, 12.08. |
 | **3** API Enhancement | OpenAPI vollständig ❌ | Alle Endpoints getestet ✅ | Health Checks ❌ | 🟡 Modelle + Tests fertig, Endpoint-Liste offen |
 | **4** Data Pipeline | dbt generiert Test-Daten ❌ | Prefect Server ✅ | Flow orchestriert dbt ❌ *(verworfen)* | 🟡 Prefect-Hälfte fertig, dbt zurückgebaut |
 | **5** Batch Pipeline | Training Flow automatisch ❌ | Batch Prediction per CSV ❌ | Flows schedulbar ✅ | 🟡 Scheduling steht, Training + CSV fehlen |
@@ -692,20 +701,35 @@ Drei Muster fallen dabei auf:
 
 > #### 🔴 Ist-Stand AP2 (30.07.2026): nichts davon umgesetzt
 >
+> **Aktualisiert am 12.08.2026** nach #52. Alle Zahlen unten sind gemessen, nicht geschätzt;
+> Herleitung in [DOCKER_GHCR_DESIGN.md](DOCKER_GHCR_DESIGN.md), Abschnitt 4a.
+>
 > | Deliverable | Ist | Nachweis |
 > |---|---|---|
-> | Docker Image <500MB | ❌ **1,65 GB** | `docker images` → `model-service:latest` 1,65 GB, `evidently_service:latest` 1,2 GB. Faktor **3,3** über dem Ziel |
-> | Automatischer Push zu GHCR | ❌ | `.github/workflows/` enthält nur `ci.yml` |
-> | Compose nutzt GHCR Images | ❌ | beide Services haben `build:`-Blöcke, keine `image:`-Referenzen |
+> | Docker Image <500MB | ❌ **1,71 GB / 991 MB** | Neu gebaute Vergleichsbasis 1,72 GB / 1,00 GB → Härtung bringt −10 bzw. −9 MB. `docker history` zeigt warum: **1,49 der 1,51 GB sind die eine `pip install`-Layer**, und das gesamte `site-packages` des Basis-Images misst 19 MB. Multi-stage kann dieses Ziel nicht erreichen — es hängt an `mlflow` → `mlflow-skinny` |
+> | Automatischer Push zu GHCR | ✅ | [docker-build.yml](../.github/workflows/docker-build.yml): Matrix über **drei** Images, bauen → Trivy → pushen. Tags `:dev`/`:latest`/`:main`/`:sha-<kurz>`/semver. PR-Läufe bauen und scannen, pushen nicht |
+> | Compose nutzt GHCR Images | 🟡 | Die drei Services tragen den GHCR-**Namen** (`image:` + `pull_policy: build`); gebaut wird weiter lokal. Das Ziehen kommt als eigene Override-Datei, weil die Pakete privat sind und `setup_stack.sh` auf einer Maschine ohne `docker login` sonst stehen bliebe |
 >
-> **Nicht umgesetzte Teilschritte:** Multi-stage Build, non-root User, `HEALTHCHECK`, `.dockerignore`
-> (existiert in **keinem** der drei möglichen Pfade), Image-Tagging, GHCR-Secret.
+> **Umgesetzte Teilschritte:** Multi-stage Build (die zwei Anwendungs-Images), non-root
+> User (`appuser`, uid 1000), `HEALTHCHECK` (alle drei), Image-Tagging. Dazu über den Plan
+> hinaus: **kein Paketinstaller im Runtime-Image**, was pro Anwendungs-Image 2 HIGH-Findings
+> von `setuptools 65.5.1` streicht und die `wheel`-Pins überflüssig macht.
 >
-> **Zwei Beobachtungen für die Umsetzung:**
-> - In [webservice/Dockerfile](../webservice/Dockerfile) steht `COPY . /app` **vor** `pip install`. Jede Code-Änderung invalidiert damit die komplette Dependency-Installation — der Build ist unnötig teuer, und ohne `.dockerignore` wandert `__pycache__/` mit ins Image. Beides trägt direkt zu den 1,65 GB bei.
-> - Das `CMD` im Beispiel-Snippet oben (`uvicorn webservice.app:app`) passt **nicht** zum Projekt: der Build-Kontext ist `webservice/` selbst, `WORKDIR` ist `/app`, und die Module importieren sich flach (`from predict import predict`). Korrekt ist `app:app`. Beim Übernehmen des Snippets nicht mitkopieren.
+> **Zwei Punkte, die sich anders erledigt haben als hier vermerkt:**
+> - Das GHCR-Secret ist **entfallen**, nicht erledigt: `GITHUB_TOKEN` mit
+>   `permissions: packages: write` publiziert in den Namespace des Owners.
+> - `.dockerignore` existierte längst in allen drei Kontexten, und `COPY . /app` stand nur
+>   noch in `evidently_service` vor dem `pip install`. Beide Befunde oben waren überholt.
 >
-> Bleibt Priorität 5 der „Nächsten 5 Schritte" — nach der Doku, dem Merge-Gate und dem Retraining-Pfad.
+> **Was von AP2 offen bleibt:** das Volumenziel (`mlflow-skinny`), der echte GHCR-Pull-Pfad
+> und `prefect` als non-root. Neu dazugekommen und wichtiger als gedacht: `references/`
+> mounten — das in CI gebaute Evidently-Image enthält **keine** Referenzdatensätze
+> (gitignored) und startet mit null Tracks.
+>
+> **Beim Übernehmen des Snippets oben nicht mitkopieren:** das `CMD`
+> (`uvicorn webservice.app:app`) passt nicht zum Projekt. Der Build-Kontext ist
+> `webservice/` selbst, `WORKDIR` ist `/app`, die Module importieren sich flach — korrekt
+> ist `app:app`.
 
 ---
 
@@ -1070,7 +1094,7 @@ Drei Muster fallen dabei auf:
 | **Code Quality** | Ruff `0.16.0` + pre-commit + gitleaks | Linting, Formatting, Secret-Scan | ✅ |
 | **Testing** | pytest (56 Tests) | Datenqualität + Schema-Contract | 🟡 `pytest-cov`/`pytest-mock` fehlen |
 | **CI/CD** | GitHub Actions | Lint + Test | 🟡 Trigger-Branch falsch, Coverage-Steps ins Leere |
-| **Container** | Docker, Docker Compose (11 Services) | Containerization | 🟡 nicht gehärtet, kein `.dockerignore` |
+| **Container** | Docker, Docker Compose (13 Services) | Containerization | 🟢 gehärtet (multi-stage, non-root, HEALTHCHECK, kein Installer im Runtime-Image), `.dockerignore` in allen drei Kontexten, Images in GHCR |
 | **Registry** | GitHub Container Registry | Image Storage | ❌ offen, Compose baut lokal |
 | **API** | FastAPI, Pydantic | Model Service, 5 typisierte Endpoints + Event-Webhook | ✅ |
 | **Orchestration** | Prefect 3 | 4 Deployments: Detector, 2 Prediction-Pipelines, Quality-Backtest | ✅ |
@@ -1099,9 +1123,9 @@ Drei Muster fallen dabei auf:
 
 ### CI/CD
 
-- 🟡 Alle Commits werden getestet — Feature-Branches ja, `dev` selbst nicht (Trigger horcht auf `develop`)
-- ❌ Docker Images werden automatisch gebaut — kein `docker-build.yml`, kein GHCR-Push
-- ❌ Tests müssen grün sein vor Merge — `main` steht auf dem Initial Commit, PRs laufen nach `dev` ohne CI
+- ✅ Alle Commits werden getestet — seit #51 (12.08.) horcht der Trigger auf `dev` statt auf das nie existierende `develop`; Feature-Branches waren immer abgedeckt
+- ✅ Docker Images werden automatisch gebaut — [docker-build.yml](../.github/workflows/docker-build.yml) baut drei Images, scannt sie mit Trivy und pusht nach GHCR (#52, 12.08.)
+- 🟡 Tests müssen grün sein vor Merge — PRs nach `dev` laufen seit #51 mit CI; `main` steht weiter auf dem Initial Commit, ein echtes Branch-Protection-Gate fehlt also noch (2.3)
 
 ### Data Pipeline
 
@@ -1132,11 +1156,11 @@ schwächste Stelle.
 Die verbindliche, priorisierte Liste steht in **Abschnitt 2 → „Nächste 5 sinnvolle Schritte"**.
 Kurzfassung der Reihenfolge, in der die Arbeitspakete real abgeschlossen werden sollten:
 
-1. **Nachziehen, was schon läuft**: README/Doku auf den Ist-Stand (7.2), `dev` → `main` + CI-Trigger (2.3)
+1. **Nachziehen, was schon läuft**: README/Doku auf den Ist-Stand (7.2), `dev` → `main` (2.3 — der CI-Trigger ist mit #51 erledigt)
 2. **Kreislauf schließen**: Retraining-Flow inkl. Baseline-Invalidierung (5.4, Arbeitspaket 8)
 3. **Messbar machen**: Coverage + Custom Model-Metriken (2.1, 6.1)
-4. **Produktionsreife**: Docker-Härtung + GHCR (2.4/3.3, Arbeitspaket 2)
-5. **Grundsatzfragen**: Rolle von dbt (4.1), `prefect/Dockerfile` (4.5), Alert-Receiver (6.4)
+4. ~~**Produktionsreife**: Docker-Härtung + GHCR (2.4/3.3, Arbeitspaket 2)~~ — **mit #52 erledigt.** Reste in [DOCKER_GHCR_DESIGN.md](DOCKER_GHCR_DESIGN.md): `mlflow-skinny` (Volumen), `references/` mounten, Prefect non-root + GHCR-Pull
+5. **Grundsatzfragen**: Rolle von dbt (4.1), Alert-Receiver (6.4) — `prefect/Dockerfile` (4.5) existiert inzwischen und hat seit #52 auch einen `HEALTHCHECK`
 
 ---
 
