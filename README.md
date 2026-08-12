@@ -324,8 +324,7 @@ the datasets can be small and varied without any real records being stored.
 | :--- | ---: | ---: | ---: | :--- |
 | `data/summary_output_task_1_2_training.csv` | 10,348 | 241 | 1,706 | Tasks 1 & 2 |
 | `data/nf_training.csv` | 6,575 | 1 | 432 | Task 3 |
-| `data/nf_test_analyse.csv` | 13,822 | 503 | 1,560 | Task 3 (superseded) |
-| `data/raw_metadata.csv` | 3,009 | 54 | 466 | raw extract / EDA |
+| `data/raw_metadata.csv` | 3,009 | 54 | 466 | raw extract / EDA; Task 4 clustering input |
 
 `data/nf_training.csv` is not a hand-labelled extract like the others. It is *generated*:
 [`task_3/nf_recipes.py`](task_3/nf_recipes.py) materialises 432 tables in Iceberg whose
@@ -432,16 +431,24 @@ tables" is the size of each source database, not the number of feature rows.
 Features are engineered per column, per table, and — for the single-FK model — across
 tables. Generated directly from the training scripts:
 
-- **Tasks 1 & 2 — 31 features** from the training CSV (identical set; only the target
-  differs), except:
-- **Task 2 single FK — 37 features**: 30 of the shared set plus **7 cross-table features**
-  computed by [`src/cross_table_features.py`](src/cross_table_features.py). A foreign key
-  is a property of a *pair* of columns in two tables, so this is the only model that looks
-  outside the table being classified. They raised its cross-validated F1 from 0.696 to
-  0.810; that module's docstring carries the measurements, including three further ideas
-  that were measured and rejected.
-- **Task 3 — 50 features** (adds normalization-specific signals and a few columns Tasks 1
-  & 2 drop)
+- **Task 1 single PK — 31 features**, engineered in the training scripts from the bundled
+  metadata CSV.
+- **Task 2 single FK — 37 features**: 30 features from a similar single-column set plus
+  **7 cross-table features** computed by
+  [`src/cross_table_features.py`](src/cross_table_features.py). A foreign key is a property
+  of a *pair* of columns in two tables, so this is the only model that looks outside the
+  table being classified. They raised its cross-validated F1 from 0.696 to 0.810; that
+  module's docstring carries the measurements, including three further ideas that were
+  measured and rejected.
+- **Task 1 composite PK / Task 2 composite FK — 38 features each** (identical feature set;
+  only the target differs). A superset of the single-PK set with a handful of extra
+  "how does this column compare to the *other* columns in the table" signals
+  (`null_count`, `null_ratio`, `is_non_null`, `other_unique_columns_in_table`,
+  `other_near_unique_columns_in_table`, `name_contains_key`, `table_integer_column_count`)
+  that the single-column models drop.
+- **Task 3 — 53 features**, computed by [`prefect/nf_features.py`](prefect/nf_features.py)
+  by *measuring* each table in Trino. Nothing in this set is read from a CSV column
+  someone typed.
 
 > **Reference scope.** The cross-table features are relative to the set of other tables
 > they may look at. Training scopes that to one `database`; the serving pipeline can only
@@ -458,7 +465,7 @@ directly, which is why they are computed at runtime instead of stored in the CSV
 
 ### Task 3: feature engineering
 
-None of the 47 features are hand-labelled alongside the target — each is derived from
+None of the 53 features are hand-labelled alongside the target — each is derived from
 data the profiler discovers itself, which rules out a model partly reading the answer off
 its own input:
 
@@ -476,7 +483,7 @@ Pydantic request schema, the Prefect pipeline payload and the MLflow signature a
 `column_type_*` dummies are appended by the one-hot encoder — `bigint` is the reference
 category and has no column of its own.
 
-**Three feature groups are unusual enough to explain.**
+**Four feature groups are unusual enough to explain.**
 
 *Cost budgets are features.* A profiler that must answer within a budget is guaranteed to
 give partial answers on large tables. Rather than hide that, the budgets report themselves:
@@ -497,14 +504,36 @@ carries signal.
 threshold rather than exactly, which is what survives sampling and dirty data.
 `table_has_near_key_but_no_key` is the specific "there is almost a key here" signal.
 
+*Any-key judgement and pair-determinant search.* Added 2026-08-07 after a real-world run
+(Willibald period-1) mispredicted 6 of 10 tables. The original partial/transitive counts
+judge a dependency against the top-ranked key only; `table_partial_fd_count_anykey` and
+`table_transitive_fd_count_anykey` judge the same dependencies against every discovered
+key, which catches a determinant that only a lower-ranked key makes prime. The original
+search also only ever compared single columns; `table_pair_fd_count` and its
+`partial`/`transitive` split extend it to two-column determinants (`{a, b} -> c`), which
+is how a rule like `{category_id, weight_class} -> shipping_tier` becomes visible at all.
+Pairs are the more suggestible half of that search — almost any two columns "explain" a
+third on a small table — so they are gated by an absolute row-support floor rather than a
+ratio, calibrated against a real accidental pair sitting well below a real one.
+
 > **What is still a limitation.** 3NF and 0NF tables have near-identical medians on every
 > dependency feature, so the whole 0NF/3NF boundary rests on the atomicity detector. Its
 > blind spot is a repeating group with obfuscated column names — two tables in the
 > generated set are labelled 0NF with no violation any feature can see. See
 > [TASK_3_PLAN.md](TASK_3_PLAN.md).
+>
+> The structural-key filter (`ucc_score >= 1`, see "Labelling conventions" below) has a
+> second blind spot at the opposite end: on a table with only a handful of rows, a fully
+> unique single column clears the bar for free (`ucc_score` is `rows / 2` there), whether
+> its uniqueness means anything or not. Measured on Chinook's real `employee` table (8
+> rows, never part of training): six ordinary columns each pass as a "structural" key on
+> that basis alone, which turns `{phone} -> city` into a "partial dependency" that no
+> designer intended — a coincidence of 8 people's data, not a rule. `LOW_EVIDENCE_MIN_ROWS`
+> flags this table for review regardless (see below), so it does not reach a human
+> unchecked, but the filter itself carries no row-count floor yet.
 
 <details>
-<summary><b>Task 3 feature dictionary — all 47</b> (click to expand)</summary>
+<summary><b>Task 3 feature dictionary — all 53</b> (click to expand)</summary>
 
 Source of truth: `FEATURE_COLUMNS` and `COLUMN_TYPE_DUMMIES` in
 [`prefect/nf_features.py`](prefect/nf_features.py). Listed in the order the model sees
@@ -595,6 +624,25 @@ requires a non-prime dependent, the textbook definition.
 | `table_near_ucc_count` | Column combinations that are nearly unique | int |
 | `table_has_near_key_but_no_key` | A near-key exists but no exact key was found | 0/1 |
 
+**Per table — any-key and pair-determinant dependencies (6)**
+
+Added 2026-08-07 after the Willibald period-1 run exposed two blind spots: the
+partial/transitive counts above are classified against the top-ranked key only, and the
+dependency search only ever looked at single-column determinants. `_anykey` judges the
+same discovered dependencies against *every* candidate key instead of just the top-ranked
+one; `table_pair_*` extends the search itself to two-column determinants
+(`{a, b} -> c`), gated by an absolute support floor (`MIN_PAIR_FD_SUPPORT`) so a pair that
+repeats in too few rows to be more than coincidence is not counted.
+
+| Feature | Description | Type |
+| :--- | :--- | :--- |
+| `table_partial_fd_count_anykey` | Partial dependencies, judged against all discovered keys | int |
+| `table_transitive_fd_count_anykey` | Transitive dependencies, judged against all discovered keys | int |
+| `table_pair_fd_count` | Two-column-determinant dependencies discovered | int |
+| `table_pair_partial_fd_count` | Of those, partial | int |
+| `table_pair_transitive_fd_count` | Of those, transitive | int |
+| `table_pair_fd_search_coverage` | Share of eligible column pairs actually tested | float |
+
 **Data type (4)**
 
 One-hot over the five types that occur in the data. `bigint` is the reference category and
@@ -609,9 +657,12 @@ therefore has no column — it is 89 % of all rows, so encoding it too would be 
 <details>
 <summary><b>Tasks 1 &amp; 2 metadata &amp; statistics dictionary</b> (click to expand)</summary>
 
-`T1` = single/composite primary key · `T2` = single/composite foreign key ·
+`PK` = single primary key · `CPK` = composite primary key · `FK` = single foreign key ·
+`CFK` = composite foreign key (`PK`/`CPK`/`FK`/`CFK` here refer to the four *models*, not
+the task numbers — task 1 covers `PK` + `CPK`, task 2 covers `FK` + `CFK`) ·
 `identifier` = used for grouping only · `—` = present in the data but not used as a
-training feature.
+training feature by any of the four models. Source of truth: the four Pydantic request
+models in `webservice/data_model_{pk,fk,cpk,cfk}.py`.
 
 | Variable | Description | Example | Used in |
 | :--- | :--- | :--- | :--- |
@@ -622,48 +673,56 @@ training feature.
 | `column_type` | Raw data type (one-hot encoded for training) | "int" | — |
 | `min_value` | Minimum value of the column | "18" | — |
 | `max_value` | Maximum value of the column | "44" | — |
-| `number_unique_values` | Count of distinct values in the column | "23" | T1, T2 |
-| `count` | Number of rows in the table | "25" | T1, T2 |
-| `null_count` | Raw count of null values in the column | "0" | — (dropped, redundant) |
-| `null_ratio` | `null_count / count` | "0.0" | — (dropped, redundant) |
-| `is_unique` | Column values are fully unique | 0 or 1 | T1, T2 |
-| `ordinal_position` | Position of the column in the table (1-based) | "2" | T1, T2 |
-| `unique_ratio` | `number_unique_values / count` | "0.177" | T1, T2 |
-| `is_non_null` | Column has no null values | 0 or 1 | — (dropped, redundant) |
-| `is_first_column` | Column is the first in the table | 0 or 1 | T1, T2 |
-| `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | T1, T2 |
-| `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | T1, T2 |
-| `table_column_count` | Total columns in the table | "9" | T1, T2 |
-| `table_unique_column_count` | Number of fully unique columns in the table | "0" | T1, T2 |
-| `table_row_count` | Number of rows in the table | "768" | T1, T2 |
-| `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | — (dropped, redundant) |
-| `table_has_unique_column` | Table has at least one unique column | 0 or 1 | T1, T2 |
-| `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | T1, T2 |
-| `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | T1, T2 |
-| `table_id_named_column_count` | Number of ID-named columns in the table | "0" | T1, T2 |
-| `table_non_null_column_count` | Number of non-null columns in the table | "9" | T1, T2 |
-| `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | T1, T2 |
-| `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | T1, T2 |
-| `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | T1, T2 |
-| `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | T1, T2 |
-| `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | T1, T2 |
-| `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | — (dropped, redundant) |
-| `name_ends_with_id` | Column name ends with "id" | 0 or 1 | T1, T2 |
-| `name_contains_key` | Column name contains "key" | 0 or 1 | — (dropped, redundant) |
-| `name_contains_table_name` | Column name contains the table name | 0 or 1 | T1, T2 |
-| `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | T1, T2 |
-| `name_length` | Length of the column name | "7" | T1, T2 |
-| `column_type_boolean` | One-hot: boolean | 0 or 1 | T1, T2 |
-| `column_type_date` | One-hot: date | 0 or 1 | T1, T2 |
-| `column_type_decimal` | One-hot: decimal | 0 or 1 | T1, T2 |
-| `column_type_double` | One-hot: double | 0 or 1 | T1, T2 |
-| `column_type_integer` | One-hot: integer | 0 or 1 | T1, T2 |
-| `column_type_varchar` | One-hot: varchar | 0 or 1 | T1, T2 |
+| `number_unique_values` | Count of distinct values in the column | "23" | PK, FK, CPK, CFK |
+| `count` | Number of rows in the table | "25" | PK, CPK, CFK |
+| `null_count` | Raw count of null values in the column | "0" | FK, CPK, CFK |
+| `null_ratio` | `null_count / count` | "0.0" | FK, CPK, CFK |
+| `is_unique` | Column values are fully unique | 0 or 1 | PK, FK, CPK, CFK |
+| `ordinal_position` | Position of the column in the table (1-based) | "2" | PK, FK, CPK, CFK |
+| `unique_ratio` | `number_unique_values / count` | "0.177" | PK, FK, CPK, CFK |
+| `is_non_null` | Column has no null values | 0 or 1 | CPK, CFK |
+| `is_first_column` | Column is the first in the table | 0 or 1 | PK, FK, CPK, CFK |
+| `relative_ordinal_position` | `ordinal_position / table_column_count` | "0.222" | PK, FK, CPK, CFK |
+| `is_first_unique_column` | Column is the first unique column in the table | 0 or 1 | PK, FK, CPK, CFK |
+| `table_column_count` | Total columns in the table | "9" | PK, FK, CPK, CFK |
+| `table_unique_column_count` | Number of fully unique columns in the table | "0" | PK, FK, CPK, CFK |
+| `table_row_count` | Number of rows in the table | "768" | PK, FK, CPK, CFK |
+| `other_unique_columns_in_table` | Count of *other* unique columns in the table | "0" | CPK, CFK |
+| `table_has_unique_column` | Table has at least one unique column | 0 or 1 | PK, FK, CPK, CFK |
+| `table_has_no_single_pk_candidate` | No single-column PK candidate exists | 0 or 1 | PK, CPK, CFK |
+| `table_near_unique_column_count` | Number of near-unique columns in the table | "0" | PK, FK, CPK, CFK |
+| `table_id_named_column_count` | Number of ID-named columns in the table | "0" | PK, CPK, CFK |
+| `table_non_null_column_count` | Number of non-null columns in the table | "9" | PK, FK, CPK, CFK |
+| `table_max_unique_ratio` | Highest `unique_ratio` in the table | "0.671" | PK, FK, CPK, CFK |
+| `unique_ratio_rank` | Rank of this column's `unique_ratio` in the table | "4" | PK, FK, CPK, CFK |
+| `null_ratio_rank` | Rank of this column's `null_ratio` in the table | "2" | PK, FK, CPK, CFK |
+| `is_least_null_in_table` | Column has the lowest `null_ratio` in the table | 0 or 1 | PK, CPK, CFK |
+| `unique_ratio_relative_to_max` | `unique_ratio / table_max_unique_ratio` | "0.264" | PK, CPK, CFK |
+| `other_near_unique_columns_in_table` | Count of *other* near-unique columns | "0" | CPK, CFK |
+| `name_ends_with_id` | Column name ends with "id" | 0 or 1 | PK, FK, CPK, CFK |
+| `name_contains_key` | Column name contains "key" | 0 or 1 | FK, CPK, CFK |
+| `name_contains_table_name` | Column name contains the table name | 0 or 1 | PK, FK, CPK, CFK |
+| `name_is_singular_table_id` | Column name = singular table name + "id" | 0 or 1 | PK, FK, CPK, CFK |
+| `name_length` | Length of the column name | "7" | PK, FK, CPK, CFK |
+| `table_integer_column_count` | Number of integer-typed columns in the table | "3" | FK, CPK, CFK |
+| `n_other_tables_with_same_column_name` | Cross-table: how many other tables in the schema have a column with this exact name | "2" | FK only |
+| `name_unique_in_other_table` | Cross-table: this column's name is unique within at least one other table | 0 or 1 | FK only |
+| `is_non_unique_and_name_unique_elsewhere` | Cross-table: not unique here, but the name is unique elsewhere (classic FK shape) | 0 or 1 | FK only |
+| `name_references_other_table_exact` | Cross-table: name exactly matches another table's name (+ `_id`-style suffix) | 0 or 1 | FK only |
+| `name_references_other_table_fuzzy` | Cross-table: fuzzy name match against another table's name | 0 or 1 | FK only |
+| `name_ends_with_id_no_underscore` | Column name ends with "id" without a preceding underscore (e.g. `customerid`) | 0 or 1 | FK only |
+| `name_ends_with_code_or_num` | Column name ends with "code" or "num" | 0 or 1 | FK only |
+| `column_type_boolean` | One-hot: boolean | 0 or 1 | PK, FK, CPK, CFK |
+| `column_type_date` | One-hot: date | 0 or 1 | PK, FK, CPK, CFK |
+| `column_type_decimal` | One-hot: decimal | 0 or 1 | PK, FK, CPK, CFK |
+| `column_type_double` | One-hot: double | 0 or 1 | PK, FK, CPK, CFK |
+| `column_type_integer` | One-hot: integer | 0 or 1 | PK, FK, CPK, CFK |
+| `column_type_varchar` | One-hot: varchar | 0 or 1 | PK, FK, CPK, CFK |
 | `table_contains_1nf_violation` | Table has a 1NF violation | 0 or 1 | — (dropped, leakage guard) |
-| `pk_target` | Is the column a single primary key? | 0 or 1 | **target: T1** |
-| `composite_pk_target` | Is the column part of a composite PK? | 0 or 1 | **target: T1** |
-| `fk_target` | Is the column a foreign key? | 0 or 1 | **target: T2** |
-| `composite_fk_target` | Is the column part of a composite FK? | 0 or 1 | **target: T2** |
+| `pk_target` | Is the column a single primary key? | 0 or 1 | **target: PK** |
+| `composite_pk_target` | Is the column part of a composite PK? | 0 or 1 | **target: CPK** |
+| `fk_target` | Is the column a foreign key? | 0 or 1 | **target: FK** |
+| `composite_fk_target` | Is the column part of a composite FK? | 0 or 1 | **target: CFK** |
 
 </details>
 
@@ -676,8 +735,11 @@ The current pipeline covers standard scalar types. Future work should add types 
 
 ## Model & results
 
-Task 1 and Task 2 both use a **RandomForestClassifier** with `class_weight="balanced"` and otherwise
-default hyperparameters. The train/test split is **grouped by database** (`StratifiedGroupKFold`).
+Tasks 1 and 2 each cross-validate several candidates and register the best by holdout
+F1 — RandomForest and XGBoost for `pk_model`/`composite_pk_model`/`composite_fk_model`,
+plus LightGBM for `fk_model`, each plain and with a randomized hyperparameter search.
+The train/test split is **grouped by database** (`StratifiedGroupKFold`), the same pattern
+Task 3 below uses.
 
 Example F1 scores from the registry:
 
@@ -686,37 +748,110 @@ Example F1 scores from the registry:
 | `composite_pk_model` | 0.978 | 0.712 |
 | `composite_fk_model` | 1.000 | 0.811 |
 
-The high train F1 is an un-tuned RandomForest memorising the training set. Tuning it is a
-non-goal — the graded surface is the engineering. These two models have no CI quality gate
-yet; Task 3 below has one, and it is the pattern the key models should follow.
+These four models have no CI quality gate yet; Task 3 below has one, and it is the
+pattern they should follow.
 
 ### Task 3
 
 Four candidates are cross-validated and the best is registered: XGBoost and LightGBM, each
 plain and with a randomised search. The reported number is the mean over **five**
-`StratifiedGroupKFold` folds, not one split — with ~85 tables per holdout, a single draw
+`StratifiedGroupKFold` folds, not one split — with ~101 tables per holdout, a single draw
 swings several points.
 
 The grouping is by **recipe and matched pair**, joined with union-find, not by
 `table_name`: the generated set contains matched pairs — the same schema once with a 0NF
 violation injected and once without — that carry different recipe ids and opposite
 labels. Grouping by table name alone would let a model see one half of a pair in training
-and be scored on the other. Linking recipe and pair leaves 327 groups and zero pairs
+and be scored on the other. Linking recipe and pair leaves 324 groups and zero pairs
 spanning the split.
 
 | | Column F1 | Table accuracy |
 | :--- | ---: | ---: |
-| `denormalization_model` (XGBoost, randomised search) | 0.9823 ± 0.0182 | **0.9724 ± 0.0261** |
+| `denormalization_model` (XGBoost, randomised search) | 0.9537 ± 0.0211 | **0.9359 ± 0.0254** |
 
 Table accuracy is the headline, because the pipeline stores one normal form per table: in
 the column-level metric a 40-column table would otherwise count eight times as much as a
 five-column one.
 
 [`test/test_models/test_normalform_baseline.py`](test/test_models/test_normalform_baseline.py)
-holds this to a floor in CI. CI has neither MLflow nor Trino and so cannot retrain, but
-every training run writes `data/nf_baseline.json`, and a worse run fails the gate. The
-floors are the measured mean minus two standard deviations — the only way past them is
-lowering a number in a visible diff.
+holds this to a floor in CI — currently 0.94 column F1 / 0.92 table accuracy, set from an
+earlier measurement (mean minus two standard deviations at the time) and not yet moved up
+to match the numbers above. CI has neither MLflow nor Trino and so cannot retrain, but
+every training run writes `data/nf_baseline.json`, and a run below the floor fails the
+gate — the only way past it is lowering the floor in a visible diff.
+
+#### Serving-time cross-check
+
+Every prediction [`normalform_pipeline.py`](prefect/normalform_pipeline.py) stores in
+`iceberg.prediction_results.nf_results` carries a second, independently-computed reading
+of the same evidence next to the model's class — never as a feature, only as a check:
+
+| Column | What it is |
+| :--- | :--- |
+| `rule_normal_form` | The class a deterministic decision procedure (`nf_features.derive_rule_normal_form`) reads off the discovered structure — keys, dependencies, atomicity violations — from the same profiling pass that built the features. No learning involved. |
+| `rule_agrees` | Whether `rule_normal_form` matches the model's prediction. |
+| `needs_review` | `True` when the two disagree, or when the table has fewer than 30 rows (`LOW_EVIDENCE_MIN_ROWS`) — too few for any dependency statistic to mean more than coincidence. |
+| `review_reasons` | Plain text saying which of the above triggered the flag. |
+| `constant_columns` | Informational only, never a review trigger — a constant column can hide a real rule behind it (`Ort -> Land` with only one country loaded) that only becomes visible once the data varies. |
+
+This exists because confidence turned out not to be a usable review signal: on a real-world
+run (Willibald period-1) every misprediction sat at 0.97+ confidence, indistinguishable
+from the correct ones — the model is a deterministic function of features that had simply
+missed the decisive dependency. A second, rule-based reading of the same evidence catches
+what confidence structurally cannot: disagreement between two independent judgements of the
+same data.
+
+### Task 4
+
+Subject area has no ground truth to train against, so
+[`task_4/task_4_subject_area_train_and_register.py`](task_4/task_4_subject_area_train_and_register.py)
+runs in two stages, and only the second one is what gets registered.
+
+**Stage 1 — discovery (unsupervised, offline).** Each table's name and column names are
+embedded with a multilingual sentence-transformer
+(`paraphrase-multilingual-MiniLM-L12-v2` — the source databases mix English and German
+names), reduced with UMAP, and clustered with HDBSCAN. `nr_topics=None` is deliberate:
+BERTopic's post-hoc `"auto"` topic reduction merged 41 clusters down to 16 on this data,
+with 70 % of the corpus collapsed into one meaningless bucket and the silhouette going
+from +0.70 to −0.17 — measured, not assumed, so it stays off. Each cluster is named by
+[`task_4/subject_area_labeling.py`](task_4/subject_area_labeling.py) from its c-TF-IDF
+keywords, which sends the top 8 keywords plus three representative table descriptions to
+the local Ollama model and keeps the first clean noun phrase it returns. Labels are cached
+by keyword set rather than topic id, because HDBSCAN renumbers clusters between runs but
+the same keywords should keep the same name — a rerun that rediscovers a cluster does not
+silently rename it. On the bundled `data/raw_metadata.csv`, this currently finds **35
+subject areas across 411 tables**, from `Health Records` (57 tables) down to four
+four-table areas, plus a 21-table (5 %) outlier bucket that fit no cluster.
+
+**Stage 2 — distillation (supervised, servable).** Serving BERTopic directly would mean
+shipping sentence-transformers, torch, UMAP and HDBSCAN into the prediction image just to
+route a table name to a cluster. Instead, the cluster assignments become training labels
+for a small text classifier over just `table_name` and `columns` — the two fields
+[`webservice/data_model_subject_area.py`](webservice/data_model_subject_area.py) actually
+accepts. Clusters under `MIN_TABLES_PER_SUBJECT_AREA` (4 tables — too small to hold out a
+test row) are dropped, as are outliers: HDBSCAN's "fit nowhere" bucket has no shared
+vocabulary to name, so a table the served model cannot place shows up as a low
+`probability` rather than a fabricated label. Three candidates, all with balanced class
+weights since cluster sizes are very uneven, are cross-validated on a stratified holdout
+and the best weighted-F1 is registered:
+
+| Candidate | Vectorizer | Classifier |
+| :--- | :--- | :--- |
+| `tfidf_word_char_logreg` | word + char n-gram TF-IDF | `LogisticRegression` |
+| `tfidf_word_char_linearsvc` | word + char n-gram TF-IDF | `LinearSVC` + sigmoid calibration (for `predict_proba`) |
+| `tfidf_word_complement_nb` | word TF-IDF | `ComplementNB` |
+
+`table_name` and `columns` get separate vocabularies rather than one bag of words — one
+signal is short and decisive, the other long and noisy — and character n-grams connect
+fragments a word tokenizer would treat as unrelated (`bestellung` / `bestellungen`,
+`lieferadresse` / `lieferdienst`), which matters on a bilingual corpus.
+
+Every candidate's run logs the same discovery-quality metrics (`cluster_silhouette`,
+`cluster_coverage`) next to its own `test_f1_score`, because a high distillation accuracy
+against an incoherent clustering means nothing — the number that matters is *fidelity to
+the clusters*, not agreement with a ground truth that does not exist here. Re-running
+discovery on a changed or extended source database can rename an existing area or
+surface a new one, so the label set served by `subject_area_model` is not fixed in code.
 
 ---
 

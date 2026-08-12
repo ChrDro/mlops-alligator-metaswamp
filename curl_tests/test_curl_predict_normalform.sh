@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# 46 features: the whole set was replaced in Phase 2 of TASK_3_PLAN.md. The
-# previous payload sent 29 metadata heuristics (name_ends_with_id, table_has_composite_pk),
-# two of which were copies of the label itself; these are measured on the data.
+# 53 fields: 49 measured features + 4 column_type dummies. The set was replaced in
+# Phase 2 of TASK_3_PLAN.md (the previous payload sent 29 metadata heuristics, two of
+# which were copies of the label itself) and extended 2026-08-07 with the anykey/pair
+# features (table_*_anykey, table_pair_*) after the Willibald period-1 mispredictions.
 #
 # GENERATED from a real row of data/nf_training.csv - the first column of the 3NF table
 # "syn_0003". Not hand-written values: an invented payload can be internally
@@ -26,7 +27,7 @@ curl -X POST http://localhost:8080/predict_normalform \
         "col_is_prime": 1,
         "col_determines_count": 0,
         "col_depends_on_count": 0,
-        "table_row_count": 500,
+        "table_row_count": 60,
         "table_sampled": 0,
         "table_sample_ratio": 1.0,
         "table_search_truncated": 0,
@@ -55,6 +56,12 @@ curl -X POST http://localhost:8080/predict_normalform \
         "table_max_near_fd_strength": 0.0,
         "table_near_ucc_count": 0,
         "table_has_near_key_but_no_key": 0,
+        "table_partial_fd_count_anykey": 0,
+        "table_transitive_fd_count_anykey": 0,
+        "table_pair_fd_count": 0,
+        "table_pair_partial_fd_count": 0,
+        "table_pair_transitive_fd_count": 0,
+        "table_pair_fd_search_coverage": 1.0,
         "column_type_date": false,
         "column_type_double": false,
         "column_type_integer": false,

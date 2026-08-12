@@ -41,6 +41,9 @@ MODEL_NAMES = [
     "subject_area_model",
 ]
 DEFAULT_METRIC = "test_f1_score"
+# fk/cpk runs registered before the grouped-CV metrics were renamed to test_f1_score
+# still carry the old oof_f1_score name; kept so those older versions stay promotable.
+FALLBACK_METRIC = "oof_f1_score"
 
 
 @dataclass
@@ -64,10 +67,14 @@ def get_alias_version(
 def get_metric(
     client: MlflowClient,
     model_version: ModelVersion,
-    metric_name: str,
-) -> float | None:
+    metric_names: tuple[str, ...],
+) -> tuple[str, float] | tuple[None, None]:
     run = client.get_run(model_version.run_id)
-    return run.data.metrics.get(metric_name)
+    for name in metric_names:
+        value = run.data.metrics.get(name)
+        if value is not None:
+            return name, value
+    return None, None
 
 
 def decide_and_promote(
@@ -76,6 +83,8 @@ def decide_and_promote(
     metric_name: str = DEFAULT_METRIC,
     dry_run: bool = False,
 ) -> PromotionOutcome:
+    candidates = (metric_name, FALLBACK_METRIC) if metric_name == DEFAULT_METRIC else (metric_name,)
+
     dev_version = get_alias_version(client, model_name, "dev")
     if dev_version is None:
         return PromotionOutcome(
@@ -84,13 +93,13 @@ def decide_and_promote(
             f"{model_name}: no @dev version found, nothing to promote.",
         )
 
-    dev_metric = get_metric(client, dev_version, metric_name)
+    dev_metric_name, dev_metric = get_metric(client, dev_version, candidates)
     if dev_metric is None:
         return PromotionOutcome(
             model_name,
             "missing_metric",
             f"{model_name}: dev version {dev_version.version} "
-            f"(run {dev_version.run_id}) has no metric '{metric_name}'.",
+            f"(run {dev_version.run_id}) has none of {candidates}.",
         )
 
     prod_version = get_alias_version(client, model_name, "prod")
@@ -102,41 +111,50 @@ def decide_and_promote(
             model_name,
             "bootstrap",
             f"{model_name}: first promotion, prod bootstrapped at dev "
-            f"v{dev_version.version} ({metric_name}={dev_metric:.4f}).",
+            f"v{dev_version.version} ({dev_metric_name}={dev_metric:.4f}).",
         )
 
     if dev_version.version == prod_version.version:
         return PromotionOutcome(
             model_name,
             "noop_same_version",
-            f"{model_name}: prod already at v{prod_version.version} (== dev), "
-            "nothing to do.",
+            f"{model_name}: prod already at v{prod_version.version} (== dev), nothing to do.",
         )
 
-    prod_metric = get_metric(client, prod_version, metric_name)
+    prod_metric_name, prod_metric = get_metric(client, prod_version, candidates)
     if prod_metric is None:
         return PromotionOutcome(
             model_name,
             "missing_metric",
             f"{model_name}: prod version {prod_version.version} "
-            f"(run {prod_version.run_id}) has no metric '{metric_name}'.",
+            f"(run {prod_version.run_id}) has none of {candidates}.",
         )
+
+    # dev/prod can differ (e.g. one trained pre grouped-CV switch); flag when they do
+    # since a pooled-CV F1 and a single held-out-split F1 aren't quite the same yardstick.
+    metric_note = (
+        f"""{dev_metric_name}={dev_metric:.4f}
+            vs
+            {prod_metric_name}={prod_metric:.4f}
+            (different metrics!)
+        """
+        if dev_metric_name != prod_metric_name
+        else f"{dev_metric_name}={dev_metric:.4f} vs {prod_metric_name}={prod_metric:.4f}"
+    )
 
     if dev_metric >= prod_metric:
         if not dry_run:
             client.set_registered_model_alias(model_name, "prod", dev_version.version)
         action = "promoted"
         message = (
-            f"{model_name}: promoted dev v{dev_version.version} "
-            f"({metric_name}={dev_metric:.4f}) over prod v{prod_version.version} "
-            f"({metric_name}={prod_metric:.4f})."
+            f"{model_name}: promoted dev v{dev_version.version} over "
+            f"prod v{prod_version.version} ({metric_note})."
         )
     else:
         action = "rejected"
         message = (
-            f"{model_name}: dev v{dev_version.version} ({metric_name}={dev_metric:.4f}) "
-            f"< prod v{prod_version.version} ({metric_name}={prod_metric:.4f}); "
-            "prod unchanged."
+            f"{model_name}: dev v{dev_version.version} < prod v{prod_version.version} "
+            f"({metric_note}); prod unchanged."
         )
 
     return PromotionOutcome(model_name, action, message)
@@ -169,8 +187,7 @@ def main() -> int:
     client = MlflowClient()
 
     outcomes = [
-        decide_and_promote(client, model_name, args.metric, args.dry_run)
-        for model_name in models
+        decide_and_promote(client, model_name, args.metric, args.dry_run) for model_name in models
     ]
 
     for outcome in outcomes:

@@ -45,6 +45,7 @@ COLUMN_F1_FLOOR = 0.94
 MIN_TABLES = 400
 MIN_SPLIT_GROUPS = 300
 
+
 # The split has to be the honest one. Recorded rather than assumed, because grouping by
 # table_name alone would lift every number above by several points for free.
 REQUIRED_GROUP_LINKS = {"meta_recipe_id", "meta_pair_id"}

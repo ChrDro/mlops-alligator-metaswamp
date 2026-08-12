@@ -71,7 +71,7 @@ models:
   #     which for 4 classes cannot be expanded back into a full distribution. The
   #     metric is omitted rather than reported wrong - Evidently raises outright if
   #     asked for it without probabilities.
-  # It also draws on a different labelled dataset (data/nf_test_analyse.csv) with a
+  # It also draws on a different labelled dataset (data/nf_training.csv) with a
   # different column_type vocabulary; see build_monitoring_references.py.
   nf_columns:
     target: target_normal_form
@@ -92,7 +92,7 @@ models:
     - prediction
     # The strongest normalisation signals: repeated values within a column and
     # duplicated groups across the table.
-    - unique_ratio
+    - col_unique_ratio
     - table_row_count
 
   cfk_columns:
