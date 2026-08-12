@@ -1,0 +1,17 @@
+{
+  "candidate": "xgboost_randomized_search",
+  "n_rows": 7108,
+  "n_tables": 505,
+  "n_split_groups": 324,
+  "n_features": 53,
+  "n_splits": 5,
+  "split_group_links": [
+    "meta_recipe_id",
+    "meta_pair_id"
+  ],
+  "cv_column_f1_mean": 0.9537,
+  "cv_column_f1_std": 0.0211,
+  "cv_table_accuracy_mean": 0.9359,
+  "cv_table_accuracy_std": 0.0254,
+  "single_split_column_f1": 0.9901
+}

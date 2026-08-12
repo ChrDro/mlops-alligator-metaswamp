@@ -9,7 +9,7 @@
 #   4. Promote    - bootstrap/refresh the prod alias from the dev candidate
 #   5. Verify     - registry aliases + the model/schema contract tests
 #   6. Smoke test - one real prediction through the API
-#   7. Monitoring - build one Evidently baseline per key model (pk/cpk/fk/cfk)
+#   7. Monitoring - build one Evidently baseline per model (pk/cpk/fk/cfk/nf)
 #   8. Streaming  - optional: reset watermarks and fire the push trigger
 #
 # The script is idempotent: run it again and it skips the training and the
@@ -336,8 +336,9 @@ done
 #
 # Ordering here is not free to change. The baseline is a join of two things that
 # only both exist at this point in the script:
-#   - ground truth, from data/summary_output_task_1_2_training.csv
-#   - predictions, from a registered pk_model served over HTTP (steps 3 and 5)
+#   - ground truth, from data/summary_output_task_1_2_training.csv (key models) and
+#     data/nf_training.csv (normalform)
+#   - predictions, from the registered models served over HTTP (steps 3 and 5)
 # And because evidently_service bakes its files in with `COPY . /app` rather than
 # mounting them, writing the CSV is not enough - the image has to be rebuilt after.
 # That is why this cannot move up next to the other builds in step 2.
@@ -347,7 +348,7 @@ step "7/8  Evidently monitoring baselines"
 REFERENCE_DIR="evidently_service/references"
 HOLDOUT_DIR="data/holdouts"
 # One reference + one holdout per monitored model.
-MONITORED_TRACKS="pk_columns cpk_columns fk_columns cfk_columns"
+MONITORED_TRACKS="pk_columns cpk_columns fk_columns cfk_columns nf_columns"
 
 # A retrain invalidates the baseline: it describes how one specific model version
 # scored, so comparing a new model against it would measure the version change
@@ -365,9 +366,9 @@ for track in $MONITORED_TRACKS; do
 done
 
 if [ "$REBUILD_REFERENCE" = false ]; then
-    ok "Baselines exist for all 4 tracks, skipped (--rebuild-reference forces it)"
+    ok "Baselines exist for all 5 tracks, skipped (--rebuild-reference forces it)"
 else
-    printf '    scoring labelled rows through all 4 predict endpoints (~2min) ... '
+    printf '    scoring labelled rows through all 5 predict endpoints (~2min) ... '
     log="$(mktemp)"
     if $PYTHON evidently_service/build_monitoring_references.py \
         --model-url "http://localhost:8080" >"$log" 2>&1; then
@@ -375,7 +376,7 @@ else
         # Surface the per-track accuracy lines: a baseline built against a broken
         # model would otherwise look like a success and quietly poison every
         # comparison downstream.
-        sed -n 's/.*\(\(pk\|cpk\|fk\|cfk\)_columns  *ref=.*\)/      \1/p' "$log" || true
+        sed -n 's/.*\(\(pk\|cpk\|fk\|cfk\|nf\)_columns  *ref=.*\)/      \1/p' "$log" || true
         rm -f "$log"
     else
         printf '%s✗%s\n' "$RED" "$RESET"

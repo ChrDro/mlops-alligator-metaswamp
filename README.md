@@ -324,7 +324,6 @@ the datasets can be small and varied without any real records being stored.
 | :--- | ---: | ---: | ---: | :--- |
 | `data/summary_output_task_1_2_training.csv` | 10,348 | 241 | 1,706 | Tasks 1 & 2 |
 | `data/nf_training.csv` | 6,575 | 1 | 432 | Task 3 |
-| `data/nf_test_analyse.csv` | 13,822 | 503 | 1,560 | Task 3 (superseded) |
 | `data/raw_metadata.csv` | 3,009 | 54 | 466 | raw extract / EDA; Task 4 clustering input |
 
 `data/nf_training.csv` is not a hand-labelled extract like the others. It is *generated*:
