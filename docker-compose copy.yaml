@@ -3,7 +3,6 @@ services:
     build:
       context: webservice
       dockerfile: Dockerfile
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_webservice
     ports:
       - "8080:8080"
     env_file:
@@ -16,8 +15,6 @@ services:
       - AWS_DEFAULT_REGION=eu-central-1
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - MLFLOW_S3_IGNORE_TLS=true
-      # .env's MLFLOW_TRACKING_URI is host-oriented (localhost); inside the network it's mlflow:5000.
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
       # Serve the promoted model, not the dev candidate. Move via scripts/promote_model.py.
       - MODEL_ALIAS=prod
       #  POST /events/new-data needs the REST endpoint set
@@ -38,11 +35,10 @@ services:
       # Long enough for MLflow and MinIO to come up first.
       start_period: 60s
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   prometheus:
     image: prom/prometheus:v3.13.2
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_prometheus
     ports:
       - "9090:9090"
     volumes:
@@ -50,11 +46,10 @@ services:
       - prometheus-data:/prometheus
     command: --web.enable-lifecycle --config.file=/etc/prometheus/prometheus.yaml
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   alertmanager:
     image: prom/alertmanager:v0.33.1
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_alertmanager
     ports:
       - "9093:9093"
     volumes:
@@ -67,11 +62,10 @@ services:
       - alertmanager-data:/alertmanager
     command: --config.file=/etc/alertmanager/alertmanager.yml
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   grafana:
     image: grafana/grafana:13.0.6
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_grafana
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -98,7 +92,7 @@ services:
     depends_on:
       - prometheus
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   evidently_service:
     build:
@@ -106,9 +100,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8085:8085"
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_evidently_service
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   prefect:
     # Extends prefecthq/prefect:3.6.25-python3.11 with the flows' dependencies,
@@ -193,15 +186,14 @@ services:
       # Dependencies now come from the image, so this only has to cover the
       # database migration and the server's own startup.
       start_period: 90s
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_prefect
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   # Open-weights LLM that names the task_4 subject areas. Replaces the OpenRouter
   # call, so the stack needs no API key and no outbound network at label time.
   ollama:
     image: ollama/ollama:0.32.5
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_ollama
+    container_name: ollama
     restart: unless-stopped
     ports:
       # Host port is configurable because a machine may already run Ollama natively
@@ -247,7 +239,7 @@ services:
     #           count: all
     #           capabilities: [gpu]
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   minio:
     # minio/minio was archived upstream (2026-02) and is frozen on
@@ -255,7 +247,7 @@ services:
     # community-maintained drop-in fork: same env vars, same server command,
     # same on-disk format, ships mc at the same path, and gets CVE backports.
     image: pgsty/minio:latest
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_minio
+    container_name: mlflow_minio
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -291,11 +283,11 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   postgres:
     image: postgres:15-alpine
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_postgres
+    container_name: mlflow_postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -308,11 +300,11 @@ services:
       timeout: 5s
       retries: 3
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   postgres_backup:
     image: eeshugerman/postgres-backup-s3:15
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_postgres_backup
+    container_name: mlflow_postgres_backup
     depends_on:
       postgres:
         condition: service_healthy
@@ -334,13 +326,13 @@ services:
       - SCHEDULE=@hourly
       - BACKUP_KEEP_DAYS=30
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   # Second backup instance for Prefect's own database.
   # The image dumps exactly one database per container
   prefect_postgres_backup:
     image: eeshugerman/postgres-backup-s3:15
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_prefect_backup
+    container_name: prefect_postgres_backup
     depends_on:
       postgres:
         condition: service_healthy
@@ -367,11 +359,11 @@ services:
       # not the system of record for models.
       - BACKUP_KEEP_DAYS=7
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_mlflow
+    container_name: mlflow_server
     ports:
       - "5000:5000"
     environment:
@@ -409,12 +401,12 @@ services:
       - ./branding/mlflow/favicon.ico:/usr/local/lib/python3.10/site-packages/mlflow/server/js/build/favicon.ico:ro
       - ./branding/mlflow/manifest.json:/usr/local/lib/python3.10/site-packages/mlflow/server/js/build/manifest.json:ro
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   # Iceberg catalog for Trino
   nessie:
     image: ghcr.io/projectnessie/nessie:0.107.5-java
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_nessie_catalog
+    container_name: nessie_catalog
     ports:
       - "19120:19120"
     environment:
@@ -424,11 +416,11 @@ services:
     volumes:
       - nessie_data:/deployments/data
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
   trino:
     image: trinodb/trino:483
-    container_name: ${DOCKER_COMPOSE_PROJECT_NAME}_trino
+    container_name: trino
     # Without a limit the JVM sees the whole Docker VM (~11.7 GiB) and claims ~9.3 GiB of
     # heap, so the host OOM-killer took Trino down mid-build three times (exit 137). The
     # limit alone was not enough - see the mounted jvm.config below, which pins the heap to
@@ -466,7 +458,7 @@ services:
       retries: 10
       start_period: 60s
     networks:
-      - services-monitoring
+      - ml-services-monitoring
 
 volumes:
   grafana-data:
@@ -478,11 +470,5 @@ volumes:
   nessie_data:
 
 networks:
-  # The key stays literal: compose interpolates ${...} in *values* only, never
-  # in mapping keys, so a variable here would define a network literally named
-  # "${DOCKER_COMPOSE_PROJECT_NAME}_services-monitoring" while the services
-  # asking for the interpolated name find nothing. The "name:" field is a value
-  # and does get interpolated - that is where the project prefix belongs.
-  services-monitoring:
-    name: ${DOCKER_COMPOSE_PROJECT_NAME}_services-monitoring
+  ml-services-monitoring:
     driver: bridge
