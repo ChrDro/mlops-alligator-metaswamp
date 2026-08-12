@@ -61,6 +61,7 @@ Layer ziehen, bevor überhaupt gemessen ist, ob das nötig ist.
 | Frage | Entscheidung | Begründung |
 |---|---|---|
 | Trigger | `push` auf `dev` + `main` + Tag `v*`; `pull_request` gegen `dev`/`main` | siehe unten |
+| Manueller Lauf | `workflow_dispatch` | **Nachtrag 12.08.** Zweck ist *Neuveröffentlichung ohne Code-Änderung*: alle drei Dockerfiles führen `apt-get upgrade` zur Buildzeit aus, ein Rebuild zieht also frische Debian-Security-Patches — anders nur durch einen Commit erreichbar. ⚠️ GitHub bietet das Event erst an, wenn die Workflow-Datei auf dem **Default-Branch** liegt; das ist `main` und steht auf dem Initial Commit. Der „Run workflow"-Knopf erscheint also erst nach dem `dev`→`main`-Merge. Damit ist er **kein** Weg, den Publish-Pfad vor dem Merge zu verifizieren |
 | Push bei PRs | **nein**, nur bauen | Ein `GITHUB_TOKEN` aus einem Fork-PR ist read-only — ein Push *müsste* scheitern. „PR baut, Merge pusht" ist damit nicht defensiv, sondern die einzige funktionierende Form |
 | `latest` zeigt auf | **`dev`** (dokumentierte Abweichung) | `main` steht auf dem Initial Commit. Ein `latest` von `main` wäre entweder nicht existent oder würde den Initial Commit ausliefern. Eine kommentierte Zeile im Workflow schaltet es nach dem `dev`→`main`-Merge um |
 | `dev`→`main`-Merge | **nicht Teil dieser Arbeit** | 161 Commits, fremdes Repository, hängt an Branch Protection → gehört zu 2.3 |
