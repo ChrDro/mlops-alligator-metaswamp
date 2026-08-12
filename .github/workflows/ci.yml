@@ -3,12 +3,12 @@ name: CI - Lint & Test
 on:
   pull_request:
     branches:
-      - develop
+      - dev
       - main
 
   push:
     branches:
-      - develop
+      - dev
       - 'feature/**'
       - 'hotfix/**'
       - 'bugfix/**'
