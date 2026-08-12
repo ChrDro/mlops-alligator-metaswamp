@@ -1,5 +1,13 @@
 services:
   model-service:
+    # Same name the GHCR workflow publishes, so a local build and the registry
+    # artifact are not two differently named things. pull_policy: build freezes
+    # today's behaviour explicitly instead of relying on a compose default: the
+    # packages are private, and a machine without `docker login ghcr.io` must
+    # never be blocked here - scripts/setup_stack.sh included. Pulling is opt-in
+    # through a separate override file.
+    image: ghcr.io/chrdro/alligator-model-service:dev
+    pull_policy: build
     build:
       context: webservice
       dockerfile: Dockerfile
@@ -91,17 +99,31 @@ services:
       - ml-services-monitoring
 
   evidently_service:
+    image: ghcr.io/chrdro/alligator-evidently-service:dev
+    pull_policy: build
     build:
       context: evidently_service
       dockerfile: Dockerfile
     ports:
       - "8085:8085"
+    # This was the only service without a healthcheck, so nothing could
+    # meaningfully depend_on it. /tracks answering proves Flask is up and the
+    # configured reference datasets loaded - a boot failure in init_evidently
+    # kills the gunicorn worker, which is exactly what this catches.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8085/tracks')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - ml-services-monitoring
 
   prefect:
     # Extends prefecthq/prefect:3.6.25-python3.11 with the flows' dependencies,
     # which used to be pip-installed on every container start.
+    image: ghcr.io/chrdro/alligator-prefect:dev
+    pull_policy: build
     build:
       context: prefect
       dockerfile: Dockerfile
