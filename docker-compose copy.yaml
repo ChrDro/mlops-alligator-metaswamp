@@ -1,0 +1,474 @@
+services:
+  model-service:
+    build:
+      context: webservice
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # boto3 needs these to download model artifacts from MinIO when resolving
+      # models:/...@{MODEL_ALIAS}. Inside the Docker network the endpoint is minio:9000.
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_DEFAULT_REGION=eu-central-1
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - MLFLOW_S3_IGNORE_TLS=true
+      # Serve the promoted model, not the dev candidate. Move via scripts/promote_model.py.
+      - MODEL_ALIAS=prod
+      #  POST /events/new-data needs the REST endpoint set
+      - PREFECT_API_URL=http://prefect:4200/api
+    volumes:
+      # Fixed container path on purpose: ${PWD} here made the target depend on the
+      # host shell, and Git Bash rewrites it to C:/... which compose then reads as
+      # extra colons in the volume spec.
+      - ./mlruns:/app/mlruns
+    # Readiness rather than liveness: "healthy" is only worth reading in
+    # `compose ps` if it means the registry actually resolves the models. A 503
+    # from /health/ready makes urlopen raise, which is what marks it unhealthy.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health/ready')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # Long enough for MLflow and MinIO to come up first.
+      start_period: 60s
+    networks:
+      - ml-services-monitoring
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus-data:/prometheus
+    command: --web.enable-lifecycle --config.file=/etc/prometheus/prometheus.yaml
+    networks:
+      - ml-services-monitoring
+
+  alertmanager:
+    image: prom/alertmanager:v0.33.1
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager:/etc/alertmanager
+      # Named, so recreation (e.g. via the launcher's --build) reuses this
+      # volume instead of leaving an anonymous one behind each time - the
+      # image declares VOLUME /alertmanager internally, so without an
+      # explicit mount here, compose/docker create a fresh anonymous volume
+      # on every container recreation.
+      - alertmanager-data:/alertmanager
+    command: --config.file=/etc/alertmanager/alertmanager.yml
+    networks:
+      - ml-services-monitoring
+
+  grafana:
+    image: grafana/grafana:13.0.6
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    environment:
+      - GF_USERS_DEFAULT_THEME=light
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/etc/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+      - ./branding/grafana/grafana_icon.svg:/usr/share/grafana/public/img/grafana_icon.svg:ro
+      - ./branding/grafana/grafana_icon.svg:/usr/share/grafana/public/build/img/grafana_icon.svg:ro
+      - ./branding/grafana/grafana_icon.svg:/usr/share/grafana/public/build/static/img/grafana_icon.1e0deb6b.svg:ro
+      - ./branding/grafana/fav32.png:/usr/share/grafana/public/img/fav32.png:ro
+      - ./branding/apple-touch-icon.png:/usr/share/grafana/public/img/apple-touch-icon.png:ro
+      - ./branding/mstile-150x150.png:/usr/share/grafana/public/img/mstile-150x150.png:ro
+      # Windows-tile background color for the icon above. The theme-color/
+      # TileColor <meta> tags in index.html can't be patched the same way -
+      # that file is a server-rendered Go template ([[.Nonce]], [[.FavIcon]],
+      # ...), not static HTML, so a bind-mount would break Grafana's own
+      # templating instead of just changing two colors.
+      - ./branding/grafana/browserconfig.xml:/usr/share/grafana/public/img/browserconfig.xml:ro
+    depends_on:
+      - prometheus
+    networks:
+      - ml-services-monitoring
+
+  evidently_service:
+    build:
+      context: evidently_service
+      dockerfile: Dockerfile
+    ports:
+      - "8085:8085"
+    networks:
+      - ml-services-monitoring
+
+  prefect:
+    # Extends prefecthq/prefect:3.6.25-python3.11 with the flows' dependencies,
+    # which used to be pip-installed on every container start.
+    build:
+      context: prefect
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Ordering only, deliberately not service_healthy: the Prefect server is
+      # worth having even when Trino is down, and its own startup (pip install
+      # below) takes far longer than Trino needs to accept queries anyway.
+      trino:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - PREFECT_API_URL=http://localhost:4200/api
+      - MODEL_API_URL=http://model-service:8080
+      - TRINO_IP_ADDRESS=trino
+      # Persist server state in Postgres instead of SQLite in the container
+      - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
+    volumes:
+      - ./prefect:/opt/flows
+      # Read-only: model_quality_backtest.py replays the labelled holdout rows in
+      # data/holdouts/ (one CSV per monitored model). Nothing in prefect/ writes
+      # to this directory.
+      - ./data:/opt/data:ro
+      # Read-only: pk_fk_pipeline.py computes the fk model's cross-table features with
+      # src/cross_table_features.py, the same module the training script uses. Mounted
+      # rather than copied into prefect/ on purpose - two copies of feature code drift,
+      # and a feature computed differently at training and serving time is exactly the
+      # silent failure test/test_models/test_model_schema_contract.py exists to catch.
+      - ./src:/opt/src:ro
+      # Corporate branding. Icons only - the theme/tile color is patched into
+      # index.html at build time instead (see prefect/Dockerfile), since that
+      # file also carries content-hashed asset references that a full bind
+      # mount would freeze to today's build.
+      - ./branding/prefect/favicon.ico:/usr/local/lib/python3.11/site-packages/prefect/server/ui/favicon.ico:ro
+      - ./branding/prefect/favicon-dark.ico:/usr/local/lib/python3.11/site-packages/prefect/server/ui/favicon-dark.ico:ro
+      - ./branding/apple-touch-icon.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/apple-touch-icon.png:ro
+      - ./branding/prefect/favicon-16x16.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/favicon-16x16.png:ro
+      - ./branding/prefect/favicon-16x16-dark.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/favicon-16x16-dark.png:ro
+      - ./branding/prefect/favicon-32x32.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/favicon-32x32.png:ro
+      - ./branding/prefect/favicon-32x32-dark.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/favicon-32x32-dark.png:ro
+      - ./branding/prefect/android-chrome-192x192.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/android-chrome-192x192.png:ro
+      - ./branding/prefect/android-chrome-512x512.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/android-chrome-512x512.png:ro
+      - ./branding/mstile-150x150.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui/ico/mstile-150x150.png:ro
+      - ./branding/prefect/favicon.ico:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/favicon.ico:ro
+      - ./branding/prefect/favicon-dark.ico:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/favicon-dark.ico:ro
+      - ./branding/apple-touch-icon.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/apple-touch-icon.png:ro
+      - ./branding/prefect/favicon-16x16.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/favicon-16x16.png:ro
+      - ./branding/prefect/favicon-16x16-dark.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/favicon-16x16-dark.png:ro
+      - ./branding/prefect/favicon-32x32.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/favicon-32x32.png:ro
+      - ./branding/prefect/favicon-32x32-dark.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/favicon-32x32-dark.png:ro
+      - ./branding/prefect/android-chrome-192x192.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/android-chrome-192x192.png:ro
+      - ./branding/prefect/android-chrome-512x512.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/android-chrome-512x512.png:ro
+      - ./branding/mstile-150x150.png:/usr/local/lib/python3.11/site-packages/prefect/server/ui-v2/ico/mstile-150x150.png:ro
+    working_dir: /opt/flows
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        set -e
+        python ensure_database.py
+        prefect server start --host 0.0.0.0 &
+        echo "Waiting for the Prefect API to come up..."
+        until python -c "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')" 2>/dev/null; do
+          sleep 2
+        done
+        echo "API is up - registering streaming deployments."
+        exec python serve_flows.py
+    ports:
+      - "4200:4200"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # Dependencies now come from the image, so this only has to cover the
+      # database migration and the server's own startup.
+      start_period: 90s
+    networks:
+      - ml-services-monitoring
+
+  # Open-weights LLM that names the task_4 subject areas. Replaces the OpenRouter
+  # call, so the stack needs no API key and no outbound network at label time.
+  ollama:
+    image: ollama/ollama:0.32.5
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      # Host port is configurable because a machine may already run Ollama natively
+      # on 11434; in-network callers always use ollama:11434.
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      # Named volume, so the model is pulled once instead of on every `up`.
+      - ollama_models:/root/.ollama
+    environment:
+      # Default is 5 min. Labelling is bursty; reloading the weights costs more
+      # than the generation itself.
+      - OLLAMA_KEEP_ALIVE=1h
+    # The image ships no models, so the pull happens here. Same shape as minio below.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        ollama_pid=$$!
+        until ollama list >/dev/null 2>&1; do
+          echo "Waiting for Ollama to accept connections...";
+          sleep 1;
+        done
+        ollama pull ${OLLAMA_MODEL:-qwen2.5:3b}
+        echo "Ollama ready."
+        wait "$$ollama_pid"
+    healthcheck:
+      # Matches the model, not just the server - a call during the pull gets a 404.
+      test: ["CMD-SHELL", "ollama list | grep -q ${OLLAMA_MODEL_FAMILY:-qwen2.5}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # Covers the initial pull (~2 GB for qwen2.5:3b).
+      start_period: 600s
+    # CPU-only by default, which is what keeps this portable: Docker Desktop on
+    # macOS/Windows cannot reach the GPU anyway. On a Linux host with the NVIDIA
+    # container toolkit, uncomment for a large speedup.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    networks:
+      - ml-services-monitoring
+
+  minio:
+    # minio/minio was archived upstream (2026-02) and is frozen on
+    # RELEASE.2025-09-07 with unpatched CRITICAL CVEs. pgsty/minio is a
+    # community-maintained drop-in fork: same env vars, same server command,
+    # same on-disk format, ships mc at the same path, and gets CVE backports.
+    image: pgsty/minio:latest
+    container_name: mlflow_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_LICENSE: "on"
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    # Start the server in the background, wait until it responds, create the
+    # buckets (idempotent), then hand control back to the server process so it
+    # stays the container's long-running process. mc ships inside minio/minio,
+    # so no separate bootstrap container is needed.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        minio server /data --console-address ":9001" &
+        minio_pid=$$!
+        until mc alias set myminio http://localhost:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" 2>/dev/null; do
+          echo "Waiting for MinIO to accept connections...";
+          sleep 1;
+        done
+        mc mb --ignore-existing myminio/mlflow
+        mc mb --ignore-existing myminio/postgres-backups
+        # Iceberg warehouse for the Trino/Nessie catalog
+        mc mb --ignore-existing myminio/warehouse
+        echo "MinIO buckets ready."
+        wait "$$minio_pid"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    networks:
+      - ml-services-monitoring
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: mlflow_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    networks:
+      - ml-services-monitoring
+
+  postgres_backup:
+    image: eeshugerman/postgres-backup-s3:15
+    container_name: mlflow_postgres_backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      - S3_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - S3_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - S3_BUCKET=postgres-backups
+      - S3_ENDPOINT=http://minio:9000
+      - S3_S3V4=yes
+      - S3_PREFIX=mlflow_db_backups
+      - S3_REGION=eu-central-1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_DATABASE=${POSTGRES_DB}
+      - SCHEDULE=@hourly
+      - BACKUP_KEEP_DAYS=30
+    networks:
+      - ml-services-monitoring
+
+  # Second backup instance for Prefect's own database.
+  # The image dumps exactly one database per container
+  prefect_postgres_backup:
+    image: eeshugerman/postgres-backup-s3:15
+    container_name: prefect_postgres_backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      prefect:
+        condition: service_healthy
+    environment:
+      - S3_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - S3_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - S3_BUCKET=postgres-backups
+      - S3_ENDPOINT=http://minio:9000
+      - S3_S3V4=yes
+      - S3_PREFIX=prefect_db_backups
+      - S3_REGION=eu-central-1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=prefect
+      - POSTGRES_DATABASE=prefect
+      - SCHEDULE=@hourly
+      # Shorter than MLflow's 30 days as database holds operational
+      # telemetry (run history, logs, events),
+      # not the system of record for models.
+      - BACKUP_KEEP_DAYS=7
+    networks:
+      - ml-services-monitoring
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow_server
+    ports:
+      - "5000:5000"
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_DEFAULT_REGION=eu-central-1
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - MLFLOW_S3_IGNORE_TLS=true
+      # MLflow 3.x rejects Host headers not in its allowlist (DNS-rebinding protection).
+      - MLFLOW_SERVER_ALLOWED_HOSTS=mlflow:*,localhost:*,127.0.0.1:*
+      # The job runner spawns a Huey consumer pool for GenAI evaluation, online
+      # scoring and webhooks - none of which this project uses. Together with
+      # --workers 1 below it takes the server from 18 processes and a 2.3 GiB
+      # peak down to 5 processes and ~350 MiB.
+      - MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    depends_on:
+      minio:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --workers 1
+      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      --default-artifact-root s3://mlflow/
+      --host 0.0.0.0
+      --port 5000
+    volumes:
+      # Corporate branding. Only favicon.ico and manifest.json are safe to
+      # override this way - index.html references a content-hashed JS bundle
+      # (main.<hash>.js) that changes every time the ":latest" tag moves, so
+      # replacing that file too would point the page at a bundle that no
+      # longer exists on the next pull.
+      - ./branding/mlflow/favicon.ico:/usr/local/lib/python3.10/site-packages/mlflow/server/js/build/favicon.ico:ro
+      - ./branding/mlflow/manifest.json:/usr/local/lib/python3.10/site-packages/mlflow/server/js/build/manifest.json:ro
+    networks:
+      - ml-services-monitoring
+
+  # Iceberg catalog for Trino
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.107.5-java
+    container_name: nessie_catalog
+    ports:
+      - "19120:19120"
+    environment:
+      # Store to outlive the container after docker compose down
+      - NESSIE_VERSION_STORE_TYPE=ROCKSDB
+      - NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH=/deployments/data/rocksdb
+    volumes:
+      - nessie_data:/deployments/data
+    networks:
+      - ml-services-monitoring
+
+  trino:
+    image: trinodb/trino:483
+    container_name: trino
+    # Without a limit the JVM sees the whole Docker VM (~11.7 GiB) and claims ~9.3 GiB of
+    # heap, so the host OOM-killer took Trino down mid-build three times (exit 137). The
+    # limit alone was not enough - see the mounted jvm.config below, which pins the heap to
+    # 4 GiB so the off-heap part still fits inside this number.
+    mem_limit: 6g
+    depends_on:
+      minio:
+        condition: service_healthy
+      nessie:
+        condition: service_started
+    environment:
+      # Read by ${ENV:...} in etc/trino/catalog/iceberg.properties.
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      # ... and by etc/config.properties. Kept out of that file so it stays
+      # committable; the keystore itself is generated, never committed.
+      - TRINO_SHARED_SECRET=${TRINO_SHARED_SECRET}
+      - TRINO_KEYSTORE_PASSWORD=${TRINO_KEYSTORE_PASSWORD}
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./trino-iceberg/etc/config.properties:/etc/trino/config.properties:ro
+      - ./trino-iceberg/etc/jvm.config:/etc/trino/jvm.config:ro
+      - ./trino-iceberg/etc/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - ./trino-iceberg/etc/trino/password.db:/etc/trino/password.db:ro
+      - ./trino-iceberg/etc/keystore.jks:/etc/trino/keystore.jks:ro
+      - ./trino-iceberg/etc/trino/catalog/iceberg.properties:/etc/trino/catalog/iceberg.properties:ro
+      - ./trino-iceberg/etc/trino/catalog/duckdb.properties:/etc/trino/catalog/duckdb.properties:ro
+      - ./trino-iceberg/etc/trino/catalog/tpch.properties:/etc/trino/catalog/tpch.properties:ro
+      - ./trino-iceberg/data:/duckdb
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - ml-services-monitoring
+
+volumes:
+  grafana-data:
+  prometheus-data:
+  alertmanager-data:
+  minio_data:
+  postgres_data:
+  ollama_models:
+  nessie_data:
+
+networks:
+  ml-services-monitoring:
+    driver: bridge

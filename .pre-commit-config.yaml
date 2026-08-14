@@ -1,0 +1,77 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff
+        name: ruff lint
+        args: [--fix]
+        types_or: [python, pyi, jupyter]
+      - id: ruff-format
+        name: ruff format
+        types_or: [python, pyi, jupyter]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=10000']
+
+      - id: check-yaml
+        exclude: ^mlflow-data/
+
+      - id: check-toml
+
+      - id: check-json
+
+      - id: no-commit-to-branch
+        args: ['--branch=main']
+
+      - id: trailing-whitespace
+        exclude: ^\.github/
+
+      - id: end-of-file-fixer
+        exclude: ^\.github/
+
+      - id: detect-private-key
+
+      - id: check-merge-conflict
+
+      - id: check-ast
+
+      - id: requirements-txt-fixer
+        files: requirements\.txt$
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+
+  # Fast feedback, not a gate - use `--no-verify` to bypass this.
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest-check
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        # Skip the tests that need MLflow/Trino/Evidently
+        args: [-m, "not integration", --tb=short, -x]
+
+default_language_version:
+  python: python3.11
+
+exclude: |
+  (?x)^(
+    \.venv/|
+    __pycache__/|
+    \.git/|
+    \.pytest_cache/|
+    htmlcov/|
+    \.coverage|
+    mlflow-data/|
+    data/|
+    models/|
+    \.DS_Store|
+    gen_data/
+  )

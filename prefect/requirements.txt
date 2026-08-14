@@ -1,0 +1,13 @@
+# Extras the flows need on top of the prefecthq/prefect base image. Versions are
+# the ones the old boot-time `pip install` resolved to, pinned so a rebuild
+# cannot quietly pick up something else.
+asyncpg==0.31.0
+pandas==2.3.3
+python-dotenv==1.2.2
+requests==2.33.1
+SQLAlchemy==2.0.51
+# The sqlalchemy extra is what change_detector.py uses to reach Trino.
+trino[sqlalchemy]==0.338.0
+# Not used at runtime - pip bootstraps it into every environment regardless.
+# Pinned only to clear CVE-2026-24049 (path traversal, fixed in 0.46.2).
+wheel==0.47.0

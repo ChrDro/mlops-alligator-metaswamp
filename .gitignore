@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+.DS_Store
 # C extensions
 *.so
 
@@ -149,6 +149,11 @@ activemq-data/
 
 # Environments
 .env
+# Every .env sidecar - .env.bak, .env.local, .env.old. A backup of .env holds the
+# same secrets as .env, so the pattern is deliberately wider than the one file that
+# prompted it. .env.example is the only one meant to be shared and is re-included.
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -195,9 +200,9 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#   and can be added to the global gitignore or merged into this file. However, if you prefer,
 #   you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 # Temporary file for partial code execution
@@ -216,3 +221,41 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# mlflow
+mlflow.db
+mlruns/
+
+# dbt
+dbt/logs/
+dbt/target/
+dbt/seeds/
+seeds/
+
+# evidently
+# Both directories can be ignored as they are produced again later durin run
+
+evidently_service/references/
+data/holdouts/
+
+# alertmanager notification secret (keep the .example, ignore the real webhook URL)
+alertmanager/secrets/*
+!alertmanager/secrets/*.example
+# trino
+# DuckDB database behind the duckdb catalog plus its write-ahead log. DuckDB
+# recreates the file on first connect, the directory itself is kept by .gitkeep.
+trino-iceberg/data/*.db
+trino-iceberg/data/*.db.wal
+
+# Local Trino credentials: a TLS private key and a password hash. Never commit
+# these - regenerate with trino-iceberg/generate-dev-credentials.sh. The rest of
+# trino-iceberg/etc/ is committed and reads its secrets from .env instead.
+trino-iceberg/etc/keystore.jks
+trino-iceberg/etc/trino/password.db
+# Derived from that keystore by scripts/setup_stack.sh: the exported public
+# certificate and the JDBC client truststore built from it. Both are rewritten
+# whenever the keystore is regenerated, and the truststore is opened with
+# TRINO_KEYSTORE_PASSWORD from .env, so they are per-machine artifacts like the two
+# above rather than shared config.
+trino-iceberg/etc/trino-cert.crt
+trino-iceberg/etc/trino-truststore.jks

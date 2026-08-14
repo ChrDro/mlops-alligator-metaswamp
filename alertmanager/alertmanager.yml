@@ -1,0 +1,37 @@
+# Alertmanager configuration.
+#
+# Firing alerts are grouped, deduplicated and routed to Discord so the team is
+# notified (and can still be inspected in the Alertmanager UI at :9093).
+#
+# The Discord webhook URL is a secret and MUST NOT be committed. It is read at
+# runtime from a git-ignored file, mounted into the container via the existing
+# ./alertmanager volume (see docker-compose.yaml):
+#     alertmanager/secrets/discord_webhook_url   (git-ignored, you create this)
+# A committed placeholder shows the expected format:
+#     alertmanager/secrets/discord_webhook_url.example
+#
+# To create the webhook: Discord channel -> Edit Channel -> Integrations ->
+# Webhooks -> New Webhook -> Copy Webhook URL, then paste it (one line) into
+# alertmanager/secrets/discord_webhook_url.
+
+route:
+  # Group alerts that share these labels into a single notification.
+  group_by: ['alertname', 'severity']
+  # Wait a moment to collect other alerts in the same group before sending.
+  group_wait: 30s
+  # Wait before sending an update about new alerts added to a group.
+  group_interval: 5m
+  # Re-send an already-firing alert after this long if it is still active.
+  repeat_interval: 3h
+  receiver: default
+
+receivers:
+  - name: default
+    discord_configs:
+      - webhook_url_file: /etc/alertmanager/secrets/discord_webhook_url
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+        message: >-
+          {{ range .Alerts }}• {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}

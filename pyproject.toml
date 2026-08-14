@@ -1,0 +1,89 @@
+[project]
+name = "mlops-alligator-metaswamp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11.3"
+dependencies = [
+    "pytest>=9.1.1",
+    "pandas>=2.0.0,<3.0.0",
+    "requests>=2.32.0",
+    "scikit-learn>=1.9.0",
+    "python-dotenv>=1.2.2",
+    "ruff==0.16.0",
+    "sqlalchemy>=2.0.51",
+    "trino[sqlalchemy]>=0.338.0",
+    "protobuf<5.0.0",
+    "mlflow>=3.5.0",
+    "fastapi>=0.139.1",
+    "uvicorn>=0.51.0",
+    # Imported by webservice/app.py at module level, so test/test_api/ cannot
+    # import the app without it. Kept in sync with webservice/requirements.txt.
+    "prometheus-fastapi-instrumentator>=7.1.0",
+    "lightgbm>=4.7.0",
+    "dbt-core>=1.8.0,<2.0.0",
+    "dbt-trino>=1.8.0",
+    "snowplow-tracker>=0.10.0",
+    "prefect>=3.7.8,<4.0.0",
+    "prefect-sqlalchemy>=0.6.0",
+    "prefect-dbt>=0.4.3",
+    "boto3>=1.43.55",
+    "xgboost>=3.2.0",
+    "pre-commit>=4.6.1",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.15.0",
+    "httpx2>=2.9.1",
+    "bertopic>=0.16.4",
+    "sentence-transformers>=3.3.0",
+    "umap-learn>=0.5.7",
+    "hdbscan>=0.8.40",
+    "matplotlib>=3.9.0",
+    "mpld3>=0.5.10",
+    # Talks to the local Ollama service
+    "openai>=1.60.0",
+    "reportlab>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = []
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
+# Unregistered @pytest.mark.<x> -> collection error instead of warning. Guards typos in
+# the `integration` marker below; does not check `-m` expressions.
+addopts = "--strict-markers"
+
+markers = [
+    "integration: needs the docker compose stack (MLflow/Trino/Evidently) running",
+]
+
+[tool.coverage.run]
+
+source = [
+    "webservice",
+    "prefect",
+]
+omit = [
+    "*/__pycache__/*",
+    "*/.venv/*",
+    # Excluded deliberately: these need a live Trino/MLflow stack to execute, so
+    # counting their ~2.5k statements would only depress the number without saying
+    # anything about test quality. Their pure helpers are tested via the two modules
+    # that stay in scope.
+    "prefect/pk_fk_pipeline.py",
+    "prefect/normalform_pipeline.py",
+    "prefect/model_quality_backtest.py",
+    "prefect/serve_flows.py",
+    "prefect/ensure_database.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+
+fail_under = 80
+
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

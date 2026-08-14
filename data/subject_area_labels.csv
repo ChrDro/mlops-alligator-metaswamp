@@ -1,0 +1,412 @@
+table_name,subject_area,topic_id
+diabetes,Health Records,0
+kaggle_survey,Health Records,0
+blood_metrics,Health Records,0
+patient,Health Records,0
+pedigree_outcome,Health Records,0
+skin,Health Records,0
+f1_constructor_standings_2000_2026,Formula Racing History,23
+f1_driver_standings_2000_2026,Formula Racing History,23
+f1_qualifying_2000_2026,Formula Racing History,23
+f1_race_results_2000_2026,Formula Racing History,23
+f1_races_2000_2026,Formula Racing History,23
+fertility,Health Records,0
+life_exp_pop,Health Records,0
+chest_pain,Health Records,0
+heart_attack_history,Health Records,0
+pressure_vessels_angina,Health Records,0
+age_bucket,Health Records,0
+gender,Health Records,0
+record,Health Records,0
+king_county_house_details,Real Estate,16
+king_county_house_sales,Real Estate,16
+account,Finance,34
+bank_transaction,Finance,34
+flight,Airlines Operations,14
+messages,Retail Management,15
+person,Health Records,0
+phone_contract,outlier,-1
+dataset_fashion_store_campaigns,Fashion Retailing,22
+dataset_fashion_store_channels,Fashion Retailing,22
+dataset_fashion_store_customers,Fashion Retailing,22
+dataset_fashion_store_products,Fashion Retailing,22
+dataset_fashion_store_sales,Fashion Retailing,22
+dataset_fashion_store_salesitems,Fashion Retailing,22
+dataset_fashion_store_stock,Fashion Retailing,22
+categories,outlier,-1
+customers,Retail Management,15
+employees,Human Resources,3
+orderdetails,Order Management,5
+orders,Order Management,5
+products,Inventory Management,6
+shippers,Shipping Logistics,32
+suppliers,Retail Management,15
+owners,Health Records,0
+pets,Health Records,0
+proceduredetails,Health Records,0
+procedurehistory,Health Records,0
+battery_systems,Finance Management,17
+billing_and_savings,Finance Management,17
+channel_attribution,Customer Information Management,20
+daily_generation_consumption,Finance Management,17
+dashboard_suggestions,Food Reviews,9
+dispatch_events,Health Research,8
+households,Finance Management,17
+installation_pipeline,Construction Management,38
+metric_definitions,outlier,-1
+outage_events,Health Research,8
+portfolio_kpis_daily,Finance Management,17
+service_tickets,outlier,-1
+solar_systems,Finance Management,17
+subscriber_contracts,Customer Information Management,20
+utility_tariffs,Energy Territory Management,37
+vpp_program_enrollment,Academic Records,2
+cart_events,Health Research,8
+inventory_events,Health Research,8
+order_items,Order Management,5
+promotions,Insurance,7
+refunds,Inventory Management,13
+reviews,Food Reviews,9
+sessions,Event Management,21
+prognostica_afo,Health Records,0
+customer,Retail Management,15
+lineitem,Order Management,5
+nation,Sports Administration,1
+part,Retail Management,15
+partsupp,outlier,-1
+region,Health Records,0
+supplier,Retail Management,15
+food,Nutrition Studies,24
+food_category,Nutrition Studies,24
+food_nutrient,Nutrition Studies,24
+food_nutrient_conversion_factor,Nutrition Studies,24
+food_portion,Nutrition Studies,24
+nutrient,Nutrition Studies,24
+bestellung_periode_1,Retail Orders Management,12
+bestellung_periode_2,Retail Orders Management,12
+bestellung_periode_3,Retail Orders Management,12
+href_termintreue_periode_1,Retail Orders Management,12
+href_termintreue_periode_2,Retail Orders Management,12
+kunde_periode_1,Credit Card Transactions,29
+kunde_periode_2,Credit Card Transactions,29
+kunde_periode_3,Credit Card Transactions,29
+lieferadresse_periode_1,Customer Addresses,18
+lieferadresse_periode_2,Customer Addresses,18
+lieferadresse_periode_3,Customer Addresses,18
+lieferdienst_periode_1,Customer Addresses,18
+lieferdienst_periode_2,Customer Addresses,18
+lieferdienst_periode_3,Customer Addresses,18
+lieferung_periode_1,Retail Orders Management,12
+lieferung_periode_2,Retail Orders Management,12
+lieferung_periode_3,Retail Orders Management,12
+position_periode_1,Retail Management,11
+position_periode_2,Retail Management,11
+position_periode_3,Retail Management,11
+produkt_periode_1,Retail Management,11
+produkt_periode_2,Retail Management,11
+produkt_periode_3,Retail Management,11
+produktkategorie_periode_1,Retail Management,11
+produktkategorie_periode_2,Retail Management,11
+produktkategorie_periode_3,Retail Management,11
+ref_produkt_typ,Retail Management,11
+rs_bestellung_tag_1,Credit Card Transactions,29
+rs_bestellung_tag_2,Credit Card Transactions,29
+rs_bestellung_tag_3,Credit Card Transactions,29
+vereinspartner_periode_1,Retail Partnerships,36
+vereinspartner_periode_2,Retail Partnerships,36
+vereinspartner_periode_3,Retail Partnerships,36
+wohnort_periode_1,Customer Addresses,18
+wohnort_periode_2,Customer Addresses,18
+wohnort_periode_3,Customer Addresses,18
+admission_predict,Academic Records,2
+admission_predict_ver_1_1,Academic Records,2
+cost_analysis,Finance Management,17
+education_career_success,Academic Records,2
+personal_finance_tracker_dataset,Finance Management,17
+synthetic_personal_finance_dataset,Finance Management,17
+product,Inventory Management,6
+sales,outlier,-1
+brands,Inventory Management,6
+staffs,Human Resources,3
+stocks,Inventory Management,31
+stores,Health Records,0
+circuits,IoT Monitoring,10
+constructor_results,outlier,-1
+constructor_standings,outlier,-1
+constructors,outlier,-1
+driver_standings,Auto Racing,28
+drivers,Formula Racing History,23
+lap_times,Auto Racing,28
+pit_stops,Auto Racing,28
+qualifying,Auto Racing,28
+races,Formula Racing History,23
+results,Auto Racing,28
+seasons,Retail Orders Management,12
+sprint_results,Auto Racing,28
+status,Health Records,0
+award_winners,Sports Administration,1
+awards,Sports Administration,1
+bookings,Sports Administration,1
+confederations,Sports Administration,1
+goals,Sports Administration,1
+group_standings,Sports Administration,1
+groups,Sports Administration,1
+host_countries,Sports Administration,1
+manager_appearances,Sports Administration,1
+manager_appointments,Sports Administration,1
+managers,Sports Administration,1
+matches,Sports Administration,1
+penalty_kicks,Sports Administration,1
+player_appearances,Sports Administration,1
+players,Sports Administration,1
+qualified_teams,Sports Administration,1
+referee_appearances,Sports Administration,1
+referee_appointments,Sports Administration,1
+referees,Sports Administration,1
+squads,Sports Administration,1
+stadiums,Sports Administration,1
+substitutions,Sports Administration,1
+team_appearances,Sports Administration,1
+teams,Sports Administration,1
+tournament_stages,Sports Administration,1
+tournament_standings,Sports Administration,1
+tournaments,Sports Administration,1
+patients,Health Records,0
+departments,outlier,-1
+doctors,Health Records,0
+appointments,Health Records,0
+diagnoses,Health Records,0
+medications,Health Records,0
+prescriptions,Health Records,0
+dim_customer,Retail Management,15
+dim_product,Inventory Management,6
+dim_date,Retail Orders Management,12
+dim_store,Health Records,0
+fact_sales,Inventory Management,13
+fact_returns,Inventory Management,13
+student,Academic Records,2
+faculty,Academic Records,2
+course,Academic Records,2
+enrollment,Academic Records,2
+assignment,Academic Records,2
+submission,Academic Records,2
+citizen,Health Records,0
+permit,Health Records,0
+tax_record,Health Records,0
+address,Health Records,0
+vehicle,Vehicle Maintenance System,19
+airports,Airlines Operations,14
+airlines,Airlines Operations,14
+aircraft_types,Airlines Operations,14
+flights,Airlines Operations,14
+passengers,Shipping Logistics,32
+stations,Health Records,0
+train_types,Railway Operations,35
+trains,Railway Operations,35
+routes,Transport Management,27
+schedules,Railway Operations,35
+tickets,outlier,-1
+vessels,Airlines Operations,14
+ports,Shipping Logistics,32
+operators,Airlines Operations,14
+voyages,Airlines Operations,14
+cargo_manifests,Airlines Operations,14
+port_calls,Shipping Logistics,32
+road_segments,Transport Management,27
+intersections,Transport Management,27
+sensors,IoT Monitoring,10
+traffic_counts,Vehicle Maintenance System,19
+incidents,Health Research,8
+segment_connections,Transport Management,27
+cart_items,outlier,-1
+product_categories,Inventory Management,6
+wishlists,outlier,-1
+promotion_products,Insurance,7
+projects,Construction Management,38
+skills,Human Resources,3
+roles,Human Resources,3
+employee_skills,Human Resources,3
+project_assignments,Human Resources,3
+role_permissions,Human Resources,3
+salary_history,Human Resources,3
+team_members,Human Resources,33
+books,Book Literature,4
+authors,Book Literature,4
+members,Human Resources,33
+subjects,Book Literature,4
+book_authors,Book Literature,4
+book_subjects,Book Literature,4
+loans,Academic Records,2
+reading_lists,Human Resources,33
+membership_services,Event Management,21
+users,Customer Information Management,20
+posts,Content Management,26
+follows,Human Resources,33
+post_likes,outlier,-1
+group_members,Human Resources,33
+blocked_users,Customer Information Management,20
+user_badges,Customer Information Management,20
+warehouses,Health Records,0
+kits,Hotel Management,25
+stock_levels,Inventory Management,31
+kit_components,Hotel Management,25
+supplier_products,Inventory Management,6
+reorder_rules,Order Management,5
+warehouse_zones,Health Records,0
+subscribers,Customer Information Management,20
+plans,Health Records,0
+services,outlier,-1
+plan_features,Health Records,0
+bundle_items,outlier,-1
+roaming_partners,Retail Partnerships,36
+subscriber_services,Customer Information Management,20
+tariff_zones,Energy Territory Management,37
+accounts,Finance,34
+instruments,Human Resources,3
+account_holders,Finance,34
+portfolio_holdings,Inventory Management,31
+rate_cards,Insurance,7
+standing_orders,Order Management,5
+product_fees,Inventory Management,6
+events,Health Research,8
+speakers,Health Research,8
+registrations,Event Management,21
+topics,Book Literature,4
+venues,Health Records,0
+event_speakers,Health Research,8
+session_topics,Book Literature,4
+attendee_sessions,Event Management,21
+venue_capacities,Health Records,0
+sponsor_tiers,Insurance,7
+work_orders,Order Management,5
+components,Inventory Management,6
+work_order_ops,outlier,-1
+bill_of_materials,Inventory Management,6
+quality_inspections,Food Reviews,9
+labor_records,outlier,-1
+bom_requirements,Inventory Management,6
+bom_changes,Insurance,7
+students,Academic Records,2
+courses,Academic Records,2
+instructors,Academic Records,2
+enrollments,Academic Records,2
+course_assessments,Academic Records,2
+grade_appeals,Academic Records,2
+attendance,Academic Records,2
+submissions,Academic Records,2
+submission_feedback,Book Literature,4
+clients,Retail Management,15
+task_assignments,Human Resources,3
+project_phases,Construction Management,38
+time_logs,Event Management,21
+expense_claims,Insurance Claims,30
+phase_deliverables,Construction Management,38
+phase_reviews,Food Reviews,9
+transactions,Inventory Management,13
+sale_items,Inventory Management,13
+store_stock,Inventory Management,31
+item_returns,Inventory Management,13
+warranty_claims,Insurance Claims,30
+stock_movements,Inventory Management,31
+replenishment_orders,Order Management,5
+leagues,Sports Administration,1
+match_lineups,Sports Administration,1
+league_standings,Sports Administration,1
+player_events,Health Research,8
+player_stats,Sports Administration,1
+standing_changes,Sports Administration,1
+team_penalties,Sports Administration,1
+rooms,outlier,-1
+guests,Retail Management,15
+packages,Hotel Management,25
+amenities,Hotel Management,25
+rate_plan_rooms,Insurance,7
+amenity_packages,Hotel Management,25
+reservations,Event Management,21
+invoices,Event Management,21
+guest_package_items,Hotel Management,25
+package_charges,outlier,-1
+purchase_orders,Order Management,5
+po_lines,Inventory Management,13
+goods_receipts,Inventory Management,13
+invoice_lines,Inventory Management,13
+contract_prices,Inventory Management,6
+contract_amendments,Real Estate,16
+publications,Book Literature,4
+content_items,Content Management,26
+tags,Content Management,26
+publication_chapters,Book Literature,4
+content_tags,Content Management,26
+chapter_revisions,Book Literature,4
+chapter_comments,Book Literature,4
+tag_analytics,Content Management,26
+tag_suggestions,Food Reviews,9
+properties,Real Estate,16
+tenants,Real Estate,16
+agents,Human Resources,3
+leases,Real Estate,16
+property_features,Content Management,26
+lease_terms,Real Estate,16
+inspection_reports,Food Reviews,9
+maintenance_requests,Vehicle Maintenance System,19
+lease_payments,Real Estate,16
+lease_amendments,Real Estate,16
+trials,Health Records,0
+sites,Health Records,0
+investigators,Human Resources,3
+trial_arms,Health Records,0
+patient_visits,Health Records,0
+adverse_events,Health Research,8
+efficacy_measurements,Health Records,0
+lab_results,Health Records,0
+vital_signs,Health Records,0
+policies,Insurance,7
+claims,Insurance Claims,30
+coverage_tiers,Insurance,7
+claim_items,Insurance Claims,30
+policy_coverages,Insurance,7
+premium_adjustments,Insurance,7
+claim_payments,Insurance Claims,30
+claim_disputes,Insurance Claims,30
+territories,Health Records,0
+content_licenses,Energy Territory Management,37
+subscription_features,Customer Information Management,20
+playback_events,Health Research,8
+geo_restrictions,Energy Territory Management,37
+plan_usage,Health Records,0
+feature_feedback,Food Reviews,9
+vehicles,Vehicle Maintenance System,19
+depots,Health Records,0
+vehicle_maintenance,Vehicle Maintenance System,19
+route_assignments,Transport Management,27
+maintenance_parts,Vehicle Maintenance System,19
+maintenance_costs,Vehicle Maintenance System,19
+trip_records,Transport Management,27
+fuel_logs,Vehicle Maintenance System,19
+restaurants,Food Reviews,9
+couriers,Shipping Logistics,32
+menu_items,Food Reviews,9
+order_lines,Order Management,5
+item_reviews,Food Reviews,9
+promo_discounts,Insurance,7
+order_modifications,Order Management,5
+refund_lines,Inventory Management,13
+providers,Human Resources,3
+specialties,Human Resources,3
+clinics,Health Records,0
+provider_schedules,Railway Operations,35
+care_plans,Health Records,0
+appointment_bookings,Health Records,0
+session_notes,Event Management,21
+plan_tasks,Health Records,0
+plan_progress,Health Records,0
+devices,IoT Monitoring,10
+device_groups,IoT Monitoring,10
+rules,outlier,-1
+locations,Health Records,0
+device_sensors,IoT Monitoring,10
+alert_rules,IoT Monitoring,10
+sensor_readings,IoT Monitoring,10
+calibration_records,IoT Monitoring,10
+triggered_alerts,IoT Monitoring,10
+alert_resolutions,IoT Monitoring,10
